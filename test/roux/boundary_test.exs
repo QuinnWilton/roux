@@ -19,4 +19,13 @@ defmodule Roux.BoundaryTest do
       assert_boundary(boundary, modules: under(Roux.Telemetry), allow: [])
     end
   end
+
+  describe "Tier 1: Database" do
+    test "Roux.Database depends only on Intern, Revision, and Telemetry", %{boundary: boundary} do
+      assert_boundary(boundary,
+        modules: under(Roux.Database),
+        allow: [under(Roux.Intern), under(Roux.Revision), under(Roux.Telemetry)]
+      )
+    end
+  end
 end
