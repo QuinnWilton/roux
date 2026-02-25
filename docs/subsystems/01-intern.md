@@ -37,11 +37,11 @@ end
 # Intern a value, returning its ID. If already interned, returns existing ID.
 # Thread-safe: concurrent calls with the same value return the same ID.
 
-@spec resolve(t(), id()) :: term()
-# Resolve an ID back to its value. Raises on unknown ID.
+@spec resolve(t(), id()) :: {:ok, term()} | :error
+# Resolve an ID back to its value. Returns :error for unknown IDs.
 
 @spec resolve!(t(), id()) :: term()
-# Same as resolve/2 but raises with a clear error message.
+# Resolve an ID back to its value. Raises Roux.Intern.UnknownIdError on unknown ID.
 
 @spec lookup(t(), term()) :: {:ok, id()} | :error
 # Check if a value is already interned without interning it.
@@ -69,12 +69,14 @@ Two processes interning the same value concurrently:
 2. Process A does `:atomics.add_get(counter, 1, 1)` → gets ID 42
 3. Process B calls `intern(table, "foo")`
 4. Process B does `:atomics.add_get(counter, 1, 1)` → gets ID 43
-5. Process A does `ets.insert_new(forward, {"foo", 42})` → succeeds
-6. Process B does `ets.insert_new(forward, {"foo", 43})` → fails (already exists)
-7. Process B reads back `{"foo", 42}` from forward table, returns 42
-8. ID 43 is "wasted" — this is acceptable, IDs need not be contiguous
+5. Process A inserts `{42, "foo"}` into reverse, then `ets.insert_new(forward, {"foo", 42})` → succeeds
+6. Process B inserts `{43, "foo"}` into reverse, then `ets.insert_new(forward, {"foo", 43})` → fails
+7. Process B deletes `{43, "foo"}` from reverse (orphan cleanup), reads back `{"foo", 42}`, returns 42
+8. ID 43 is skipped — IDs need not be contiguous, but no orphaned reverse entries remain
 
-This is lock-free and correct. The wasted ID is harmless.
+The reverse insert happens before the forward CAS so that `resolve/2` is always
+consistent: the moment a value appears in the forward table, its ID is already
+resolvable. On CAS failure the losing process cleans up its reverse entry.
 
 ## Testing strategy
 
