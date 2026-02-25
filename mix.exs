@@ -38,6 +38,7 @@ defmodule Roux.MixProject do
 
   defp deps do
     [
+      {:telemetry, "~> 1.0"},
       {:assert_boundary, "~> 0.1.0", only: :test, runtime: false},
       {:concuerror,
        github: "QuinnWilton/Concuerror", only: :test, runtime: false, manager: :rebar3},
