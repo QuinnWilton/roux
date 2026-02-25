@@ -10,5 +10,9 @@ defmodule Roux.BoundaryTest do
     test "Roux.Intern has no Roux dependencies", %{boundary: boundary} do
       assert_boundary(boundary, modules: under(Roux.Intern), allow: [])
     end
+
+    test "Roux.Revision has no Roux dependencies", %{boundary: boundary} do
+      assert_boundary(boundary, modules: under(Roux.Revision), allow: [])
+    end
   end
 end
