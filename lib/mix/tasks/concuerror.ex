@@ -79,8 +79,10 @@ defmodule Mix.Tasks.Concuerror do
         bound_opts(opts) ++
         treat_as_normal_opts(opts)
 
-    # :concuerror.run/1 returns :ok | :error | :fail
-    case :concuerror.run(concuerror_opts) do
+    # :concuerror.run/1 returns :ok | :error | :fail.
+    # Called via apply/3 to avoid a compile-time reference — concuerror is
+    # a test-only dependency and isn't available in dev.
+    case apply(:concuerror, :run, [concuerror_opts]) do
       :ok ->
         Mix.shell().info("  passed")
         :ok
