@@ -16,7 +16,7 @@ None. This is a leaf subsystem.
 
 ```elixir
 defmodule Roux.Revision do
-  @type revision :: pos_integer()
+  @type revision :: non_neg_integer()
 
   @type durability :: :high | :medium | :low
 
