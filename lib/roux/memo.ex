@@ -13,7 +13,7 @@ defmodule Roux.Memo do
   alias Roux.Database
   alias Roux.Memo.Entry
 
-  @type query_key :: {query_name :: atom(), key :: term()}
+  @type query_key :: {query_name :: atom(), key :: term()} | {:input, atom(), term()}
 
   @type dependency :: query_key()
 
