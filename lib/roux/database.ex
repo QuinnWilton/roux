@@ -134,7 +134,8 @@ defmodule Roux.Database do
         :ok
 
       [] ->
-        tid = :ets.new(module, [:set, :public, write_concurrency: true])
+        tid =
+          :ets.new(module, [:set, :public, read_concurrency: true, write_concurrency: true])
 
         case :ets.insert_new(reg, {module, tid}) do
           true ->
