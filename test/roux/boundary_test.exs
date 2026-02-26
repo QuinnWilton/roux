@@ -37,4 +37,20 @@ defmodule Roux.BoundaryTest do
       )
     end
   end
+
+  describe "Tier 2: Input" do
+    test "Roux.Input depends only on Database, Revision, Memo, and Telemetry", %{
+      boundary: boundary
+    } do
+      assert_boundary(boundary,
+        modules: under(Roux.Input),
+        allow: [
+          under(Roux.Database),
+          under(Roux.Revision),
+          under(Roux.Memo),
+          under(Roux.Telemetry)
+        ]
+      )
+    end
+  end
 end

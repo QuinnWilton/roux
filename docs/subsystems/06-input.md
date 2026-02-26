@@ -11,7 +11,7 @@ Inputs are values provided from outside the computation — source file contents
 - `Roux.Database` — storage
 - `Roux.Revision` — revision counter and durability tracking
 - `Roux.Memo` — memo entries for input values
-- `Roux.Telemetry` — emits `[:roux, :input, :set]` events
+- `Roux.Telemetry` — emits `[:roux, :input, :set]` and `[:roux, :input, :delete]` events
 
 ## Key types
 
