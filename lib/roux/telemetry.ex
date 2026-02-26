@@ -32,6 +32,7 @@ defmodule Roux.Telemetry do
   ### Other operations
 
   - `[:roux, :input, :set]` — input value set or modified
+  - `[:roux, :input, :delete]` — input value removed
   - `[:roux, :cycle, :detected]` — dependency cycle detected
   - `[:roux, :cancel, :task]` — query task cancelled
   - `[:roux, :gc, :sweep]` — garbage collection sweep completed
@@ -171,6 +172,17 @@ defmodule Roux.Telemetry do
   @spec input_set(atom(), term(), non_neg_integer(), atom()) :: :ok
   def input_set(input_name, key, revision, durability) do
     event([:input, :set], %{}, %{
+      input_name: input_name,
+      key: key,
+      revision: revision,
+      durability: durability
+    })
+  end
+
+  @doc "Emits `[:roux, :input, :delete]`."
+  @spec input_delete(atom(), term(), non_neg_integer(), atom()) :: :ok
+  def input_delete(input_name, key, revision, durability) do
+    event([:input, :delete], %{}, %{
       input_name: input_name,
       key: key,
       revision: revision,

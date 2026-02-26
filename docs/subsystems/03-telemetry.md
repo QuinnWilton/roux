@@ -43,6 +43,7 @@ All events are prefixed with `[:roux, ...]`.
 | Event | Measurements | Metadata |
 |-------|-------------|----------|
 | `[:roux, :input, :set]` | — | `input_name`, `key`, `revision`, `durability` |
+| `[:roux, :input, :delete]` | — | `input_name`, `key`, `revision`, `durability` |
 | `[:roux, :cycle, :detected]` | — | `query_name`, `key`, `stack` |
 | `[:roux, :cancel, :task]` | — | `query_name`, `key`, `reason` |
 | `[:roux, :gc, :sweep]` | `duration`, `entries_removed` | `revision` |
