@@ -28,4 +28,13 @@ defmodule Roux.BoundaryTest do
       )
     end
   end
+
+  describe "Tier 1: Memo" do
+    test "Roux.Memo depends only on Database", %{boundary: boundary} do
+      assert_boundary(boundary,
+        modules: under(Roux.Memo),
+        allow: [under(Roux.Database)]
+      )
+    end
+  end
 end
