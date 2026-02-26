@@ -55,18 +55,9 @@ defmodule Roux.Memo do
   """
   @spec update_verified(Database.t(), query_key(), Roux.Revision.revision()) :: :ok
   def update_verified(%Database{memo_table: table}, key, revision) do
-    # Body uses {:const, key} because tuple keys would otherwise be
-    # interpreted as match spec function calls. The head is fine — tuples
-    # in the head are literal patterns.
-    match_spec = [
-      {
-        {key, :"$2", :"$3", :"$4", :_, :"$6", :"$7", :"$8"},
-        [],
-        [{{{:const, key}, :"$2", :"$3", :"$4", revision, :"$6", :"$7", :"$8"}}]
-      }
-    ]
-
-    :ets.select_replace(table, match_spec)
+    # Atomically update only verified_at (position 5 in the ETS tuple).
+    # No-op if no entry exists for this key.
+    :ets.update_element(table, key, {5, revision})
     :ok
   end
 
