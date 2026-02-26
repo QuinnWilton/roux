@@ -53,4 +53,13 @@ defmodule Roux.BoundaryTest do
       )
     end
   end
+
+  describe "Tier 2: Query" do
+    test "Roux.Query depends only on Database", %{boundary: boundary} do
+      assert_boundary(boundary,
+        modules: under(Roux.Query),
+        allow: [under(Roux.Database)]
+      )
+    end
+  end
 end
