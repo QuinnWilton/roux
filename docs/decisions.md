@@ -144,6 +144,14 @@ The only case where the framework must be involved is fan-out within a query bod
 
 **Rule**: When implementing a new subsystem, add its `assert_boundary` assertion before writing any module code. The test should fail (no modules yet), then pass once the subsystem is implemented with correct dependencies.
 
+## D17: One module per file
+
+**Decision**: Every module gets its own file, located at the path matching its namespace. `Roux.Memo.Entry` lives at `lib/roux/memo/entry.ex`, not inside `lib/roux/memo.ex`.
+
+**Rationale**: Predictability — given a module name, the file path is mechanically derivable (and vice versa). This removes the need to search for where a module is defined. It also prevents compilation ordering issues: when two modules share a file and one references the other's struct, Elixir may fail to compile because the struct's module isn't defined yet. Separate files let the compiler resolve dependencies naturally.
+
+**Exception**: None. Even small modules like `defexception` types get their own file.
+
 ## D11: Concuerror for concurrency correctness
 
 **Decision**: Use Concuerror for exhaustive interleaving exploration of focused concurrent scenarios. Use StreamData for randomized concurrent integration properties.
