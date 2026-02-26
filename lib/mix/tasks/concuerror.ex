@@ -68,6 +68,8 @@ defmodule Mix.Tasks.Concuerror do
       |> Path.join("lib/*/ebin")
       |> Path.wildcard()
 
+    module_opts = module_concuerror_options(module)
+
     concuerror_opts =
       [
         {:module, module},
@@ -77,7 +79,7 @@ defmodule Mix.Tasks.Concuerror do
         Enum.map(pa_paths, &{:pa, to_charlist(&1)}) ++
         dpor_opts(opts) ++
         bound_opts(opts) ++
-        treat_as_normal_opts(opts)
+        treat_as_normal_opts(opts, module_opts)
 
     # :concuerror.run/1 returns :ok | :error | :fail.
     # Called via apply/3 to avoid a compile-time reference — concuerror is
@@ -111,10 +113,30 @@ defmodule Mix.Tasks.Concuerror do
     end
   end
 
-  defp treat_as_normal_opts(opts) do
-    opts
-    |> Keyword.get_values(:treat_as_normal)
-    |> Enum.map(&{:treat_as_normal, String.to_atom(&1)})
+  defp treat_as_normal_opts(opts, module_opts) do
+    from_cli =
+      opts
+      |> Keyword.get_values(:treat_as_normal)
+      |> Enum.map(&String.to_atom/1)
+
+    from_module = Keyword.get(module_opts, :treat_as_normal, [])
+
+    reasons = Enum.uniq(from_cli ++ from_module)
+
+    case reasons do
+      [] -> []
+      _ -> [{:treat_as_normal, reasons}]
+    end
+  end
+
+  defp module_concuerror_options(module) do
+    Code.ensure_loaded(module)
+
+    if function_exported?(module, :concuerror_options, 0) do
+      module.concuerror_options()
+    else
+      []
+    end
   end
 
   defp discover_modules do

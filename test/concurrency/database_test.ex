@@ -17,6 +17,8 @@ defmodule Roux.Concurrency.DatabaseWriteDuringCrashTest do
   accessible during ownership transfers.
   """
 
+  def concuerror_options, do: [treat_as_normal: [:killed]]
+
   def test do
     parent = self()
     heir = spawn(fn -> heir_loop() end)
@@ -69,6 +71,8 @@ defmodule Roux.Concurrency.DatabaseReclaimRaceTest do
   the real protocol where the supervisor only starts a new TableOwner after
   the old one exits.
   """
+
+  def concuerror_options, do: [treat_as_normal: [:killed]]
 
   def test do
     heir = spawn(fn -> heir_loop(%{}) end)
