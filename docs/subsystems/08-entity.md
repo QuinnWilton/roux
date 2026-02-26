@@ -21,11 +21,17 @@ See decision [D5](../decisions.md) for the behaviour-based metadata approach.
 
 @type field_entry :: %{
   value: term(),
+  hash: integer(),
   changed_at: Roux.Revision.revision()
 }
 
-# ETS row: {entity_id, %{field_name => field_entry}}
+# ETS row: {entity_id, %{field_name => field_entry}, refcount}
 ```
+
+The `hash` field stores `:erlang.phash2/1` of the value for fast inequality
+pre-check during field comparison (see [D8](../decisions.md)). The `refcount`
+field tracks how many queries include this entity in their output set (see
+[D15](../decisions.md)).
 
 ## Entity definition
 
@@ -110,7 +116,7 @@ entity_id = lookup(db, MyLang.Function, {:foo})
 
 ## Implementation notes
 
-- Entity tables are per-type ETS `:set` tables with `read_concurrency: true`.
+- Entity tables are per-type ETS `:set` tables with `read_concurrency: true` and `write_concurrency: true`.
 - Entity creation during query execution is buffered in the context, like all writes.
 - Identity keys are interned using a per-entity-type intern table.
 - Field comparison uses the same hash pre-check as memo entries (see [D8](../decisions.md)).

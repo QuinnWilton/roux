@@ -62,4 +62,13 @@ defmodule Roux.BoundaryTest do
       )
     end
   end
+
+  describe "Tier 2: Entity" do
+    test "Roux.Entity depends only on Database and Intern", %{boundary: boundary} do
+      assert_boundary(boundary,
+        modules: under(Roux.Entity),
+        allow: [under(Roux.Database), under(Roux.Intern)]
+      )
+    end
+  end
 end
