@@ -61,8 +61,9 @@ end
 @spec delete_all(Roux.Database.t()) :: :ok
 # Clear all memo entries. Called on database reset.
 
-@spec entries(Roux.Database.t()) :: [entry()]
-# Return all memo entries. Used for debugging and GC sweeps.
+@spec entries(Roux.Database.t()) :: [{query_key(), entry()}]
+# Return all memo entries with their keys. Used for debugging and GC sweeps.
+# Includes the key so callers (e.g. GC) can identify entries for deletion.
 ```
 
 ## ETS layout
