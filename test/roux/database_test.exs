@@ -87,10 +87,15 @@ defmodule Roux.DatabaseTest do
       assert [{:my_query, ^definition}] = :ets.lookup(db.query_registry, :my_query)
     end
 
-    test "overwrites on re-registration", %{db: db} do
+    test "raises on duplicate registration", %{db: db} do
       Database.register_query(db, :q, %{v: 1})
-      Database.register_query(db, :q, %{v: 2})
-      assert [{:q, %{v: 2}}] = :ets.lookup(db.query_registry, :q)
+
+      assert_raise ArgumentError, ~r/already registered/, fn ->
+        Database.register_query(db, :q, %{v: 2})
+      end
+
+      # Original definition is preserved.
+      assert [{:q, %{v: 1}}] = :ets.lookup(db.query_registry, :q)
     end
   end
 
