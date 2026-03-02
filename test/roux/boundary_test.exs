@@ -71,4 +71,20 @@ defmodule Roux.BoundaryTest do
       )
     end
   end
+
+  describe "Tier 2: Validation" do
+    test "Roux.Validation depends only on Database, Memo, Revision, and Telemetry", %{
+      boundary: boundary
+    } do
+      assert_boundary(boundary,
+        modules: under(Roux.Validation),
+        allow: [
+          under(Roux.Database),
+          under(Roux.Memo),
+          under(Roux.Revision),
+          under(Roux.Telemetry)
+        ]
+      )
+    end
+  end
 end
