@@ -11,6 +11,7 @@ The validation algorithm determines whether a cached memo entry is still valid b
 - `Roux.Database` — table references
 - `Roux.Memo` — memo entry reads and updates
 - `Roux.Revision` — revision counter and durability checks
+- `Roux.Telemetry` — validation lifecycle events and durability skip reporting
 
 Notably, Validation does **not** depend on Runtime. See [D13](../decisions.md).
 
@@ -40,15 +41,20 @@ This implements the algorithm from the design document (section 3.2), with the d
 
 ```
 validate(db, query_key, ensure_fn):
+  current_rev = Revision.current(db.revision)
+  emit [:roux, :validation, :start]
+  start_time = monotonic_time()
+
   entry = Memo.get(db, query_key)
 
   # Case 1: no memo exists
   if entry == :miss:
+    emit [:roux, :validation, :stop] with duration, result: :stale
     return :stale
 
   # Case 2: already validated this revision
-  current_rev = Revision.current(db.revision)
   if entry.verified_at == current_rev:
+    emit [:roux, :validation, :stop] with duration, result: :valid
     return :valid
 
   # Case 3: durability optimization
@@ -57,6 +63,7 @@ validate(db, query_key, ensure_fn):
   if Revision.last_changed_at_or_below(db.revision, entry.durability) <= entry.verified_at:
     Memo.update_verified(db, query_key, current_rev)
     emit [:roux, :validation, :durability_skip]
+    emit [:roux, :validation, :stop] with duration, result: :valid
     return :valid
 
   # Case 4: walk dependencies
@@ -64,15 +71,27 @@ validate(db, query_key, ensure_fn):
     ensure_fn.(db, dep)  # callback: make this dep current
     dep_entry = Memo.get(db, dep)
 
+    # Dep removed after ensure_fn (should not happen in practice) — stale.
+    if dep_entry == :miss:
+      emit [:roux, :validation, :stop] with duration, result: :stale
+      return :stale
+
     if dep_entry.changed_at > entry.verified_at:
       # This dependency's value changed since we last validated.
       # Our memo is stale — we need to re-execute.
+      emit [:roux, :validation, :stop] with duration, result: :stale
       return :stale
 
   # All dependencies checked, none changed.
   Memo.update_verified(db, query_key, current_rev)
+  emit [:roux, :validation, :stop] with duration, result: :valid
   return :valid
 ```
+
+Note: `current_rev` is read before the memo lookup so it is available for
+the `validation_start` telemetry event. This is conservative — if a
+revision advances between reading `current_rev` and the memo lookup, the
+worst case is a spurious re-validation (correct, never incorrect).
 
 ## How Runtime provides the callback
 
@@ -168,33 +187,34 @@ The `last_changed_at_or_below/2` function on Revision returns the max revision a
 ## Testing strategy
 
 ### Unit tests
-- Query with unchanged dependencies validates as `:valid`
-- Query with changed dependency validates as `:stale`
-- Query with changed dependency but early cutoff validates as `:valid`
-- Durability skip: high-durability query skips validation when only low inputs changed
-- Transitive validation: A → B → C, change C, validate A triggers validation of B and C
-- Already validated this revision: returns `:valid` immediately
+- Case 1: no memo → `:stale`
+- Case 2: `verified_at == current_rev` → `:valid`, `ensure_fn` not called
+- Case 3: durability skip → `:valid`, `verified_at` updated
+- Case 3 negative: durability skip does not fire when same-level inputs changed
+- Case 4a: dep `changed_at > verified_at` → `:stale`
+- Case 4b: all deps unchanged → `:valid`, `verified_at` updated
+- Case 4c: early cutoff — dep re-executed but `changed_at` stayed old → `:valid`
+- No dependencies → `:valid`
+- Transitive: A→B→C, unchanged chain validates as `:valid`
+- Transitive: A→B→C, C changed propagates staleness through B to A
+- `ensure_fn` called for each dep in dependency list order
+- Short-circuit: first dep stale → second dep's `ensure_fn` NOT called
+- `verified_at` updated to `current_rev` after successful validation
+- `verified_at` unchanged on `:stale` result
+- Input query keys (`{:input, name, key}`) work correctly
 
 ### Property tests
 
-**The critical correctness property**: for any sequence of input changes and query requests, the incremental result equals the batch (non-incremental) result.
+**Staleness correctness**: generate random dependency sets with random `changed_at` / `verified_at` values. Assert validation result matches brute-force "any dep changed?" check. Durability skip is excluded by using `:low` durability and advancing all revisions via `:low`.
 
-Formalized:
-1. Generate a random DAG of queries with random computation functions.
-2. Set random inputs.
-3. Compute all queries (populating memos).
-4. Change random inputs.
-5. Compute all queries incrementally (using validation + selective re-execution).
-6. Compute all queries from scratch (clearing all memos first).
-7. Assert: incremental results == from-scratch results.
+**Durability precondition verification**: generate random dependency sets with `:high` durability while advancing all revisions via `:low`. Assert the durability skip fires and verify the skip precondition (`last_changed_at_or_below(:high) <= verified_at`) holds.
 
-This is the single most important test in the entire framework.
+**The critical correctness property** (deferred — needs Runtime): for any sequence of input changes and query requests, the incremental result equals the batch (non-incremental) result. This is the single most important test in the entire framework.
 
 ### Stress tests
-- Deep dependency chains (100+ levels)
-- Wide dependency fans (query depends on 100+ inputs)
-- Diamond patterns (A → B, A → C, B → D, C → D)
-- Rapid input changes during validation
+- Deep dependency chains (150 levels) — validates without stack overflow
+- Wide dependency fans (200 deps) — correct staleness detection
+- Diamond patterns (A → B, A → C, B → D, C → D) — validates correctly with shared deps
 
 ### Concurrent convergence property (StreamData)
 
