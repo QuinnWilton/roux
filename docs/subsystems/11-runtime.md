@@ -10,12 +10,14 @@ See decision [D3](../decisions.md) for the Task-per-invocation model.
 
 ## Dependencies
 
-- `Roux.Database` — table references
+- `Roux.Database` — table references, query and input registry lookups
 - `Roux.Memo` — memo entry storage
-- `Roux.Query` — query definitions
+- `Roux.Input` — reading input values via `input/3`
+- `Roux.Revision` — current revision reads
 - `Roux.Validation` — staleness checks (one-way: Runtime calls Validation, see [D13](../decisions.md))
 - `Roux.Telemetry` — query lifecycle events
 - `Roux.Cycle` — cycle detection
+- `Roux.Runtime.Context` — threaded context struct for query execution state
 
 ## Key types
 
@@ -208,9 +210,10 @@ The flush is NOT truly atomic (ETS doesn't support multi-key transactions), but 
 
 ## Implementation notes
 
-- The `db` parameter passed to query functions is conceptually the database handle, but during execution it carries the active context. The `defquery` macro wraps this so the user sees `db` but the runtime sees the context.
-- `query/3` inside a query body executes inline (same process), building up the dependency list. Deeply nested query chains run in a single process.
+- The `db` parameter is the database handle — it is NOT the context carrier. Runtime uses the process dictionary (`{Roux.Runtime, :context}`) to thread the `Context` struct through query execution. This is an internal implementation detail; users only see the `db` parameter. The process dictionary is used because `execute/4` needs to save/restore context across nested calls without threading it through user-facing `query_fun` callbacks. This is a pragmatic deviation from D1's "explicit `db` parameter" — `db` is still threaded for users, but the internal execution context is process-local.
+- `query/3` inside a query body dispatches inline (same process) to the registered defquery wrapper, which calls `execute/4`. Dependency recording and durability propagation happen in `execute/4`, not `query/3`, to avoid double-recording.
 - `parallel/2` is the only place the framework spawns tasks during query execution. Sub-task contexts are initialized with the parent's query stack but empty dep/entity lists. Results are merged on join.
+- During validation, `re_execute/2` needs the query function to re-run stale queries. It checks the process dictionary first (populated by `execute/4` for closure-based queries) then falls back to the query registry.
 
 ## Testing strategy
 
