@@ -72,6 +72,15 @@ defmodule Roux.BoundaryTest do
     end
   end
 
+  describe "Tier 2: Cycle" do
+    test "Roux.Cycle depends only on Runtime.Context", %{boundary: boundary} do
+      assert_boundary(boundary,
+        modules: under(Roux.Cycle),
+        allow: [under(Roux.Runtime.Context)]
+      )
+    end
+  end
+
   describe "Tier 2: Validation" do
     test "Roux.Validation depends only on Database, Memo, Revision, and Telemetry", %{
       boundary: boundary
