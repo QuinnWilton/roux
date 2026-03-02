@@ -96,4 +96,25 @@ defmodule Roux.BoundaryTest do
       )
     end
   end
+
+  describe "Tier 3: Runtime" do
+    test "Roux.Runtime depends only on Database, Memo, Input, Validation, Telemetry, and Cycle",
+         %{
+           boundary: boundary
+         } do
+      assert_boundary(boundary,
+        modules: [Roux.Runtime],
+        allow: [
+          under(Roux.Database),
+          under(Roux.Memo),
+          under(Roux.Input),
+          under(Roux.Validation),
+          under(Roux.Telemetry),
+          under(Roux.Cycle),
+          under(Roux.Runtime.Context),
+          under(Roux.Revision)
+        ]
+      )
+    end
+  end
 end
