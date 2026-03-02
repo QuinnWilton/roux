@@ -1,6 +1,6 @@
 # Subsystem: Cycle detection
 
-Module: `Roux.Cycle`
+Modules: `Roux.Cycle`, `Roux.Cycle.Error`, `Roux.Runtime.Context`
 
 ## Purpose
 
@@ -22,17 +22,17 @@ Note: `Roux.Runtime.Context` is a plain struct definition with no behavioral dep
 @spec check!(Roux.Runtime.Context.t(), Roux.Memo.query_key()) :: :ok
 # Check if the given query is already on the active stack.
 # If not, returns :ok (no cycle).
-# If yes, raises Roux.CycleError with the cycle path.
+# If yes, raises Roux.Cycle.Error with the cycle path.
 
 @spec check(Roux.Runtime.Context.t(), Roux.Memo.query_key()) ::
         :ok | {:cycle, [Roux.Memo.query_key()]}
 # Non-raising variant. Returns the cycle path if detected.
 ```
 
-## CycleError
+## Roux.Cycle.Error
 
 ```elixir
-defmodule Roux.CycleError do
+defmodule Roux.Cycle.Error do
   defexception [:cycle]
 
   # cycle is a list of query_keys forming the cycle,
@@ -40,11 +40,15 @@ defmodule Roux.CycleError do
 
   @impl true
   def message(%{cycle: cycle}) do
-    path = cycle |> Enum.map(&inspect/1) |> Enum.join(" → ")
-    "Cycle detected in query graph: #{path}"
+    path = Enum.map_join(cycle, " → ", &inspect/1)
+    "cycle detected in query graph: #{path}"
   end
 end
 ```
+
+Naming follows the codebase convention of nesting exceptions under their
+parent module (cf. `Roux.Input.NotSetError`), with one module per file at
+`lib/roux/cycle/error.ex` per D17.
 
 ## Detection mechanism
 
@@ -85,12 +89,18 @@ When fixed-point iteration is implemented, `check!/2` would return a **provision
 ## Testing strategy
 
 ### Unit tests
-- No cycle: query A → query B → query C (no error)
-- Direct cycle: query A → query A (raises CycleError)
-- Indirect cycle: query A → query B → query A (raises CycleError)
-- Error message includes the full cycle path
-- Non-raising variant returns the cycle path
+- Empty stack returns `:ok`
+- Query not on stack returns `:ok`
+- Direct self-cycle: stack `[A]`, check `A` → `{:cycle, [A, A]}`
+- Indirect cycle: stack `[A, B]`, check `A` → `{:cycle, [A, B, A]}`
+- Cycle in middle of stack: stack `[D, A, B]`, check `A` → `{:cycle, [A, B, A]}` (skips `D`)
+- Long indirect cycle through 4 queries
+- Input query keys (`{:input, name, key}`) handled correctly
+- `check!/2` returns `:ok` when no cycle
+- `check!/2` raises `Roux.Cycle.Error` on direct and indirect cycles
+- Error message includes the full cycle path with `→` arrows
+- Error message handles direct cycle (2-element path)
 
-### Integration tests
-- Define queries that form a cycle, execute, verify CycleError is raised
+### Integration tests (deferred — needs Runtime)
+- Define queries that form a cycle, execute, verify `Roux.Cycle.Error` is raised
 - Cycle error message is clear and actionable
