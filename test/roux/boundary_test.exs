@@ -133,4 +133,21 @@ defmodule Roux.BoundaryTest do
       )
     end
   end
+
+  describe "Tier 3: GC" do
+    test "Roux.GC depends only on Database, Memo, Entity, Revision, and Telemetry", %{
+      boundary: boundary
+    } do
+      assert_boundary(boundary,
+        modules: under(Roux.GC),
+        allow: [
+          under(Roux.Database),
+          under(Roux.Memo),
+          under(Roux.Entity),
+          under(Roux.Revision),
+          under(Roux.Telemetry)
+        ]
+      )
+    end
+  end
 end
