@@ -112,7 +112,23 @@ defmodule Roux.BoundaryTest do
           under(Roux.Telemetry),
           under(Roux.Cycle),
           under(Roux.Runtime.Context),
-          under(Roux.Revision)
+          under(Roux.Revision),
+          under(Roux.Cancellation)
+        ]
+      )
+    end
+  end
+
+  describe "Tier 3: Cancellation" do
+    test "Roux.Cancellation depends only on Database, Memo, and Telemetry", %{
+      boundary: boundary
+    } do
+      assert_boundary(boundary,
+        modules: under(Roux.Cancellation),
+        allow: [
+          under(Roux.Database),
+          under(Roux.Memo),
+          under(Roux.Telemetry)
         ]
       )
     end
