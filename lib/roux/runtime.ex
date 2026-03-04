@@ -23,7 +23,7 @@ defmodule Roux.Runtime do
   See D3, D13, D14 for design rationale.
   """
 
-  alias Roux.{Cycle, Database, Memo, Revision, Telemetry, Validation}
+  alias Roux.{Cancellation, Cycle, Database, Memo, Revision, Telemetry, Validation}
   alias Roux.Memo.Entry
   alias Roux.Runtime.Context
 
@@ -198,6 +198,8 @@ defmodule Roux.Runtime do
 
     case claim_dedup(db, query_key) do
       :claimed ->
+        Cancellation.register_task(db, query_key, self())
+
         try do
           do_compute(
             db,
@@ -210,6 +212,7 @@ defmodule Roux.Runtime do
             parent_stack
           )
         after
+          Cancellation.unregister_task(db, query_key)
           :ets.delete(db.dedup_table, query_key)
         end
 
