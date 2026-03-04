@@ -113,7 +113,8 @@ defmodule Roux.BoundaryTest do
           under(Roux.Cycle),
           under(Roux.Runtime.Context),
           under(Roux.Revision),
-          under(Roux.Cancellation)
+          under(Roux.Cancellation),
+          under(Roux.GC)
         ]
       )
     end

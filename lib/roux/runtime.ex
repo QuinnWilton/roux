@@ -23,7 +23,7 @@ defmodule Roux.Runtime do
   See D3, D13, D14 for design rationale.
   """
 
-  alias Roux.{Cancellation, Cycle, Database, Memo, Revision, Telemetry, Validation}
+  alias Roux.{Cancellation, Cycle, Database, GC, Memo, Revision, Telemetry, Validation}
   alias Roux.Memo.Entry
   alias Roux.Runtime.Context
 
@@ -267,6 +267,11 @@ defmodule Roux.Runtime do
       }
 
       Memo.put(db, query_key, entry)
+
+      # Update entity refcounts for the output entity diff (D15).
+      old_entities = if old_entry, do: old_entry.output_entities, else: []
+      GC.sweep_query(db, query_key, old_entities, entry.output_entities)
+
       Telemetry.query_stop(query_name, key, current_rev, duration, hash)
 
       value
