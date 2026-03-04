@@ -251,6 +251,32 @@ defmodule Roux.Entity do
     refcount(db, module, entity_id) > 0
   end
 
+  @doc """
+  Returns all entity rows for a registered entity type.
+
+  Used by manifest serialization. Returns raw ETS rows as a list of
+  `{entity_id, fields_map, refcount}` tuples.
+  """
+  @spec snapshot(Database.t(), module()) :: list()
+  def snapshot(%Database{} = db, module) when is_atom(module) do
+    table = entity_table!(db, module)
+    :ets.tab2list(table)
+  end
+
+  @doc """
+  Bulk-inserts entity rows for a registered entity type.
+
+  Used by manifest restore. Registers the entity type if not already
+  registered, then inserts all rows.
+  """
+  @spec restore(Database.t(), module(), list()) :: :ok
+  def restore(%Database{} = db, module, rows) when is_atom(module) and is_list(rows) do
+    Database.register_entity(db, module)
+    table = entity_table!(db, module)
+    :ets.insert(table, rows)
+    :ok
+  end
+
   # -- Private ----------------------------------------------------------------
 
   # Looks up the per-type ETS table from the entity registry.

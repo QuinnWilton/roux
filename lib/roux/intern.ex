@@ -126,6 +126,33 @@ defmodule Roux.Intern do
   end
 
   @doc """
+  Captures the current state of both ETS tables and the counter for
+  manifest persistence.
+  """
+  @spec snapshot(t()) :: %{forward: list(), reverse: list(), counter: non_neg_integer()}
+  def snapshot(%__MODULE__{} = table) do
+    %{
+      forward: :ets.tab2list(table.forward),
+      reverse: :ets.tab2list(table.reverse),
+      counter: :atomics.get(table.counter, 1)
+    }
+  end
+
+  @doc """
+  Restores ETS tables and counter from a snapshot produced by `snapshot/1`.
+
+  Used during manifest loading. The caller must ensure the tables are empty
+  or freshly created.
+  """
+  @spec restore(t(), %{forward: list(), reverse: list(), counter: non_neg_integer()}) :: :ok
+  def restore(%__MODULE__{} = table, data) do
+    :ets.insert(table.forward, data.forward)
+    :ets.insert(table.reverse, data.reverse)
+    :atomics.put(table.counter, 1, data.counter)
+    :ok
+  end
+
+  @doc """
   Deletes both ETS tables. Called during database shutdown.
   """
   @spec destroy(t()) :: :ok

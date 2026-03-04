@@ -116,6 +116,42 @@ defmodule Roux.Revision do
     max(high, max(medium, low))
   end
 
+  @doc """
+  Captures the current state of all atomics for manifest persistence.
+
+  Returns a plain map that can be serialized with `:erlang.term_to_binary/1`.
+  """
+  @spec snapshot(t()) :: %{
+          counter: revision(),
+          high: revision(),
+          medium: revision(),
+          low: revision()
+        }
+  def snapshot(%__MODULE__{counter: counter, durability: durability}) do
+    %{
+      counter: :atomics.get(counter, 1),
+      high: :atomics.get(durability, @high_slot),
+      medium: :atomics.get(durability, @medium_slot),
+      low: :atomics.get(durability, @low_slot)
+    }
+  end
+
+  @doc """
+  Restores atomics state from a snapshot produced by `snapshot/1`.
+
+  Used during manifest loading to resume the revision timeline across
+  VM restarts.
+  """
+  @spec restore(t(), %{counter: revision(), high: revision(), medium: revision(), low: revision()}) ::
+          :ok
+  def restore(%__MODULE__{counter: counter, durability: durability}, state) do
+    :atomics.put(counter, 1, state.counter)
+    :atomics.put(durability, @high_slot, state.high)
+    :atomics.put(durability, @medium_slot, state.medium)
+    :atomics.put(durability, @low_slot, state.low)
+    :ok
+  end
+
   defp slot(:high), do: @high_slot
   defp slot(:medium), do: @medium_slot
   defp slot(:low), do: @low_slot

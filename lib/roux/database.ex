@@ -184,6 +184,26 @@ defmodule Roux.Database do
   @spec revision(t()) :: Revision.t()
   def revision(%__MODULE__{revision: rev}), do: rev
 
+  @doc """
+  Returns all registered entity type modules.
+  """
+  @spec entity_types(t()) :: [module()]
+  def entity_types(%__MODULE__{entity_registry: reg}) do
+    reg
+    |> :ets.tab2list()
+    |> Enum.map(fn {module, _tid} -> module end)
+  end
+
+  @doc """
+  Returns the names of all intern tables that have been created.
+  """
+  @spec intern_table_names(t()) :: [atom()]
+  def intern_table_names(%__MODULE__{intern_registry: reg}) do
+    reg
+    |> :ets.tab2list()
+    |> Enum.map(fn {name, _intern} -> name end)
+  end
+
   # -- Private --
 
   defp find_table_owner(sup_pid) do

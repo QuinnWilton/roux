@@ -92,6 +92,19 @@ defmodule Roux.Memo do
     |> Enum.map(fn tuple -> {elem(tuple, 0), to_entry(tuple)} end)
   end
 
+  @doc """
+  Bulk-inserts memo entries from a list of `{query_key, entry}` pairs.
+
+  Used by manifest restore to repopulate the memo table from serialized
+  state. Overwrites any existing entries with the same keys.
+  """
+  @spec restore(Database.t(), [{query_key(), Entry.t()}]) :: :ok
+  def restore(%Database{memo_table: table}, entries) when is_list(entries) do
+    tuples = Enum.map(entries, fn {key, entry} -> to_tuple(key, entry) end)
+    :ets.insert(table, tuples)
+    :ok
+  end
+
   # -- Private helpers --
 
   defp to_tuple(key, %Entry{} = e) do
