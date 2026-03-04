@@ -151,4 +151,17 @@ defmodule Roux.BoundaryTest do
       )
     end
   end
+
+  describe "Tier 4: Lang" do
+    test "Roux.Lang depends only on Database, Input, and Query", %{boundary: boundary} do
+      assert_boundary(boundary,
+        modules: under(Roux.Lang),
+        allow: [
+          under(Roux.Database),
+          under(Roux.Input),
+          under(Roux.Query)
+        ]
+      )
+    end
+  end
 end
