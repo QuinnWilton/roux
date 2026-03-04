@@ -211,11 +211,18 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :gc, :sweep]`."
-  @spec gc_sweep(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
-  def gc_sweep(duration, entries_removed, revision) do
-    event([:gc, :sweep], %{duration: duration, entries_removed: entries_removed}, %{
-      revision: revision
-    })
+  @spec gc_sweep(non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+          :ok
+  def gc_sweep(duration, memo_entries_removed, entities_removed, revision) do
+    event(
+      [:gc, :sweep],
+      %{
+        duration: duration,
+        memo_entries_removed: memo_entries_removed,
+        entities_removed: entities_removed
+      },
+      %{revision: revision}
+    )
   end
 
   @doc "Emits `[:roux, :intern, :new]`."

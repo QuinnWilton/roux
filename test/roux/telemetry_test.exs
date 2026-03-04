@@ -215,16 +215,21 @@ defmodule Roux.TelemetryTest do
     end
   end
 
-  describe "gc_sweep/3" do
+  describe "gc_sweep/4" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :gc, :sweep], ctx.test_pid)
-      Telemetry.gc_sweep(5000, 42, 10)
+      Telemetry.gc_sweep(5000, 42, 3, 10)
 
       {measurements, _metadata} =
-        assert_event([:roux, :gc, :sweep], [:duration, :entries_removed], [:revision])
+        assert_event(
+          [:roux, :gc, :sweep],
+          [:duration, :memo_entries_removed, :entities_removed],
+          [:revision]
+        )
 
       assert measurements.duration == 5000
-      assert measurements.entries_removed == 42
+      assert measurements.memo_entries_removed == 42
+      assert measurements.entities_removed == 3
     end
   end
 
