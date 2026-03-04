@@ -155,11 +155,39 @@ defmodule Roux.BoundaryTest do
   describe "Tier 4: Lang" do
     test "Roux.Lang depends only on Database, Input, and Query", %{boundary: boundary} do
       assert_boundary(boundary,
-        modules: under(Roux.Lang),
+        modules: [Roux.Lang],
         allow: [
           under(Roux.Database),
           under(Roux.Input),
           under(Roux.Query)
+        ]
+      )
+    end
+  end
+
+  describe "Tier 5: Compiler" do
+    test "Roux.Lang.Compiler depends only on Lang, Database, Input, and GC", %{
+      boundary: boundary
+    } do
+      assert_boundary(boundary,
+        modules: [Roux.Lang.Compiler],
+        allow: [under(Roux.Lang), under(Roux.Database), under(Roux.Input), under(Roux.GC)]
+      )
+    end
+  end
+
+  describe "Tier 5: Manifest" do
+    test "Roux.Lang.Manifest depends only on Database, Memo, Entity, Intern, and Revision", %{
+      boundary: boundary
+    } do
+      assert_boundary(boundary,
+        modules: [Roux.Lang.Manifest],
+        allow: [
+          under(Roux.Database),
+          under(Roux.Memo),
+          under(Roux.Entity),
+          under(Roux.Intern),
+          under(Roux.Revision)
         ]
       )
     end
