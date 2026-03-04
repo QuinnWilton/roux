@@ -365,7 +365,7 @@ defmodule Roux.CancellationTest do
 
   describe "properties" do
     property "cancel_all leaves registry and dedup empty for any set of tasks", %{db: db} do
-      check all(keys <- list_of(atom(:alphanumeric), min_length: 1, max_length: 10)) do
+      check all(keys <- uniq_list_of(atom(:alphanumeric), min_length: 1, max_length: 10)) do
         query_keys = Enum.map(keys, &{:prop_query, &1})
 
         pids =
