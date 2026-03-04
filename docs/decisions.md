@@ -135,9 +135,9 @@ The only case where the framework must be involved is fan-out within a query bod
 | `Roux.Entity` | Database, Intern |
 | `Roux.Validation` | Database, Memo, Revision, Telemetry |
 | `Roux.Cycle` | Runtime.Context |
-| `Roux.Runtime` | Database, Memo, Input, Revision, Validation, Telemetry, Cycle, Runtime.Context, Cancellation |
+| `Roux.Runtime` | Database, Memo, Input, Revision, Validation, Telemetry, Cycle, Runtime.Context, Cancellation, GC |
 | `Roux.Cancellation` | Database, Memo, Telemetry |
-| `Roux.GC` | Database, Memo, Entity |
+| `Roux.GC` | Database, Memo, Entity, Revision, Telemetry |
 | `Roux.Lang` | Database, Query, Input |
 | `Roux.Lang.Compiler` | Lang, Database, Input |
 | `Roux.Lang.LSP` | Lang, Database |
