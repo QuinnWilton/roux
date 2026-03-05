@@ -15,7 +15,7 @@ defmodule Roux.Memo do
 
   @type query_key :: {query_name :: atom(), key :: term()} | {:input, atom(), term()}
 
-  @type dependency :: query_key()
+  @type dependency :: query_key() | {:entity_field, module(), term(), atom()}
 
   # -- ETS tuple layout --
   #

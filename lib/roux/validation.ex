@@ -29,7 +29,7 @@ defmodule Roux.Validation do
   """
 
   alias Roux.Database
-  alias Roux.{Memo, Revision, Telemetry}
+  alias Roux.{Entity, Memo, Revision, Telemetry}
   alias Roux.Memo.Entry
 
   @type ensure_fn :: (Database.t(), Memo.query_key() -> :ok)
@@ -99,6 +99,26 @@ defmodule Roux.Validation do
   end
 
   defp check_deps(_db, [], _verified_at, _ensure_fn), do: :clean
+
+  # Entity field dependencies are checked by reading the field's changed_at
+  # directly from the entity table. No ensure_fn call needed — entities are
+  # updated in place by the query that creates them.
+  defp check_deps(
+         db,
+         [{:entity_field, module, entity_id, field_name} | rest],
+         verified_at,
+         ensure_fn
+       ) do
+    changed_at = Entity.field_changed_at(db, module, entity_id, field_name)
+
+    if changed_at > verified_at do
+      :stale
+    else
+      check_deps(db, rest, verified_at, ensure_fn)
+    end
+  rescue
+    ArgumentError -> :stale
+  end
 
   defp check_deps(db, [dep | rest], verified_at, ensure_fn) do
     ensure_fn.(db, dep)

@@ -90,6 +90,7 @@ defmodule Roux.BoundaryTest do
         allow: [
           under(Roux.Database),
           under(Roux.Memo),
+          under(Roux.Entity),
           under(Roux.Revision),
           under(Roux.Telemetry)
         ]
@@ -98,7 +99,7 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 3: Runtime" do
-    test "Roux.Runtime depends only on Database, Memo, Input, Validation, Telemetry, and Cycle",
+    test "Roux.Runtime depends only on Database, Memo, Input, Validation, Telemetry, Cycle, and Entity",
          %{
            boundary: boundary
          } do
@@ -114,7 +115,8 @@ defmodule Roux.BoundaryTest do
           under(Roux.Runtime.Context),
           under(Roux.Revision),
           under(Roux.Cancellation),
-          under(Roux.GC)
+          under(Roux.GC),
+          under(Roux.Entity)
         ]
       )
     end

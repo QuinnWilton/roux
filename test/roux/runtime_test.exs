@@ -2,7 +2,7 @@ defmodule Roux.RuntimeTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  alias Roux.{Database, Input, Memo, Runtime}
+  alias Roux.{Database, Entity, Input, Memo, Runtime}
 
   setup do
     db = Database.new()
@@ -490,6 +490,136 @@ defmodule Roux.RuntimeTest do
 
         Database.shutdown(db)
       end
+    end
+  end
+
+  # -- Entity helpers --
+
+  @sample Roux.Test.SampleEntity
+
+  describe "create/3" do
+    test "creates entity and records in output_entities", %{db: db} do
+      Database.register_entity(db, @sample)
+
+      fun = fn db, _key ->
+        id = Runtime.create(db, @sample, %{name: :foo, body: :bar, return_type: :int})
+        {:created, id}
+      end
+
+      {:created, entity_id} = Runtime.execute(db, :creator, "a", fun)
+
+      # Entity exists in ETS.
+      assert Entity.field(db, @sample, entity_id, :name) == :foo
+      assert Entity.field(db, @sample, entity_id, :body) == :bar
+
+      # Recorded in memo's output_entities.
+      {:ok, entry} = Memo.get(db, {:creator, "a"})
+      assert {@sample, entity_id} in entry.output_entities
+    end
+  end
+
+  describe "field/4" do
+    test "reads field and records entity field dependency", %{db: db} do
+      Database.register_entity(db, @sample)
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", "v1")
+
+      # Producer query: creates an entity from input.
+      producer = fn db, key ->
+        val = Runtime.input(db, :source, key)
+        Runtime.create(db, @sample, %{name: :item, body: val, return_type: :int})
+      end
+
+      # Consumer query: reads a field from the entity.
+      consumer = fn db, key ->
+        entity_id = Runtime.execute(db, :producer, key, producer)
+        Runtime.field(db, @sample, entity_id, :body)
+      end
+
+      assert Runtime.execute(db, :consumer, "a", consumer) == "v1"
+
+      {:ok, entry} = Memo.get(db, {:consumer, "a"})
+      # Should have a field-level dependency.
+      assert Enum.any?(entry.dependencies, fn
+               {:entity_field, @sample, _id, :body} -> true
+               _ -> false
+             end)
+    end
+
+    test "field-level early cutoff: unchanged field does not invalidate consumer", %{db: db} do
+      Database.register_entity(db, @sample)
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", "v1")
+
+      producer = fn db, key ->
+        val = Runtime.input(db, :source, key)
+        Runtime.create(db, @sample, %{name: :item, body: val, return_type: :int})
+      end
+
+      consumer_counter = :counters.new(1, [])
+
+      # Consumer reads :return_type, NOT :body.
+      consumer = fn db, key ->
+        :counters.add(consumer_counter, 1, 1)
+        entity_id = Runtime.execute(db, :producer, key, producer)
+        Runtime.field(db, @sample, entity_id, :return_type)
+      end
+
+      assert Runtime.execute(db, :consumer, "a", consumer) == :int
+      assert :counters.get(consumer_counter, 1) == 1
+
+      # Change input → body changes, but return_type stays :int.
+      Input.set(db, :source, "a", "v2")
+
+      assert Runtime.execute(db, :consumer, "a", consumer) == :int
+      # Consumer should NOT re-execute because :return_type didn't change.
+      assert :counters.get(consumer_counter, 1) == 1
+    end
+
+    test "field change invalidates consumer", %{db: db} do
+      Database.register_entity(db, @sample)
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", "v1")
+
+      producer = fn db, key ->
+        val = Runtime.input(db, :source, key)
+        Runtime.create(db, @sample, %{name: :item, body: val, return_type: :int})
+      end
+
+      consumer_counter = :counters.new(1, [])
+
+      # Consumer reads :body, which DOES change.
+      consumer = fn db, key ->
+        :counters.add(consumer_counter, 1, 1)
+        entity_id = Runtime.execute(db, :producer, key, producer)
+        Runtime.field(db, @sample, entity_id, :body)
+      end
+
+      assert Runtime.execute(db, :consumer, "a", consumer) == "v1"
+      assert :counters.get(consumer_counter, 1) == 1
+
+      Input.set(db, :source, "a", "v2")
+
+      assert Runtime.execute(db, :consumer, "a", consumer) == "v2"
+      # Consumer MUST re-execute because :body changed.
+      assert :counters.get(consumer_counter, 1) == 2
+    end
+  end
+
+  describe "lookup/3" do
+    test "finds entity by identity key", %{db: db} do
+      Database.register_entity(db, @sample)
+
+      fun = fn db, _key ->
+        Runtime.create(db, @sample, %{name: :foo, body: :bar, return_type: :int})
+        :ok
+      end
+
+      Runtime.execute(db, :creator, "a", fun)
+
+      # Lookup outside a query context.
+      assert {:ok, _id} = Entity.lookup(db, @sample, {:foo})
+      assert :error == Entity.lookup(db, @sample, {:nonexistent})
     end
   end
 

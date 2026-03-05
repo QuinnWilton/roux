@@ -23,7 +23,7 @@ defmodule Roux.Runtime do
   See D3, D13, D14 for design rationale.
   """
 
-  alias Roux.{Cancellation, Cycle, Database, GC, Memo, Revision, Telemetry, Validation}
+  alias Roux.{Cancellation, Cycle, Database, Entity, GC, Memo, Revision, Telemetry, Validation}
   alias Roux.Memo.Entry
   alias Roux.Runtime.Context
 
@@ -148,6 +148,46 @@ defmodule Roux.Runtime do
   end
 
   @doc """
+  Creates or updates an entity from within a query body.
+
+  Delegates to `Roux.Entity.create/4` with the current revision and
+  records the entity in the context's `created_entities` for GC tracking.
+  Returns the entity ID.
+  """
+  @spec create(Database.t(), module(), map()) :: Entity.entity_id()
+  def create(%Database{} = db, module, attrs) when is_atom(module) and is_map(attrs) do
+    current_rev = Revision.current(db.revision)
+    entity_id = Entity.create(db, module, attrs, current_rev)
+    record_created_entity(module, entity_id)
+    entity_id
+  end
+
+  @doc """
+  Reads an entity field from within a query body.
+
+  Delegates to `Roux.Entity.field/4` and records a field-level dependency
+  so the query is invalidated only when that specific field changes.
+  """
+  @spec field(Database.t(), module(), Entity.entity_id(), atom()) :: term()
+  def field(%Database{} = db, module, entity_id, field_name)
+      when is_atom(module) and is_integer(entity_id) and is_atom(field_name) do
+    record_dep({:entity_field, module, entity_id, field_name})
+    Entity.field(db, module, entity_id, field_name)
+  end
+
+  @doc """
+  Looks up an entity by identity key from within a query body.
+
+  Non-interning lookup — does not record a dependency since the identity
+  mapping is structural, not a data dependency.
+  """
+  @spec lookup(Database.t(), module(), tuple()) :: {:ok, Entity.entity_id()} | :error
+  def lookup(%Database{} = db, module, identity_key)
+      when is_atom(module) and is_tuple(identity_key) do
+    Entity.lookup(db, module, identity_key)
+  end
+
+  @doc """
   Records that the current query depends on another query.
 
   Pure function that returns an updated context. Called internally
@@ -166,6 +206,9 @@ defmodule Roux.Runtime do
       :stale -> re_execute(db, query_key)
     end
   end
+
+  # Entity field deps are checked directly by Validation — no re-execution.
+  defp re_execute(_db, {:entity_field, _module, _entity_id, _field_name}), do: :ok
 
   defp re_execute(_db, {:input, _input_name, _key}) do
     # Inputs are set externally and cannot be re-executed.
@@ -321,6 +364,13 @@ defmodule Roux.Runtime do
     case get_context() do
       nil -> :ok
       ctx -> put_context(record_dependency(ctx, query_key))
+    end
+  end
+
+  defp record_created_entity(module, entity_id) do
+    case get_context() do
+      nil -> :ok
+      ctx -> put_context(%{ctx | created_entities: [{module, entity_id} | ctx.created_entities]})
     end
   end
 
