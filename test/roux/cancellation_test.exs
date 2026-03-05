@@ -290,13 +290,13 @@ defmodule Roux.CancellationTest do
     end
 
     test "telemetry events are emitted on cancel", %{db: db} do
+      test_pid = self()
+
       :telemetry.attach(
         "cancel-test",
         [:roux, :cancel, :task],
-        fn _event, _measurements, metadata, _config ->
-          send(self(), {:telemetry, metadata})
-        end,
-        nil
+        &__MODULE__.forward_telemetry/4,
+        test_pid
       )
 
       query_key = {:q, :k}
@@ -317,10 +317,8 @@ defmodule Roux.CancellationTest do
       :telemetry.attach(
         "cancel-dep-test",
         [:roux, :cancel, :task],
-        fn _event, _measurements, metadata, _config ->
-          send(test_pid, {:telemetry, metadata})
-        end,
-        nil
+        &__MODULE__.forward_telemetry/4,
+        test_pid
       )
 
       input_key = {:input, :source, :a}
@@ -344,10 +342,8 @@ defmodule Roux.CancellationTest do
       :telemetry.attach(
         "cancel-timeout-test",
         [:roux, :cancel, :task],
-        fn _event, _measurements, metadata, _config ->
-          send(test_pid, {:telemetry, metadata})
-        end,
-        nil
+        &__MODULE__.forward_telemetry/4,
+        test_pid
       )
 
       query_key = {:q, :k}
@@ -359,6 +355,11 @@ defmodule Roux.CancellationTest do
 
       :telemetry.detach("cancel-timeout-test")
     end
+  end
+
+  @doc false
+  def forward_telemetry(_event, _measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry, metadata})
   end
 
   # -- Property tests --

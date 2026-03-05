@@ -218,9 +218,7 @@ defmodule Roux.GCTest do
       :telemetry.attach(
         handler_id,
         event,
-        fn evt, measurements, metadata, pid ->
-          send(pid, {:telemetry, evt, measurements, metadata})
-        end,
+        &__MODULE__.forward_telemetry/4,
         test_pid
       )
 
@@ -236,6 +234,11 @@ defmodule Roux.GCTest do
 
       :telemetry.detach(handler_id)
     end
+  end
+
+  @doc false
+  def forward_telemetry(event, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry, event, measurements, metadata})
   end
 
   # -- mark_input_removed/3 tests ---------------------------------------------
