@@ -236,15 +236,8 @@ defmodule Roux.Lang.Compiler do
     end
   end
 
-  # Dispatches a query by ETS lookup on the query registry + apply/3.
   defp dispatch_query(db, query_name, key) do
-    case :ets.lookup(db.query_registry, query_name) do
-      [{^query_name, %{module: mod, function: fun}}] ->
-        apply(mod, fun, [db, key])
-
-      [] ->
-        raise ArgumentError, "query #{inspect(query_name)} is not registered"
-    end
+    Database.dispatch_query(db, query_name, key)
   end
 
   # Collects diagnostics from a language's diagnostics_query if defined.

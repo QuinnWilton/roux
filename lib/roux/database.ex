@@ -204,6 +204,23 @@ defmodule Roux.Database do
     |> Enum.map(fn {name, _intern} -> name end)
   end
 
+  @doc """
+  Looks up a query by name in the registry and invokes it with the given key.
+
+  Raises `ArgumentError` if the query is not registered.
+  """
+  @spec dispatch_query(t(), atom(), term()) :: term()
+  def dispatch_query(%__MODULE__{query_registry: reg} = db, query_name, key)
+      when is_atom(query_name) do
+    case :ets.lookup(reg, query_name) do
+      [{^query_name, %{module: mod, function: fun}}] ->
+        apply(mod, fun, [db, key])
+
+      [] ->
+        raise ArgumentError, "query #{inspect(query_name)} is not registered"
+    end
+  end
+
   # -- Private --
 
   defp find_table_owner(sup_pid) do
