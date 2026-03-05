@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Fixed
+
+- `Roux.Lang.LSP` — `didClose` now cancels stale in-flight tasks and republishes diagnostics based on restored disk content, matching the `didOpen`/`didChange` pattern.
+- `Roux.Lang.LSP` — `safe_dispatch` now logs the full stacktrace on query failure instead of just the exception message.
+- `Roux.Lang.LSP` — diagnostic ranges now support end positions via optional `:end_line`/`:end_column` fields, enabling editors to underline error spans.
+- `Roux.Lang.LSP` — `didChange` gracefully handles empty `contentChanges` lists instead of crashing.
+- `Roux.Lang.LSP` — definition handler now converts language results to LSP `Location` structs via `to_lsp_location/1`.
+
+### Changed
+
+- Extracted `dispatch_query/3` from `Roux.Lang.LSP` and `Roux.Lang.Compiler` into `Roux.Database.dispatch_query/3`, eliminating code duplication.
+
 ### Added
 
 - `Roux.Intern` — bidirectional value-to-integer-ID interning with lock-free concurrent insertion via atomics and ETS insert_new CAS pattern.
