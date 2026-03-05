@@ -9,21 +9,16 @@ defmodule Roux.Lang.Compiler do
 
   ## Configuration
 
-      # In config.exs or runtime.exs:
-      config :roux,
-        languages: [MyLang, AnotherLang]
-
-      # Optional — defaults to ["lib"]:
-      config :roux,
-        source_dirs: ["lib", "src"]
-
-  ## Usage
-
-  Add `:roux` to your project's compilers list:
+  Add `:roux` to your project's compilers list and configure languages
+  via the `:roux` key in `project/0`:
 
       def project do
         [
           compilers: [:roux] ++ Mix.compilers(),
+          roux: [
+            languages: [MyLang, AnotherLang],
+            source_dirs: ["lib", "src"]  # optional, defaults to ["lib"]
+          ],
           # ...
         ]
       end
@@ -37,7 +32,8 @@ defmodule Roux.Lang.Compiler do
   @doc """
   Runs the Roux compiler.
 
-  Returns `{:ok, diagnostics}`, `{:error, diagnostics}`, or `{:noop, []}`.
+  Reads configuration from the `:roux` key in `Mix.Project.config/0` and
+  delegates to `compile/1`.
   """
   @impl true
   @spec run(list()) ::
@@ -45,16 +41,34 @@ defmodule Roux.Lang.Compiler do
           | {:error, [Mix.Task.Compiler.Diagnostic.t()]}
           | {:noop, []}
   def run(_argv) do
-    languages = configured_languages()
+    compile(Mix.Project.config()[:roux] || [])
+  end
+
+  @doc """
+  Compiles with the given Roux configuration.
+
+  Accepts a keyword list with `:languages` and `:source_dirs` keys.
+  Returns `{:ok, diagnostics}`, `{:error, diagnostics}`, or `{:noop, []}`.
+  """
+  @spec compile(keyword()) ::
+          {:ok, [Mix.Task.Compiler.Diagnostic.t()]}
+          | {:error, [Mix.Task.Compiler.Diagnostic.t()]}
+          | {:noop, []}
+  def compile(roux_config) do
+    languages = Keyword.get(roux_config, :languages, [])
+    source_dirs = Keyword.get(roux_config, :source_dirs, ["lib"])
 
     if languages == [] do
       {:noop, []}
     else
+      # Mix compilers run before app.start, so telemetry isn't started yet.
+      {:ok, _} = Application.ensure_all_started(:telemetry)
+
       db = Database.new()
 
       try do
         Enum.each(languages, &Lang.register(db, &1))
-        source_paths = find_sources(languages)
+        source_paths = find_sources(languages, source_dirs)
 
         manifest_data = Manifest.load(manifest_path())
         change_status = handle_manifest(db, manifest_data, source_paths)
@@ -65,13 +79,14 @@ defmodule Roux.Lang.Compiler do
 
           :changed ->
             diagnostics = compile_all(db, languages, source_paths)
-
-            source_meta = Manifest.source_metadata(source_paths)
-            Manifest.write(db, source_meta, manifest_path())
+            Enum.each(diagnostics, &print_diagnostic/1)
 
             if Enum.any?(diagnostics, &(&1.severity == :error)) do
               {:error, diagnostics}
             else
+              source_meta = Manifest.source_metadata(source_paths)
+              Manifest.write(db, source_meta, manifest_path())
+
               {:ok, diagnostics}
             end
         end
@@ -100,14 +115,6 @@ defmodule Roux.Lang.Compiler do
 
   # -- Private: configuration --
 
-  defp configured_languages do
-    Application.get_env(:roux, :languages, [])
-  end
-
-  defp source_dirs do
-    Application.get_env(:roux, :source_dirs, ["lib"])
-  end
-
   defp manifest_path do
     Path.join(Mix.Project.manifest_path(), "compile.roux")
   end
@@ -115,13 +122,13 @@ defmodule Roux.Lang.Compiler do
   # -- Private: source discovery --
 
   # Finds all source files matching registered language extensions.
-  defp find_sources(languages) do
+  defp find_sources(languages, source_dirs) do
     extensions =
       languages
       |> Enum.flat_map(& &1.file_extensions())
       |> MapSet.new()
 
-    source_dirs()
+    source_dirs
     |> Enum.flat_map(&walk_directory/1)
     |> Enum.filter(fn path -> MapSet.member?(extensions, Path.extname(path)) end)
     |> Enum.sort()
@@ -241,14 +248,18 @@ defmodule Roux.Lang.Compiler do
   end
 
   # Collects diagnostics from a language's diagnostics_query if defined.
+  # Converts raw language diagnostic maps to Mix.Task.Compiler.Diagnostic structs.
   defp collect_diagnostics(db, lang, path) do
     if function_exported?(lang, :diagnostics_query, 0) do
       query_name = lang.diagnostics_query()
 
       try do
         case dispatch_query(db, query_name, path) do
-          diagnostics when is_list(diagnostics) -> diagnostics
-          _ -> []
+          diagnostics when is_list(diagnostics) ->
+            Enum.map(diagnostics, &to_mix_diagnostic(&1, path))
+
+          _ ->
+            []
         end
       rescue
         _ -> []
@@ -258,14 +269,61 @@ defmodule Roux.Lang.Compiler do
     end
   end
 
-  # Builds a Mix compiler diagnostic.
-  defp diagnostic(file, message, severity) do
+  # Converts a language diagnostic map to a Mix.Task.Compiler.Diagnostic.
+  # The optional `:rendered` key is stored in `details` for rich terminal output.
+  defp to_mix_diagnostic(%{message: message, severity: severity} = diag, file) do
+    position =
+      case diag do
+        %{line: line, column: col} when is_integer(line) and is_integer(col) -> {line, col}
+        %{line: line} when is_integer(line) -> line
+        _ -> 1
+      end
+
+    mix_diag = diagnostic(file, message, severity, position)
+
+    case diag do
+      %{rendered: rendered} when is_binary(rendered) -> %{mix_diag | details: rendered}
+      _ -> mix_diag
+    end
+  end
+
+  # Prints a diagnostic to stderr. Uses the pre-rendered `details` when
+  # available (e.g., pentiment-formatted output), falling back to a plain
+  # location: severity: message format.
+  defp print_diagnostic(%Mix.Task.Compiler.Diagnostic{details: rendered})
+       when is_binary(rendered) do
+    IO.puts(:stderr, rendered)
+  end
+
+  defp print_diagnostic(%Mix.Task.Compiler.Diagnostic{} = diag) do
+    file = Path.relative_to_cwd(diag.file)
+
+    location =
+      case diag.position do
+        {line, col} -> "#{file}:#{line}:#{col}"
+        line when is_integer(line) -> "#{file}:#{line}"
+        _ -> file
+      end
+
+    prefix =
+      case diag.severity do
+        :error -> "error"
+        :warning -> "warning"
+        :info -> "info"
+        :hint -> "hint"
+      end
+
+    IO.puts(:stderr, "#{location}: #{prefix}: #{diag.message}")
+  end
+
+  # Builds a Mix compiler diagnostic with an absolute file path.
+  defp diagnostic(file, message, severity, position \\ 1) do
     %Mix.Task.Compiler.Diagnostic{
-      file: file,
+      file: Path.expand(file),
       message: message,
       severity: severity,
       compiler_name: "roux",
-      position: 1
+      position: position
     }
   end
 end
