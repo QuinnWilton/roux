@@ -68,6 +68,7 @@ defmodule Roux.Lang.LSP do
     Diagnostic,
     Hover,
     InitializeResult,
+    Location,
     MarkupContent,
     Position,
     PublishDiagnosticsParams,
@@ -102,6 +103,7 @@ defmodule Roux.Lang.LSP do
        debounce_timer: nil,
        dirty_uris: MapSet.new(),
        debounce_ms: debounce_ms,
+       # LSP spec: exit code 1 if the server exits without receiving `shutdown`.
        exit_code: 1
      )}
   end
@@ -171,8 +173,9 @@ defmodule Roux.Lang.LSP do
 
     result =
       with {:ok, lang} <- lang_for_uri(db, uri),
-           true <- function_exported?(lang, :definition_query, 0) do
-        safe_dispatch(db, lang.definition_query(), {uri, position}, nil)
+           true <- function_exported?(lang, :definition_query, 0),
+           %{} = loc <- safe_dispatch(db, lang.definition_query(), {uri, position}, nil) do
+        to_lsp_location(loc)
       else
         _ -> nil
       end
@@ -200,6 +203,10 @@ defmodule Roux.Lang.LSP do
     {:noreply, schedule_diagnostics(lsp, uri)}
   end
 
+  def handle_notification(%TextDocumentDidChange{params: %{content_changes: []}}, lsp) do
+    {:noreply, lsp}
+  end
+
   def handle_notification(%TextDocumentDidChange{params: params}, lsp) do
     %{db: db} = assigns(lsp)
     uri = params.text_document.uri
@@ -215,13 +222,15 @@ defmodule Roux.Lang.LSP do
     %{db: db} = assigns(lsp)
     uri = params.text_document.uri
 
-    # Restore disk content when file is closed.
+    # Restore disk content when file is closed. Cancel stale tasks and
+    # republish diagnostics so the editor reflects the on-disk state.
     with {:ok, path} <- uri_to_path(uri),
          {:ok, content} <- File.read(path) do
       Input.set(db, :source_text, uri, content)
+      Cancellation.cancel_dependents(db, {:input, :source_text, uri})
     end
 
-    {:noreply, lsp}
+    {:noreply, schedule_diagnostics(lsp, uri)}
   end
 
   # Per-key durability transitions (`:low` while editing → `:medium` on save)
@@ -286,22 +295,13 @@ defmodule Roux.Lang.LSP do
 
   # -- Private: query dispatch --
 
-  # Same ETS lookup + apply/3 pattern as Compiler.dispatch_query/3.
-  defp dispatch_query(db, query_name, key) do
-    case :ets.lookup(db.query_registry, query_name) do
-      [{^query_name, %{module: mod, function: fun}}] ->
-        apply(mod, fun, [db, key])
-
-      [] ->
-        raise ArgumentError, "query #{inspect(query_name)} is not registered"
-    end
-  end
-
   defp safe_dispatch(db, query_name, key, default) do
-    dispatch_query(db, query_name, key)
+    Database.dispatch_query(db, query_name, key)
   rescue
     error ->
-      Logger.warning("query #{inspect(query_name)} raised: #{Exception.message(error)}")
+      Logger.warning(
+        "query #{inspect(query_name)} raised:\n#{Exception.format(:error, error, __STACKTRACE__)}"
+      )
 
       default
   end
@@ -341,10 +341,19 @@ defmodule Roux.Lang.LSP do
   defp to_lsp_diagnostic(diag) do
     line = Map.get(diag, :line, 1)
     col = Map.get(diag, :column, 1)
-    pos = roux_position_to_lsp({line, col})
+    start_pos = roux_position_to_lsp({line, col})
+
+    end_pos =
+      case {Map.get(diag, :end_line), Map.get(diag, :end_column)} do
+        {end_line, end_col} when is_integer(end_line) and is_integer(end_col) ->
+          roux_position_to_lsp({end_line, end_col})
+
+        _ ->
+          start_pos
+      end
 
     %Diagnostic{
-      range: %Range{start: pos, end: pos},
+      range: %Range{start: start_pos, end: end_pos},
       severity: severity_to_lsp(Map.get(diag, :severity, :error)),
       message: Map.fetch!(diag, :message)
     }
@@ -364,6 +373,13 @@ defmodule Roux.Lang.LSP do
 
   defp to_lsp_completion_item(%{label: label} = item) do
     %CompletionItem{label: label, detail: Map.get(item, :detail)}
+  end
+
+  # -- Private: definition --
+
+  defp to_lsp_location(%{uri: uri, line: line, column: col}) do
+    pos = roux_position_to_lsp({line, col})
+    %Location{uri: uri, range: %Range{start: pos, end: pos}}
   end
 
   # -- Private: capabilities --
