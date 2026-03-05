@@ -6,7 +6,15 @@ defmodule Roux.DatabaseTest do
 
   setup do
     db = Database.new()
-    on_exit(fn -> catch_exit(Database.shutdown(db)) end)
+
+    on_exit(fn ->
+      try do
+        Database.shutdown(db)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
     %{db: db}
   end
 
@@ -175,8 +183,17 @@ defmodule Roux.DatabaseTest do
       db2 = Database.new()
 
       on_exit(fn ->
-        catch_exit(Database.shutdown(db1))
-        catch_exit(Database.shutdown(db2))
+        try do
+          Database.shutdown(db1)
+        catch
+          :exit, _ -> :ok
+        end
+
+        try do
+          Database.shutdown(db2)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       :ets.insert(db1.memo_table, {:key, :val1})
@@ -191,8 +208,17 @@ defmodule Roux.DatabaseTest do
       db2 = Database.new()
 
       on_exit(fn ->
-        catch_exit(Database.shutdown(db1))
-        catch_exit(Database.shutdown(db2))
+        try do
+          Database.shutdown(db1)
+        catch
+          :exit, _ -> :ok
+        end
+
+        try do
+          Database.shutdown(db2)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       Roux.Revision.advance(Database.revision(db1), :low)
