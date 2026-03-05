@@ -83,6 +83,14 @@ defmodule Roux.Lang do
   @doc "Query that produces go-to-definition results."
   @callback definition_query() :: atom()
 
+  # -- Optional editor integration callbacks --
+
+  @doc "Line comment prefixes for this language (e.g., `[\"# \"]`)."
+  @callback line_comments() :: [String.t()]
+
+  @doc "Display name for this language (e.g., `\"Lark\"`)."
+  @callback language_name() :: String.t()
+
   # -- Optional cross-language callback --
 
   @doc "Return the public interface of a compiled module."
@@ -93,7 +101,9 @@ defmodule Roux.Lang do
     completions_query: 0,
     hover_query: 0,
     definition_query: 0,
-    module_interface: 2
+    module_interface: 2,
+    line_comments: 0,
+    language_name: 0
   ]
 
   # -- Public API --
@@ -203,6 +213,35 @@ defmodule Roux.Lang do
     |> :ets.match({{:__roux_lang__, :_}, :"$1"})
     |> List.flatten()
     |> Enum.uniq()
+  end
+
+  @doc """
+  Returns the line comment prefixes for a language module.
+
+  Falls back to `["# "]` if the module does not implement `line_comments/0`.
+  """
+  @spec line_comments(module()) :: [String.t()]
+  def line_comments(lang_module) when is_atom(lang_module) do
+    if function_exported?(lang_module, :line_comments, 0) do
+      lang_module.line_comments()
+    else
+      ["# "]
+    end
+  end
+
+  @doc """
+  Returns the display name for a language module.
+
+  Falls back to the last segment of the module name
+  (e.g., `Lark` → `"Lark"`, `MyApp.HoverLang` → `"HoverLang"`).
+  """
+  @spec language_name(module()) :: String.t()
+  def language_name(lang_module) when is_atom(lang_module) do
+    if function_exported?(lang_module, :language_name, 0) do
+      lang_module.language_name()
+    else
+      lang_module |> Module.split() |> List.last()
+    end
   end
 
   # -- Private --
