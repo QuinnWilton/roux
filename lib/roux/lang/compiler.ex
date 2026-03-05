@@ -77,7 +77,8 @@ defmodule Roux.Lang.Compiler do
           :noop ->
             {:noop, []}
 
-          :changed ->
+          {:changed, stale_paths} ->
+            print_compiling(stale_paths)
             diagnostics = compile_all(db, languages, source_paths)
             Enum.each(diagnostics, &print_diagnostic/1)
 
@@ -188,14 +189,14 @@ defmodule Roux.Lang.Compiler do
     if stale == [] and deleted == [] do
       :noop
     else
-      :changed
+      {:changed, stale}
     end
   end
 
   defp handle_manifest(db, :error, source_paths) do
     # Cold build — set all inputs.
     populate_inputs(db, source_paths)
-    :changed
+    {:changed, source_paths}
   end
 
   # Reads file contents and sets the :source_text input for each path.
@@ -285,6 +286,19 @@ defmodule Roux.Lang.Compiler do
       %{rendered: rendered} when is_binary(rendered) -> %{mix_diag | details: rendered}
       _ -> mix_diag
     end
+  end
+
+  # Prints "Compiling N files (.ext)" grouped by extension, matching the
+  # format used by Elixir's built-in mix compiler.
+  defp print_compiling(stale_paths) do
+    stale_paths
+    |> Enum.group_by(&Path.extname/1)
+    |> Enum.sort()
+    |> Enum.each(fn {ext, paths} ->
+      count = length(paths)
+      suffix = if count == 1, do: "file", else: "files"
+      Mix.shell().info("Compiling #{count} #{suffix} (#{ext})")
+    end)
   end
 
   # Prints a diagnostic to stderr. Uses the pre-rendered `details` when

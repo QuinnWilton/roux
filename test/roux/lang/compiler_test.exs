@@ -54,6 +54,29 @@ defmodule Roux.Lang.CompilerTest do
       assert {:ok, []} = compile([Roux.Test.MiniLang], tmp_dir)
     end
 
+    test "prints compiling message with file count and extension", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "a.mini"), "1")
+      File.write!(Path.join(tmp_dir, "b.mini"), "2")
+
+      output =
+        capture_io(fn ->
+          assert {:ok, []} = compile([Roux.Test.MiniLang], tmp_dir)
+        end)
+
+      assert output =~ "Compiling 2 files (.mini)"
+    end
+
+    test "prints singular form for one file", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "only.mini"), "1")
+
+      output =
+        capture_io(fn ->
+          assert {:ok, []} = compile([Roux.Test.MiniLang], tmp_dir)
+        end)
+
+      assert output =~ "Compiling 1 file (.mini)"
+    end
+
     test "returns {:ok, []} when no matching files found", %{tmp_dir: tmp_dir} do
       # No .mini files in tmp_dir — but directory exists and is empty.
       assert {:ok, []} = compile([Roux.Test.MiniLang], tmp_dir)

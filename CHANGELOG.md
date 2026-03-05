@@ -12,6 +12,7 @@
 
 ### Changed
 
+- `Roux.Lang.Compiler` — prints "Compiling N files (.ext)" grouped by extension before compilation, matching the output style of Elixir's built-in mix compiler.
 - `Roux.Lang.Compiler` — reads configuration from `Mix.Project.config()[:roux]` instead of application environment. Exposes `compile/1` for direct invocation with explicit config.
 - `Mix.Tasks.Roux.Lsp` — reads language configuration from `Mix.Project.config()[:roux]` instead of application environment.
 
