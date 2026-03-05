@@ -22,5 +22,7 @@
 - `Roux.Lang.Compiler` — Mix compiler integration that discovers source files by extension, updates inputs, dispatches compile queries, and returns diagnostics. Supports warm starts via manifest for incremental batch compilation without a long-lived VM.
 - `Roux.Lang.Manifest` — manifest read/write for cross-VM incremental compilation. Serializes memo entries (excluding `:low` durability), entity tables, intern tables, and revision state to disk. Validates manifest version on load for graceful migration.
 - `Mix.Tasks.Compile.Roux` — thin Mix compiler shim that delegates to `Roux.Lang.Compiler`.
+- `Roux.Lang.LSP` — generic GenLSP-based language server that delegates IDE features (diagnostics, hover, completions, go-to-definition) to query-based language implementations. Shares memoized intermediate results with compilation via the same database. Full-text sync with debounced diagnostic push and cancellation of stale in-flight tasks. Position conversion between LSP 0-based and Roux 1-based coordinates.
+- `Mix.Tasks.Roux.Lsp` — starts the Roux LSP server over stdio, reading language configuration from the `:roux` application environment.
 - `Roux.Revision.snapshot/1` and `Roux.Revision.restore/2` — capture and restore atomics state for manifest persistence.
 - `Roux.Intern.snapshot/1` and `Roux.Intern.restore/2` — capture and restore ETS tables and counter for manifest persistence.
