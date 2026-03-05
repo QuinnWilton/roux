@@ -83,6 +83,9 @@ defmodule Roux.Lang do
   @doc "Query that produces go-to-definition results."
   @callback definition_query() :: atom()
 
+  @doc "Query that produces document symbols for the outline."
+  @callback document_symbols_query() :: atom()
+
   # -- Optional editor integration callbacks --
 
   @doc "Line comment prefixes for this language (e.g., `[\"# \"]`)."
@@ -101,6 +104,7 @@ defmodule Roux.Lang do
     completions_query: 0,
     hover_query: 0,
     definition_query: 0,
+    document_symbols_query: 0,
     module_interface: 2,
     line_comments: 0,
     language_name: 0
