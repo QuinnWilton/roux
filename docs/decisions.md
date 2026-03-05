@@ -140,7 +140,7 @@ The only case where the framework must be involved is fan-out within a query bod
 | `Roux.GC` | Database, Memo, Entity, Revision, Telemetry |
 | `Roux.Lang` | Database, Query, Input |
 | `Roux.Lang.Compiler` | Lang, Database, Input, GC |
-| `Roux.Lang.LSP` | Lang, Database |
+| `Roux.Lang.LSP` | Lang, Database, Input, Cancellation |
 
 **Rule**: When implementing a new subsystem, add its `assert_boundary` assertion before writing any module code. The test should fail (no modules yet), then pass once the subsystem is implemented with correct dependencies.
 

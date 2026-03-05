@@ -176,6 +176,22 @@ defmodule Roux.BoundaryTest do
     end
   end
 
+  describe "Tier 5: LSP" do
+    test "Roux.Lang.LSP depends only on Lang, Database, Input, and Cancellation", %{
+      boundary: boundary
+    } do
+      assert_boundary(boundary,
+        modules: [Roux.Lang.LSP],
+        allow: [
+          under(Roux.Lang),
+          under(Roux.Database),
+          under(Roux.Input),
+          under(Roux.Cancellation)
+        ]
+      )
+    end
+  end
+
   describe "Tier 5: Manifest" do
     test "Roux.Lang.Manifest depends only on Database, Memo, Entity, Intern, and Revision", %{
       boundary: boundary
