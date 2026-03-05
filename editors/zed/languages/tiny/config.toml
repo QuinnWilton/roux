@@ -1,0 +1,3 @@
+name = "Tiny"
+path_suffixes = ["tiny"]
+line_comments = ["# "]

@@ -10,3 +10,6 @@ priv/plts/
 *.tar
 /roux-*
 concuerror_report.txt
+editors/zed/target/
+editors/zed/extension.wasm
+editors/zed/Cargo.lock
