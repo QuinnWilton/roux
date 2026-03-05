@@ -17,6 +17,8 @@ defmodule Mix.Tasks.Roux.Lsp do
         languages: [MyLang]
   """
 
+  @shortdoc "Starts the Roux LSP server over stdio"
+
   use Mix.Task
 
   @impl true
