@@ -1,5 +1,6 @@
 defmodule Roux.Lang.LSPTest do
   use ExUnit.Case
+  use ExUnitProperties
 
   import GenLSP.Test
 
@@ -51,7 +52,8 @@ defmodule Roux.Lang.LSPTest do
               "save" => true
             },
             "hoverProvider" => true,
-            "completionProvider" => %{}
+            "completionProvider" => %{},
+            "definitionProvider" => true
           },
           "serverInfo" => %{"name" => "Roux"}
         },
@@ -334,6 +336,71 @@ defmodule Roux.Lang.LSPTest do
     end
   end
 
+  describe "definition" do
+    test "returns location for registered language", %{client: client} do
+      initialize(client)
+
+      uri = "file:///tmp/defn.hover"
+
+      notify(client, %{
+        method: "textDocument/didOpen",
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{
+            uri: uri,
+            languageId: "hover",
+            version: 1,
+            text: "some source"
+          }
+        }
+      })
+
+      assert_notification("textDocument/publishDiagnostics", _, @lsp_timeout)
+
+      id = 2
+
+      request(client, %{
+        method: "textDocument/definition",
+        id: id,
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{uri: uri},
+          position: %{line: 0, character: 0}
+        }
+      })
+
+      assert_result(
+        ^id,
+        %{
+          "uri" => ^uri,
+          "range" => %{
+            "start" => %{"line" => 0, "character" => 0},
+            "end" => %{"line" => 0, "character" => 0}
+          }
+        },
+        @lsp_timeout
+      )
+    end
+
+    test "returns null for unknown extension", %{client: client} do
+      initialize(client)
+
+      id = 2
+
+      request(client, %{
+        method: "textDocument/definition",
+        id: id,
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{uri: "file:///tmp/unknown.xyz"},
+          position: %{line: 0, character: 0}
+        }
+      })
+
+      assert_result(^id, nil, @lsp_timeout)
+    end
+  end
+
   describe "rapid edits" do
     test "rapid edits produce diagnostics reflecting final state", %{client: client} do
       initialize(client)
@@ -410,6 +477,244 @@ defmodule Roux.Lang.LSPTest do
 
       assert %GenLSP.Structures.Position{line: 4, character: 9} =
                LSP.roux_position_to_lsp({5, 10})
+    end
+
+    property "roux_position_to_lsp subtracts 1 from both components" do
+      check all(
+              line <- StreamData.positive_integer(),
+              col <- StreamData.positive_integer()
+            ) do
+        %GenLSP.Structures.Position{line: lsp_line, character: lsp_col} =
+          LSP.roux_position_to_lsp({line, col})
+
+        assert lsp_line == line - 1
+        assert lsp_col == col - 1
+      end
+    end
+  end
+
+  describe "diagnostic severity" do
+    test "warning severity maps to LSP severity 2", %{client: client} do
+      initialize(client)
+
+      notify(client, %{
+        method: "textDocument/didOpen",
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{
+            uri: "file:///tmp/warn.hover",
+            languageId: "hover",
+            version: 1,
+            text: "this has a warning"
+          }
+        }
+      })
+
+      assert_notification(
+        "textDocument/publishDiagnostics",
+        %{
+          "uri" => "file:///tmp/warn.hover",
+          "diagnostics" => [
+            %{
+              "message" => "found warning in source",
+              "severity" => 2
+            }
+          ]
+        },
+        @lsp_timeout
+      )
+    end
+  end
+
+  describe "multi-file diagnostics" do
+    test "two files get independent diagnostics", %{client: client} do
+      initialize(client)
+
+      # Open a clean file.
+      notify(client, %{
+        method: "textDocument/didOpen",
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{
+            uri: "file:///tmp/multi_clean.hover",
+            languageId: "hover",
+            version: 1,
+            text: "clean"
+          }
+        }
+      })
+
+      # Open a file with an error.
+      notify(client, %{
+        method: "textDocument/didOpen",
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{
+            uri: "file:///tmp/multi_error.hover",
+            languageId: "hover",
+            version: 1,
+            text: "has an error"
+          }
+        }
+      })
+
+      # Collect diagnostics for both URIs. Debounce is 0 so they may arrive
+      # in one batch or two — collect until we have both.
+      diagnostics =
+        collect_diagnostics_for_uris([
+          "file:///tmp/multi_clean.hover",
+          "file:///tmp/multi_error.hover"
+        ])
+
+      assert diagnostics["file:///tmp/multi_clean.hover"] == []
+
+      assert [%{"message" => "found error in source"}] =
+               diagnostics["file:///tmp/multi_error.hover"]
+    end
+  end
+
+  describe "didClose clears diagnostics" do
+    @tag :tmp_dir
+    test "closing a file with errors republishes clean diagnostics", %{
+      client: client,
+      tmp_dir: tmp_dir
+    } do
+      initialize(client)
+
+      # Write a clean file to disk.
+      path = Path.join(tmp_dir, "clearable.hover")
+      File.write!(path, "clean on disk")
+      uri = "file://#{path}"
+
+      # Open with error content.
+      notify(client, %{
+        method: "textDocument/didOpen",
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{
+            uri: uri,
+            languageId: "hover",
+            version: 1,
+            text: "editor has an error"
+          }
+        }
+      })
+
+      assert_notification(
+        "textDocument/publishDiagnostics",
+        %{"uri" => ^uri, "diagnostics" => [%{"message" => "found error in source"}]},
+        @lsp_timeout
+      )
+
+      # Close the file — should republish diagnostics based on disk content.
+      notify(client, %{
+        method: "textDocument/didClose",
+        jsonrpc: "2.0",
+        params: %{textDocument: %{uri: uri}}
+      })
+
+      assert_notification(
+        "textDocument/publishDiagnostics",
+        %{"uri" => ^uri, "diagnostics" => []},
+        @lsp_timeout
+      )
+    end
+  end
+
+  describe "error resilience" do
+    @describetag :capture_log
+
+    setup do
+      # Use a separate server with FailingLang to test error paths.
+      # Unique IDs to avoid conflicting with the module-level setup.
+      server =
+        server(LSP,
+          languages: [Roux.Test.HoverLang, Roux.Test.FailingLang],
+          debounce_ms: 0,
+          buffer_id: :fail_buffer,
+          assigns_id: :fail_assigns,
+          task_supervisor_id: :fail_task_supervisor,
+          lsp_id: :fail_lsp
+        )
+
+      client = client(server)
+      %{server: server, client: client}
+    end
+
+    test "raising query returns null instead of crashing server", %{client: client} do
+      initialize(client)
+
+      # Open a .fail file so FailingLang's hover query is reachable.
+      notify(client, %{
+        method: "textDocument/didOpen",
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{
+            uri: "file:///tmp/boom.fail",
+            languageId: "fail",
+            version: 1,
+            text: "boom"
+          }
+        }
+      })
+
+      id = 2
+
+      request(client, %{
+        method: "textDocument/hover",
+        id: id,
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{uri: "file:///tmp/boom.fail"},
+          position: %{line: 0, character: 0}
+        }
+      })
+
+      # The raising hover query should return null, not crash the server.
+      assert_result(^id, nil, @lsp_timeout)
+
+      # Verify the server is still alive by making another request.
+      id2 = 3
+
+      request(client, %{
+        method: "textDocument/hover",
+        id: id2,
+        jsonrpc: "2.0",
+        params: %{
+          textDocument: %{uri: "file:///tmp/unknown.xyz"},
+          position: %{line: 0, character: 0}
+        }
+      })
+
+      assert_result(^id2, nil, @lsp_timeout)
+    end
+  end
+
+  # Collects publishDiagnostics notifications until all expected URIs are seen.
+  defp collect_diagnostics_for_uris(uris) do
+    remaining = MapSet.new(uris)
+    do_collect_diagnostics(remaining, %{})
+  end
+
+  defp do_collect_diagnostics(remaining, acc) do
+    if MapSet.size(remaining) == 0 do
+      acc
+    else
+      receive do
+        %{
+          "jsonrpc" => "2.0",
+          "method" => "textDocument/publishDiagnostics",
+          "params" => %{"uri" => uri, "diagnostics" => diagnostics}
+        } ->
+          acc = Map.put(acc, uri, diagnostics)
+          remaining = MapSet.delete(remaining, uri)
+          do_collect_diagnostics(remaining, acc)
+      after
+        @lsp_timeout ->
+          flunk(
+            "timed out waiting for diagnostics, still missing: #{inspect(MapSet.to_list(remaining))}"
+          )
+      end
     end
   end
 end
