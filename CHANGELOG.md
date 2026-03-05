@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- `Roux.Lang` — optional `line_comments/0` and `language_name/0` callbacks for editor integration, with public accessor functions that provide sensible defaults.
+- `Mix.Tasks.Roux.Gen.Zed` — generates a Zed editor extension (extension.toml, per-language config.toml, extension.wasm) from `Roux.Lang` module metadata.
+- Pre-built `extension.wasm` shipped in `priv/editors/zed/` so consumers don't need a Rust toolchain.
+
+### Changed
+
+- `Roux.Lang.Compiler` — reads configuration from `Mix.Project.config()[:roux]` instead of application environment. Exposes `compile/1` for direct invocation with explicit config.
+- `Mix.Tasks.Roux.Lsp` — reads language configuration from `Mix.Project.config()[:roux]` instead of application environment.
+
 ### Fixed
 
 - `Roux.Lang.LSP` — `didClose` now cancels stale in-flight tasks and republishes diagnostics based on restored disk content, matching the `didOpen`/`didChange` pattern.
