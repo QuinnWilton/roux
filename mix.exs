@@ -34,11 +34,13 @@ defmodule Roux.MixProject do
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support", "test/concurrency"]
+  defp elixirc_paths(:dev), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
     [
       {:telemetry, "~> 1.0"},
+      {:gen_lsp, "~> 0.11.0"},
       {:assert_boundary, "~> 0.1.0", only: :test, runtime: false},
       {:concuerror,
        github: "QuinnWilton/Concuerror", only: :test, runtime: false, manager: :rebar3},
