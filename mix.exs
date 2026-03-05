@@ -40,7 +40,9 @@ defmodule Roux.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.0"},
-      {:gen_lsp, "~> 0.11.0"},
+      # hex: {:gen_lsp, "~> 0.11.0"}
+      {:gen_lsp,
+       github: "QuinnWilton/gen_lsp", branch: "fix/beam-box/tcp-read-crash", override: true},
       {:assert_boundary, "~> 0.1.0", only: :test, runtime: false},
       {:concuerror,
        github: "QuinnWilton/Concuerror", only: :test, runtime: false, manager: :rebar3},
