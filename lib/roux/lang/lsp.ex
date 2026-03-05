@@ -59,6 +59,7 @@ defmodule Roux.Lang.LSP do
     Shutdown,
     TextDocumentCompletion,
     TextDocumentDefinition,
+    TextDocumentDocumentSymbol,
     TextDocumentHover
   }
 
@@ -66,6 +67,7 @@ defmodule Roux.Lang.LSP do
     CompletionItem,
     CompletionOptions,
     Diagnostic,
+    DocumentSymbol,
     Hover,
     InitializeResult,
     Location,
@@ -176,6 +178,23 @@ defmodule Roux.Lang.LSP do
            true <- function_exported?(lang, :definition_query, 0),
            %{} = loc <- safe_dispatch(db, lang.definition_query(), {uri, position}, nil) do
         to_lsp_location(loc)
+      else
+        _ -> nil
+      end
+
+    {:reply, result, lsp}
+  end
+
+  def handle_request(%TextDocumentDocumentSymbol{params: params}, lsp) do
+    %{db: db} = assigns(lsp)
+    uri = params.text_document.uri
+
+    result =
+      with {:ok, lang} <- lang_for_uri(db, uri),
+           true <- function_exported?(lang, :document_symbols_query, 0),
+           symbols when is_list(symbols) <-
+             safe_dispatch(db, lang.document_symbols_query(), uri, nil) do
+        Enum.map(symbols, &to_lsp_document_symbol/1)
       else
         _ -> nil
       end
@@ -382,12 +401,37 @@ defmodule Roux.Lang.LSP do
     %Location{uri: uri, range: %Range{start: pos, end: pos}}
   end
 
+  defp to_lsp_document_symbol(%{name: name, kind: kind, range: range, selection_range: sel} = sym) do
+    %DocumentSymbol{
+      name: to_string(name),
+      kind: symbol_kind(kind),
+      range: to_lsp_range(range),
+      selection_range: to_lsp_range(sel),
+      children: Enum.map(Map.get(sym, :children, []), &to_lsp_document_symbol/1)
+    }
+  end
+
+  defp to_lsp_range({start_line, start_col, end_line, end_col}) do
+    %Range{
+      start: roux_position_to_lsp({start_line, start_col}),
+      end: roux_position_to_lsp({end_line, end_col})
+    }
+  end
+
+  defp symbol_kind(:function), do: GenLSP.Enumerations.SymbolKind.function()
+  defp symbol_kind(:variable), do: GenLSP.Enumerations.SymbolKind.variable()
+  defp symbol_kind(:module), do: GenLSP.Enumerations.SymbolKind.module()
+  defp symbol_kind(:class), do: GenLSP.Enumerations.SymbolKind.class()
+  defp symbol_kind(:constant), do: GenLSP.Enumerations.SymbolKind.constant()
+  defp symbol_kind(n) when is_integer(n), do: n
+
   # -- Private: capabilities --
 
   defp build_server_capabilities(languages) do
     has_hover = Enum.any?(languages, &function_exported?(&1, :hover_query, 0))
     has_completion = Enum.any?(languages, &function_exported?(&1, :completions_query, 0))
     has_definition = Enum.any?(languages, &function_exported?(&1, :definition_query, 0))
+    has_symbols = Enum.any?(languages, &function_exported?(&1, :document_symbols_query, 0))
 
     %ServerCapabilities{
       text_document_sync: %TextDocumentSyncOptions{
@@ -397,7 +441,8 @@ defmodule Roux.Lang.LSP do
       },
       hover_provider: if(has_hover, do: true),
       completion_provider: if(has_completion, do: %CompletionOptions{}),
-      definition_provider: if(has_definition, do: true)
+      definition_provider: if(has_definition, do: true),
+      document_symbol_provider: if(has_symbols, do: true)
     }
   end
 
