@@ -2,8 +2,8 @@ defmodule Mix.Tasks.Roux.Lsp do
   @moduledoc """
   Starts the Roux LSP server over stdio.
 
-  The server reads language configuration from the `:roux` application
-  environment (`:languages` key) and registers all languages with a fresh
+  The server reads language configuration from the `:roux` key in
+  `Mix.Project.config/0` and registers all languages with a fresh
   database before accepting LSP protocol messages.
 
   ## Usage
@@ -12,9 +12,13 @@ defmodule Mix.Tasks.Roux.Lsp do
 
   ## Configuration
 
-      # In config.exs:
-      config :roux,
-        languages: [MyLang]
+      # In mix.exs project/0:
+      def project do
+        [
+          ...,
+          roux: [languages: [MyLang]]
+        ]
+      end
   """
 
   @shortdoc "Starts the Roux LSP server over stdio"
@@ -30,7 +34,8 @@ defmodule Mix.Tasks.Roux.Lsp do
 
     Mix.Task.run("app.start")
 
-    languages = Application.get_env(:roux, :languages, [])
+    roux_config = Mix.Project.config()[:roux] || []
+    languages = Keyword.get(roux_config, :languages, [])
 
     {:ok, buffer} =
       GenLSP.Buffer.start_link(communication: {GenLSP.Communication.Stdio, []})
