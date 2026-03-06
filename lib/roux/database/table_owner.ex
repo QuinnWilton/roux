@@ -79,11 +79,9 @@ defmodule Roux.Database.TableOwner do
     {:noreply, state}
   end
 
-  def handle_info({:"ETS-TRANSFER", table, _from, :dynamic}, state) do
-    # Set heir so dynamically created tables (entity, intern) survive crashes
-    # just like core tables. Use a unique tag to avoid collisions in the Heir's
-    # table map.
-    :ets.setopts(table, {:heir, state.heir, {:dynamic, table}})
+  def handle_info({:"ETS-TRANSFER", _table, _from, :dynamic}, state) do
+    # Accept dynamically created tables (entity, intern). Heir is already set
+    # by the creating process before give_away, so no setopts needed here.
     {:noreply, state}
   end
 

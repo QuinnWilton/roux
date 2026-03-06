@@ -131,7 +131,10 @@ defmodule Roux.Database do
   creating a second table.
   """
   @spec register_entity(t(), module()) :: :ok
-  def register_entity(%__MODULE__{entity_registry: reg, table_owner: owner}, module)
+  def register_entity(
+        %__MODULE__{entity_registry: reg, table_owner: owner, supervisor: sup},
+        module
+      )
       when is_atom(module) do
     case :ets.lookup(reg, module) do
       [{^module, _tid}] ->
@@ -145,7 +148,7 @@ defmodule Roux.Database do
           true ->
             # Transfer ownership to TableOwner so the table survives
             # after the calling process (e.g. a query task) exits.
-            give_away_table(tid, owner)
+            give_away_table(tid, owner, sup)
             :ok
 
           false ->
@@ -163,7 +166,7 @@ defmodule Roux.Database do
   with the same name return the same `Roux.Intern.t()`.
   """
   @spec intern_table(t(), atom()) :: Intern.t()
-  def intern_table(%__MODULE__{intern_registry: reg, table_owner: owner}, name)
+  def intern_table(%__MODULE__{intern_registry: reg, table_owner: owner, supervisor: sup}, name)
       when is_atom(name) do
     case :ets.lookup(reg, name) do
       [{^name, %Intern{} = table}] ->
@@ -176,8 +179,8 @@ defmodule Roux.Database do
           true ->
             # Transfer ownership to TableOwner so the tables survive
             # after the calling process (e.g. a query task) exits.
-            give_away_table(table.forward, owner)
-            give_away_table(table.reverse, owner)
+            give_away_table(table.forward, owner, sup)
+            give_away_table(table.reverse, owner, sup)
             table
 
           false ->
@@ -235,8 +238,12 @@ defmodule Roux.Database do
   # -- Private --
 
   # Transfers ETS table ownership to the TableOwner process so the table
-  # survives after the current (creating) process exits.
-  defp give_away_table(tid, owner_pid) do
+  # survives after the current (creating) process exits. Sets heir BEFORE
+  # giving away to close the race window where TableOwner owns the table
+  # but hasn't set heir yet.
+  defp give_away_table(tid, owner_pid, sup_pid) do
+    heir_pid = Roux.Database.Heir.whereis(sup_pid)
+    :ets.setopts(tid, {:heir, heir_pid, {:dynamic, tid}})
     :ets.give_away(tid, owner_pid, :dynamic)
   end
 
