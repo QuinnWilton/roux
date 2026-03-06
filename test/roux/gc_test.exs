@@ -40,14 +40,14 @@ defmodule Roux.GCTest do
     Entity.create(db, @sample, %{name: name, body: nil, return_type: nil}, 1)
   end
 
-  # -- sweep_query/4 tests ----------------------------------------------------
+  # -- sweep_query/3 tests ----------------------------------------------------
 
-  describe "sweep_query/4" do
+  describe "sweep_query/3" do
     test "increments refcount for new entities", %{db: db} do
       id = create_entity(db, :foo)
       assert Entity.refcount(db, @sample, id) == 0
 
-      GC.sweep_query(db, {:q, :k}, [], [{@sample, id}])
+      GC.sweep_query(db, {:q, :k}, old: [], new: [{@sample, id}])
 
       assert Entity.refcount(db, @sample, id) == 1
     end
@@ -57,7 +57,7 @@ defmodule Roux.GCTest do
       Entity.increment_refcount(db, @sample, id)
       assert Entity.refcount(db, @sample, id) == 1
 
-      GC.sweep_query(db, {:q, :k}, [{@sample, id}], [])
+      GC.sweep_query(db, {:q, :k}, old: [{@sample, id}], new: [])
 
       assert Entity.refcount(db, @sample, id) == 0
     end
@@ -66,7 +66,7 @@ defmodule Roux.GCTest do
       id = create_entity(db, :foo)
       Entity.increment_refcount(db, @sample, id)
 
-      GC.sweep_query(db, {:q, :k}, [{@sample, id}], [{@sample, id}])
+      GC.sweep_query(db, {:q, :k}, old: [{@sample, id}], new: [{@sample, id}])
 
       assert Entity.refcount(db, @sample, id) == 1
     end
@@ -81,11 +81,9 @@ defmodule Roux.GCTest do
       Entity.increment_refcount(db, @sample, id2)
 
       # New set keeps id2, drops id1, adds id3.
-      GC.sweep_query(
-        db,
-        {:q, :k},
-        [{@sample, id1}, {@sample, id2}],
-        [{@sample, id2}, {@sample, id3}]
+      GC.sweep_query(db, {:q, :k},
+        old: [{@sample, id1}, {@sample, id2}],
+        new: [{@sample, id2}, {@sample, id3}]
       )
 
       assert Entity.refcount(db, @sample, id1) == 0
@@ -101,7 +99,7 @@ defmodule Roux.GCTest do
       Entity.delete(db, @sample, id)
 
       # Should not crash — rescues the ArgumentError.
-      assert GC.sweep_query(db, {:q, :k}, [{@sample, id}], []) == :ok
+      assert GC.sweep_query(db, {:q, :k}, old: [{@sample, id}], new: []) == :ok
     end
   end
 
@@ -346,7 +344,7 @@ defmodule Roux.GCTest do
 
         # Simulate initial sweep_query for each query (old = []).
         Enum.each(query_entities, fn {i, entities} ->
-          GC.sweep_query(db, {:q, i}, [], entities)
+          GC.sweep_query(db, {:q, i}, old: [], new: entities)
         end)
 
         # Verify refcounts match the number of queries referencing each entity.

@@ -34,7 +34,7 @@ defmodule Roux.Concurrency.GCSweepQueryRaceTest do
     # Process 1: sweep_query removes entity from query 1's output.
     p1 =
       spawn(fn ->
-        GC.sweep_query(db, {:q, :one}, [{@sample, entity_id}], [])
+        GC.sweep_query(db, {:q, :one}, old: [{@sample, entity_id}], new: [])
         send(parent, :p1_done)
       end)
 
@@ -43,7 +43,7 @@ defmodule Roux.Concurrency.GCSweepQueryRaceTest do
     # Process 2: sweep_query removes entity from query 2's output.
     p2 =
       spawn(fn ->
-        GC.sweep_query(db, {:q, :two}, [{@sample, entity_id}], [])
+        GC.sweep_query(db, {:q, :two}, old: [{@sample, entity_id}], new: [])
         send(parent, :p2_done)
       end)
 
@@ -128,7 +128,7 @@ defmodule Roux.Concurrency.GCSweepSweepQueryRaceTest do
     # Process 1: sweep_query removes entity from output.
     p1 =
       spawn(fn ->
-        GC.sweep_query(db, {:q, :owner}, [{@sample, entity_id}], [])
+        GC.sweep_query(db, {:q, :owner}, old: [{@sample, entity_id}], new: [])
         send(parent, :query_done)
       end)
 

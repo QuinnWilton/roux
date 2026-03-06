@@ -147,6 +147,25 @@ defmodule Roux.Runtime do
   end
 
   @doc """
+  Reads an input value, short-circuiting on missing keys.
+
+  Like `input/3`, but if the key has not been set, throws a
+  `{:roux_query_error, reason}` that is automatically caught by the
+  enclosing `defquery` and converted to `{:error, reason}`.
+  """
+  @spec input!(Database.t(), atom(), term()) :: term()
+  def input!(%Database{} = db, input_name, key) when is_atom(input_name) do
+    query_key = {:input, input_name, key}
+    record_dep(query_key)
+    track_input_durability(db, input_name)
+
+    case Roux.Input.fetch(db, input_name, key) do
+      {:ok, value} -> value
+      :error -> throw({:roux_query_error, {:input_not_set, input_name, key}})
+    end
+  end
+
+  @doc """
   Executes multiple independent queries concurrently.
 
   Spawns a task per query, collects results, and merges all recorded
@@ -371,7 +390,7 @@ defmodule Roux.Runtime do
 
       # Update entity refcounts for the output entity diff (D15).
       old_entities = if old_entry, do: old_entry.output_entities, else: []
-      GC.sweep_query(db, query_key, old_entities, entry.output_entities)
+      GC.sweep_query(db, query_key, old: old_entities, new: entry.output_entities)
 
       Telemetry.query_stop(query_name, key, current_rev, duration, hash)
 

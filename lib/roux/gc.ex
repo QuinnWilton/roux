@@ -60,20 +60,27 @@ defmodule Roux.GC do
   @doc """
   Diffs a query's output entities after re-execution.
 
-  Decrements refcounts for entities in `old_entities` but not `new_entities`.
-  Increments refcounts for entities in `new_entities` but not `old_entities`.
+  Decrements refcounts for entities in `old` but not `new`.
+  Increments refcounts for entities in `new` but not `old`.
 
   Resilient to entities that have already been deleted by a prior sweep —
   `Entity.decrement_refcount/3` raises `ArgumentError` on missing entities,
   which is rescued here.
+
+  ## Options
+
+    * `:old` — entities from the previous execution (required)
+    * `:new` — entities from the current execution (required)
   """
   @spec sweep_query(
           Database.t(),
           Memo.query_key(),
-          [{module(), Entity.entity_id()}],
-          [{module(), Entity.entity_id()}]
+          keyword()
         ) :: :ok
-  def sweep_query(%Database{} = db, _query_key, old_entities, new_entities) do
+  def sweep_query(%Database{} = db, _query_key, opts) do
+    old_entities = Keyword.fetch!(opts, :old)
+    new_entities = Keyword.fetch!(opts, :new)
+
     removed = old_entities -- new_entities
     added = new_entities -- old_entities
 
