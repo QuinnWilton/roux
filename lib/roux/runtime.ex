@@ -104,6 +104,34 @@ defmodule Roux.Runtime do
   end
 
   @doc """
+  Calls a derived query, short-circuiting on errors.
+
+  Like `query/3`, but if the result matches `{:error, reason}`, throws
+  a `{:roux_query_error, reason}` that is automatically caught by the
+  enclosing `defquery` and converted back to `{:error, reason}`.
+
+  This eliminates nested `case` statements for error propagation:
+
+      # Instead of:
+      case Roux.Runtime.query(db, :typecheck, uri) do
+        {:ok, types} -> use(types)
+        {:error, _} = err -> err
+      end
+
+      # Write:
+      {:ok, types} = Roux.Runtime.query!(db, :typecheck, uri)
+      use(types)
+
+  """
+  @spec query!(Database.t(), atom(), term()) :: term()
+  def query!(%Database{} = db, query_name, key) when is_atom(query_name) do
+    case query(db, query_name, key) do
+      {:error, reason} -> throw({:roux_query_error, reason})
+      result -> result
+    end
+  end
+
+  @doc """
   Reads an input value from within a query body.
 
   Records a dependency on the input and tracks its durability level
@@ -173,6 +201,23 @@ defmodule Roux.Runtime do
       when is_atom(module) and is_integer(entity_id) and is_atom(field_name) do
     record_dep({:entity_field, module, entity_id, field_name})
     Entity.field(db, module, entity_id, field_name)
+  end
+
+  @doc """
+  Reads all fields from an entity as a map.
+
+  Calls `field/4` for each field, so a field-level dependency is recorded
+  for every field. Use this when the consumer needs the whole entity; use
+  `field/4` when it only needs a subset.
+  """
+  @spec read(Database.t(), module(), Entity.entity_id()) :: map()
+  def read(%Database{} = db, module, entity_id)
+      when is_atom(module) and is_integer(entity_id) do
+    all_fields = module.__entity__(:all_fields)
+
+    Map.new(all_fields, fn field_name ->
+      {field_name, field(db, module, entity_id, field_name)}
+    end)
   end
 
   @doc """

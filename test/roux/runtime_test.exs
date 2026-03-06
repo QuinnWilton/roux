@@ -606,6 +606,35 @@ defmodule Roux.RuntimeTest do
     end
   end
 
+  describe "read/3" do
+    test "returns all fields as a map and records deps on each", %{db: db} do
+      Database.register_entity(db, @sample)
+
+      producer = fn db, _key ->
+        Runtime.create(db, @sample, %{name: :foo, body: :bar, return_type: :int})
+      end
+
+      consumer = fn db, key ->
+        entity_id = Runtime.execute(db, :producer, key, producer)
+        Runtime.read(db, @sample, entity_id)
+      end
+
+      result = Runtime.execute(db, :consumer, "a", consumer)
+
+      assert result == %{name: :foo, body: :bar, return_type: :int}
+
+      # Should have deps on all fields.
+      {:ok, entry} = Memo.get(db, {:consumer, "a"})
+
+      for field <- [:name, :body, :return_type] do
+        assert Enum.any?(entry.dependencies, fn
+                 {:entity_field, @sample, _id, ^field} -> true
+                 _ -> false
+               end)
+      end
+    end
+  end
+
   describe "lookup/3" do
     test "finds entity by identity key", %{db: db} do
       Database.register_entity(db, @sample)
@@ -622,6 +651,40 @@ defmodule Roux.RuntimeTest do
       assert :error == Entity.lookup(db, @sample, {:nonexistent})
     end
   end
+
+  describe "query!/3" do
+    test "returns result when query succeeds", %{db: db} do
+      Database.register_query(db, :ok_q, %{module: __MODULE__, function: :__ok_query__})
+
+      result =
+        Runtime.execute(db, :outer, "a", fn db, _key ->
+          Runtime.query!(db, :ok_q, "a")
+        end)
+
+      assert result == {:ok, 42}
+    end
+
+    test "throws on error and is caught by try/catch", %{db: db} do
+      Database.register_query(db, :err_q, %{module: __MODULE__, function: :__err_query__})
+
+      result =
+        Runtime.execute(db, :outer, "a", fn db, _key ->
+          try do
+            Runtime.query!(db, :err_q, "a")
+          catch
+            :throw, {:roux_query_error, reason} -> {:error, reason}
+          end
+        end)
+
+      assert result == {:error, :boom}
+    end
+  end
+
+  # Test query functions for query!/3 tests.
+  @doc false
+  def __ok_query__(db, key), do: Runtime.execute(db, :ok_q, key, fn _, _ -> {:ok, 42} end)
+  @doc false
+  def __err_query__(db, key), do: Runtime.execute(db, :err_q, key, fn _, _ -> {:error, :boom} end)
 
   # -- Concurrent convergence --
 
