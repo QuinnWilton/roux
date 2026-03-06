@@ -7,6 +7,8 @@
 - `Roux.Runtime.create/3`, `Roux.Runtime.field/4`, `Roux.Runtime.lookup/3` — entity helpers for use inside `defquery` blocks. `create/3` creates or updates an entity and records it in the output set for GC. `field/4` reads a field and records a field-level dependency for fine-grained invalidation. `lookup/3` performs a non-interning identity lookup without recording a dependency.
 - `Roux.Runtime.read/3` — reads all fields from an entity as a map, recording a field-level dependency on each. Eliminates per-field reconstitution boilerplate.
 - `Roux.Runtime.query!/3` — like `query/3` but throws on `{:error, reason}`, enabling flat error propagation instead of nested `case` statements. The throw is caught automatically by `defquery`-generated functions.
+- `Roux.Runtime.input!/3` — like `input/3` but throws when the input key is not set, enabling flat error propagation matching `query!/3`.
+- `Roux.Input.fetch/3` — non-raising variant that returns `{:ok, value}` or `:error`, matching the standard `Map.fetch/2` pattern.
 - `defentity` macro — declares entity types alongside `defquery`/`definput` for automatic registration via `Roux.Lang.register_module/2`.
 - `defquery` `:returns` option — generates a `@spec` for the query function, making return types visible in documentation and dialyzer.
 - `Roux.Validation` — entity field dependency support. Dependencies of the form `{:entity_field, module, entity_id, field_name}` are validated by checking `Entity.field_changed_at/4` directly, enabling field-level early cutoff.
@@ -16,6 +18,9 @@
 
 ### Changed
 
+- `Roux.Revision.last_changed_at_or_below/2` renamed to `last_changed_at_or_above/2` — the old name contradicted the semantics (`:low` includes higher durability levels, not lower).
+- `Roux.GC.sweep_query/4` changed to `sweep_query/3` with keyword options `old:` and `new:` instead of positional parameters, preventing silent argument swap bugs.
+- `Roux.Database.register_query/3` is now idempotent — re-registering the same name overwrites the previous definition instead of raising `ArgumentError`, matching the behavior of `register_entity/2` and `register_input/2`.
 - `Roux.Lang.Compiler` — prints "Compiling N files (.ext)" grouped by extension before compilation, matching the output style of Elixir's built-in mix compiler. Supports `verbose: true` option to print a message on noop builds.
 - `Roux.Lang.register_module/2` — automatically registers entity types declared with `defentity`, eliminating manual `Database.register_entity/2` calls.
 - `Roux.Lang.Compiler` — reads configuration from `Mix.Project.config()[:roux]` instead of application environment. Exposes `compile/1` for direct invocation with explicit config.
