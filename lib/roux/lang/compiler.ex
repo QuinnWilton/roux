@@ -58,7 +58,9 @@ defmodule Roux.Lang.Compiler do
     languages = Keyword.get(roux_config, :languages, [])
     source_dirs = Keyword.get(roux_config, :source_dirs, ["lib"])
 
-    if languages == [] do
+    # Skip if no languages configured or if language modules aren't compiled yet
+    # (cold bootstrap: roux compiler runs before elixir compiler has built them).
+    if languages == [] or not Enum.all?(languages, &Code.ensure_loaded?/1) do
       {:noop, []}
     else
       # Mix compilers run before app.start, so telemetry isn't started yet.
@@ -72,6 +74,8 @@ defmodule Roux.Lang.Compiler do
 
         manifest_data = Manifest.load(manifest_path())
         change_status = handle_manifest(db, manifest_data, source_paths)
+
+        prepare_languages(db, languages, source_paths)
 
         case change_status do
           :noop ->
@@ -208,6 +212,29 @@ defmodule Roux.Lang.Compiler do
     Enum.each(paths, fn path ->
       content = File.read!(path)
       Input.set(db, :source_text, path, content)
+    end)
+  end
+
+  # Calls prepare/2 on languages that implement it, passing their source paths.
+  defp prepare_languages(db, languages, source_paths) do
+    ext_to_lang =
+      Map.new(
+        for lang <- languages,
+            ext <- lang.file_extensions() do
+          {ext, lang}
+        end
+      )
+
+    paths_by_lang =
+      Enum.group_by(source_paths, fn path ->
+        Map.get(ext_to_lang, Path.extname(path))
+      end)
+
+    Enum.each(languages, fn lang ->
+      if function_exported?(lang, :prepare, 2) do
+        lang_paths = Map.get(paths_by_lang, lang, [])
+        lang.prepare(db, lang_paths)
+      end
     end)
   end
 
