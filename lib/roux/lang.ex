@@ -99,6 +99,15 @@ defmodule Roux.Lang do
   @doc "Return the public interface of a compiled module."
   @callback module_interface(Database.t(), source_path()) :: module_interface()
 
+  @doc """
+  Called after source discovery, before compilation begins.
+
+  Receives the database and the list of source paths belonging to this language.
+  Use this to populate inputs that depend on knowing all source files (e.g.,
+  module registries that map module names to file paths).
+  """
+  @callback prepare(Database.t(), [source_path()]) :: :ok
+
   @optional_callbacks [
     diagnostics_query: 0,
     completions_query: 0,
@@ -106,6 +115,7 @@ defmodule Roux.Lang do
     definition_query: 0,
     document_symbols_query: 0,
     module_interface: 2,
+    prepare: 2,
     line_comments: 0,
     language_name: 0
   ]
