@@ -105,6 +105,7 @@ defmodule Roux.Concurrency.CancellationCompletionRaceTest do
       dedup_table: dedup,
       intern_registry: reg,
       entity_registry: reg,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -207,6 +208,7 @@ defmodule Roux.Concurrency.CancellationRegistrationRaceTest do
       dedup_table: dedup,
       intern_registry: reg,
       entity_registry: reg,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -356,6 +358,7 @@ defmodule Roux.Concurrency.CancellationDedupCleanupRaceTest do
       dedup_table: dedup,
       intern_registry: reg,
       entity_registry: reg,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -498,6 +501,7 @@ defmodule Roux.Concurrency.CancellationInputSetRaceTest do
       dedup_table: dedup,
       intern_registry: reg,
       entity_registry: reg,
+      table_owner: self(),
       supervisor: self()
     }
   end

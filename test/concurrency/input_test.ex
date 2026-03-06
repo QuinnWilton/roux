@@ -59,6 +59,7 @@ defmodule Roux.Concurrency.InputSetSetRaceTest do
       dedup_table: input_reg,
       intern_registry: input_reg,
       entity_registry: input_reg,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -127,6 +128,7 @@ defmodule Roux.Concurrency.InputSetGetRaceTest do
       dedup_table: input_reg,
       intern_registry: input_reg,
       entity_registry: input_reg,
+      table_owner: self(),
       supervisor: self()
     }
   end

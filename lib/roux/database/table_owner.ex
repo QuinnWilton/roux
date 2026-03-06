@@ -69,6 +69,11 @@ defmodule Roux.Database.TableOwner do
     {:noreply, state}
   end
 
+  def handle_info({:"ETS-TRANSFER", _table, _from, :dynamic}, state) do
+    # Accept ownership of dynamically created tables (entity and intern tables).
+    {:noreply, state}
+  end
+
   # -- Private --
 
   defp create_tables(heir_pid) do

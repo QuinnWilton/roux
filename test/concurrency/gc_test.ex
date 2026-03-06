@@ -87,6 +87,7 @@ defmodule Roux.Concurrency.GCSweepQueryRaceTest do
       dedup_table: reg,
       intern_registry: intern_reg,
       entity_registry: entity_reg,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -190,6 +191,7 @@ defmodule Roux.Concurrency.GCSweepSweepQueryRaceTest do
       dedup_table: reg,
       intern_registry: intern_reg,
       entity_registry: entity_reg,
+      table_owner: self(),
       supervisor: self()
     }
   end

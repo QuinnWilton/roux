@@ -31,6 +31,7 @@ defmodule Roux.Database do
           dedup_table: :ets.tid(),
           intern_registry: :ets.tid(),
           entity_registry: :ets.tid(),
+          table_owner: pid(),
           supervisor: pid()
         }
 
@@ -43,6 +44,7 @@ defmodule Roux.Database do
     :dedup_table,
     :intern_registry,
     :entity_registry,
+    :table_owner,
     :supervisor
   ]
 
@@ -55,6 +57,7 @@ defmodule Roux.Database do
     :dedup_table,
     :intern_registry,
     :entity_registry,
+    :table_owner,
     :supervisor
   ]
 
@@ -79,6 +82,7 @@ defmodule Roux.Database do
       dedup_table: Map.fetch!(tables, :dedup_table),
       intern_registry: Map.fetch!(tables, :intern_registry),
       entity_registry: Map.fetch!(tables, :entity_registry),
+      table_owner: table_owner_pid,
       supervisor: sup_pid
     }
   end
@@ -127,7 +131,7 @@ defmodule Roux.Database do
   creating a second table.
   """
   @spec register_entity(t(), module()) :: :ok
-  def register_entity(%__MODULE__{entity_registry: reg}, module)
+  def register_entity(%__MODULE__{entity_registry: reg, table_owner: owner}, module)
       when is_atom(module) do
     case :ets.lookup(reg, module) do
       [{^module, _tid}] ->
@@ -139,6 +143,9 @@ defmodule Roux.Database do
 
         case :ets.insert_new(reg, {module, tid}) do
           true ->
+            # Transfer ownership to TableOwner so the table survives
+            # after the calling process (e.g. a query task) exits.
+            give_away_table(tid, owner)
             :ok
 
           false ->
@@ -156,7 +163,7 @@ defmodule Roux.Database do
   with the same name return the same `Roux.Intern.t()`.
   """
   @spec intern_table(t(), atom()) :: Intern.t()
-  def intern_table(%__MODULE__{intern_registry: reg}, name)
+  def intern_table(%__MODULE__{intern_registry: reg, table_owner: owner}, name)
       when is_atom(name) do
     case :ets.lookup(reg, name) do
       [{^name, %Intern{} = table}] ->
@@ -167,6 +174,10 @@ defmodule Roux.Database do
 
         case :ets.insert_new(reg, {name, table}) do
           true ->
+            # Transfer ownership to TableOwner so the tables survive
+            # after the calling process (e.g. a query task) exits.
+            give_away_table(table.forward, owner)
+            give_away_table(table.reverse, owner)
             table
 
           false ->
@@ -222,6 +233,12 @@ defmodule Roux.Database do
   end
 
   # -- Private --
+
+  # Transfers ETS table ownership to the TableOwner process so the table
+  # survives after the current (creating) process exits.
+  defp give_away_table(tid, owner_pid) do
+    :ets.give_away(tid, owner_pid, :dynamic)
+  end
 
   defp find_table_owner(sup_pid) do
     sup_pid

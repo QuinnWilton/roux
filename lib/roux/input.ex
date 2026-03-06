@@ -105,6 +105,17 @@ defmodule Roux.Input do
   end
 
   @doc """
+  Checks whether an input value has been set for the given key.
+  """
+  @spec exists?(Database.t(), atom(), term()) :: boolean()
+  def exists?(%Database{} = db, input_name, key) when is_atom(input_name) do
+    case Memo.get(db, {:input, input_name, key}) do
+      {:ok, _} -> true
+      :miss -> false
+    end
+  end
+
+  @doc """
   Reads an input value along with the revision at which it last changed.
 
   Raises `Roux.Input.NotSetError` if the key has never been set.

@@ -68,6 +68,7 @@ defmodule Roux.Concurrency.RuntimeDedupTest do
       dedup_table: dedup,
       intern_registry: reg,
       entity_registry: reg,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -141,6 +142,7 @@ defmodule Roux.Concurrency.RuntimeDedupCompletionRaceTest do
       dedup_table: dedup,
       intern_registry: reg,
       entity_registry: reg,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -207,6 +209,7 @@ defmodule Roux.Concurrency.RuntimeWriteBufferingTest do
       dedup_table: dedup,
       intern_registry: reg,
       entity_registry: reg,
+      table_owner: self(),
       supervisor: self()
     }
   end

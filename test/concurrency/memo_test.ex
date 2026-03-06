@@ -88,6 +88,7 @@ defmodule Roux.Concurrency.MemoPutUpdateVerifiedRaceTest do
       dedup_table: tid,
       intern_registry: tid,
       entity_registry: tid,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -165,6 +166,7 @@ defmodule Roux.Concurrency.MemoPutGetRaceTest do
       dedup_table: tid,
       intern_registry: tid,
       entity_registry: tid,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -231,6 +233,7 @@ defmodule Roux.Concurrency.MemoDeleteGetRaceTest do
       dedup_table: tid,
       intern_registry: tid,
       entity_registry: tid,
+      table_owner: self(),
       supervisor: self()
     }
   end
@@ -300,6 +303,7 @@ defmodule Roux.Concurrency.MemoDoubleValidateTest do
       dedup_table: tid,
       intern_registry: tid,
       entity_registry: tid,
+      table_owner: self(),
       supervisor: self()
     }
   end
