@@ -542,21 +542,5 @@ defmodule Roux.Lang.LSP do
     Input.exists?(db, input_name, key)
   end
 
-  defp walk_directory(dir) do
-    case File.ls(dir) do
-      {:ok, entries} ->
-        Enum.flat_map(entries, fn entry ->
-          full = Path.join(dir, entry)
-
-          if File.dir?(full) do
-            walk_directory(full)
-          else
-            [full]
-          end
-        end)
-
-      {:error, _} ->
-        []
-    end
-  end
+  defp walk_directory(dir), do: Roux.Lang.walk_directory(dir)
 end

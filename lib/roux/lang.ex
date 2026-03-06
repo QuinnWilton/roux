@@ -262,6 +262,30 @@ defmodule Roux.Lang do
     end
   end
 
+  @doc """
+  Recursively walks a directory, returning all file paths.
+
+  Returns an empty list if the directory does not exist or is unreadable.
+  """
+  @spec walk_directory(String.t()) :: [String.t()]
+  def walk_directory(dir) when is_binary(dir) do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        Enum.flat_map(entries, fn entry ->
+          full = Path.join(dir, entry)
+
+          if File.dir?(full) do
+            walk_directory(full)
+          else
+            [full]
+          end
+        end)
+
+      {:error, _} ->
+        []
+    end
+  end
+
   # -- Private --
 
   # Checks if all extensions are already mapped to this module.
