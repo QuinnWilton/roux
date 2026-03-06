@@ -11,8 +11,9 @@ defmodule Roux.Query do
         use Roux.Query
 
         definput :source_text, durability: :low
+        defentity MyLang.Definition
 
-        defquery :parse, key: file_path do
+        defquery :parse, key: file_path, returns: {:ok, [atom()]} | {:error, term()} do
           source = input(db, :source_text, file_path)
           MyParser.parse(source)
         end
@@ -21,6 +22,7 @@ defmodule Roux.Query do
   `defquery` generates a public function wrapping the body in
   `Roux.Runtime.execute/4` for memoization and dependency tracking.
   `definput` records an input definition for bulk registration.
+  `defentity` declares an entity type for automatic registration.
   """
 
   alias Roux.Query.Definition
@@ -31,10 +33,12 @@ defmodule Roux.Query do
   @doc false
   defmacro __using__(_opts) do
     quote do
-      import Roux.Query, only: [defquery: 2, defquery: 3, definput: 1, definput: 2]
+      import Roux.Query,
+        only: [defquery: 2, defquery: 3, definput: 1, definput: 2, defentity: 1]
 
       Module.register_attribute(__MODULE__, :roux_queries, accumulate: true)
       Module.register_attribute(__MODULE__, :roux_inputs, accumulate: true)
+      Module.register_attribute(__MODULE__, :roux_entities, accumulate: true)
 
       @before_compile Roux.Query
     end
@@ -50,11 +54,12 @@ defmodule Roux.Query do
   ## Options
 
     * `:key` — (required) the key parameter pattern
+    * `:returns` — (optional) return type; generates a `@spec` for the query function
     * `:do` — the query body block
 
   ## Example
 
-      defquery :parse, key: file_path do
+      defquery :parse, key: file_path, returns: {:ok, [AST.t()]} | {:error, String.t()} do
         source = input(db, :source_text, file_path)
         MyParser.parse(source)
       end
@@ -72,6 +77,14 @@ defmodule Roux.Query do
   defp build_defquery(name, opts) do
     {body, opts} = Keyword.pop!(opts, :do)
     {key_pattern, opts} = Keyword.pop!(opts, :key)
+    {returns, opts} = Keyword.pop(opts, :returns)
+
+    spec_ast =
+      if returns do
+        quote do
+          @spec unquote(name)(Roux.Database.t(), term()) :: unquote(returns)
+        end
+      end
 
     quote do
       @roux_queries %Roux.Query.Definition{
@@ -81,13 +94,19 @@ defmodule Roux.Query do
         opts: unquote(opts)
       }
 
+      unquote(spec_ast)
+
       def unquote(name)(var!(db), unquote(key_pattern)) do
         Roux.Runtime.execute(
           var!(db),
           unquote(name),
           unquote(key_pattern),
           fn var!(db), unquote(key_pattern) ->
-            unquote(body)
+            try do
+              unquote(body)
+            catch
+              :throw, {:roux_query_error, reason} -> {:error, reason}
+            end
           end
         )
       end
@@ -116,10 +135,28 @@ defmodule Roux.Query do
     end
   end
 
+  @doc """
+  Declares an entity type for automatic registration.
+
+  Accumulates the entity module so that `Roux.Lang.register_module/2`
+  registers it with the database alongside queries and inputs.
+
+  ## Example
+
+      defentity MyLang.Function
+
+  """
+  defmacro defentity(module) do
+    quote do
+      @roux_entities unquote(module)
+    end
+  end
+
   @doc false
   defmacro __before_compile__(env) do
     queries = env.module |> Module.get_attribute(:roux_queries) |> Enum.reverse()
     inputs = env.module |> Module.get_attribute(:roux_inputs) |> Enum.reverse()
+    entities = env.module |> Module.get_attribute(:roux_entities) |> Enum.reverse()
 
     query_definition_clauses =
       for %Definition{name: name} = defn <- queries do
@@ -135,7 +172,8 @@ defmodule Roux.Query do
         def __roux_queries__ do
           %{
             queries: unquote(Macro.escape(queries)),
-            inputs: unquote(Macro.escape(inputs))
+            inputs: unquote(Macro.escape(inputs)),
+            entities: unquote(Macro.escape(entities))
           }
         end
       end

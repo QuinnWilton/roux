@@ -121,8 +121,23 @@ defmodule Roux.QueryTest do
       assert input_names == [:source_text, :config, :events]
     end
 
-    test "empty module returns %{queries: [], inputs: []}" do
-      assert %{queries: [], inputs: []} = Roux.Test.EmptyQueries.__roux_queries__()
+    test "empty module returns %{queries: [], inputs: [], entities: []}" do
+      assert %{queries: [], inputs: [], entities: []} =
+               Roux.Test.EmptyQueries.__roux_queries__()
+    end
+  end
+
+  # -- defentity --
+
+  describe "defentity" do
+    test "entity modules accumulated in __roux_queries__/0" do
+      %{entities: entities} = Roux.Test.SampleQueries.__roux_queries__()
+      assert Roux.Test.SampleEntity in entities
+    end
+
+    test "empty module has no entities" do
+      %{entities: entities} = Roux.Test.EmptyQueries.__roux_queries__()
+      assert entities == []
     end
   end
 
@@ -146,6 +161,16 @@ defmodule Roux.QueryTest do
     test "Database.register_query/3 accepts Definition data", %{db: db} do
       defn = Definition.new(:parse, Roux.Test.SampleQueries, :parse)
       assert :ok = Database.register_query(db, defn.name, Map.from_struct(defn))
+    end
+
+    test "register_module/2 auto-registers declared entities", %{db: db} do
+      Roux.Lang.register_module(db, Roux.Test.SampleQueries)
+
+      # Entity should be registered — creating an instance should work.
+      entity_id =
+        Roux.Entity.create(db, Roux.Test.SampleEntity, %{name: :x, body: :y, return_type: :z}, 1)
+
+      assert is_integer(entity_id)
     end
 
     test "duplicate registration raises ArgumentError", %{db: db} do

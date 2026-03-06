@@ -2,6 +2,8 @@ defmodule Roux.Test.SampleQueries do
   @moduledoc false
   use Roux.Query
 
+  defentity(Roux.Test.SampleEntity)
+
   definput :source_text, durability: :low
   definput :config, durability: :high
   definput :events
