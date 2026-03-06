@@ -138,28 +138,9 @@ defmodule Roux.Lang.Compiler do
       |> MapSet.new()
 
     source_dirs
-    |> Enum.flat_map(&walk_directory/1)
+    |> Enum.flat_map(&Lang.walk_directory/1)
     |> Enum.filter(fn path -> MapSet.member?(extensions, Path.extname(path)) end)
     |> Enum.sort()
-  end
-
-  # Recursively walks a directory, returning all file paths.
-  defp walk_directory(dir) do
-    case File.ls(dir) do
-      {:ok, entries} ->
-        Enum.flat_map(entries, fn entry ->
-          full = Path.join(dir, entry)
-
-          if File.dir?(full) do
-            walk_directory(full)
-          else
-            [full]
-          end
-        end)
-
-      {:error, _} ->
-        []
-    end
   end
 
   # -- Private: manifest handling --
@@ -269,9 +250,9 @@ defmodule Roux.Lang.Compiler do
       end)
 
     # Phase 2: Emit all modules at once so cross-module references resolve.
-    emit_modules(modules, output_dir)
+    emit_diags = emit_modules(modules, output_dir)
 
-    diagnostics
+    diagnostics ++ emit_diags
   end
 
   # Compiles a single file, catching errors and converting to diagnostics.
@@ -285,14 +266,18 @@ defmodule Roux.Lang.Compiler do
       quoted = if match?({:ok, _}, result), do: {path, elem(result, 1)}
       {quoted, diags}
     rescue
-      error ->
-        message = Exception.message(error)
+      e in [CompileError, SyntaxError, TokenMissingError, ArgumentError, RuntimeError] ->
+        {nil, [diagnostic(path, Exception.message(e), :error)]}
+    catch
+      {:roux_query_error, reason} ->
+        message = if is_binary(reason), do: reason, else: inspect(reason)
         {nil, [diagnostic(path, message, :error)]}
     end
   end
 
   # Compiles all quoted module ASTs together and writes .beam files.
   # Compiling as a single block ensures cross-module references resolve.
+  # Returns a list of diagnostics for compilation failures.
   defp emit_modules(modules, output_dir) do
     quoted_asts =
       modules
@@ -301,17 +286,24 @@ defmodule Roux.Lang.Compiler do
 
     case quoted_asts do
       [] ->
-        :ok
+        []
 
       asts ->
         block = {:__block__, [], asts}
 
-        compiled = Code.compile_quoted(block)
+        try do
+          compiled = Code.compile_quoted(block)
 
-        Enum.each(compiled, fn {module, binary} ->
-          beam_path = Path.join(output_dir, "#{module}.beam")
-          File.write!(beam_path, binary)
-        end)
+          Enum.each(compiled, fn {module, binary} ->
+            beam_path = Path.join(output_dir, "#{module}.beam")
+            File.write!(beam_path, binary)
+          end)
+
+          []
+        rescue
+          e in [CompileError, SyntaxError, TokenMissingError] ->
+            [diagnostic(e.file || "unknown", Exception.message(e), :error)]
+        end
     end
   end
 
@@ -334,7 +326,11 @@ defmodule Roux.Lang.Compiler do
             []
         end
       rescue
-        _ -> []
+        e in [ArgumentError] ->
+          [diagnostic(path, "diagnostics query failed: #{Exception.message(e)}", :warning)]
+      catch
+        {:roux_query_error, _reason} ->
+          []
       end
     else
       []
