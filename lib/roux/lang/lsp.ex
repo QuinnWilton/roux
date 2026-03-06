@@ -208,6 +208,19 @@ defmodule Roux.Lang.LSP do
 
   @impl true
   def handle_notification(%Initialized{}, lsp) do
+    %{db: db, languages: languages} = assigns(lsp)
+    root_uri = Map.get(assigns(lsp), :root_uri)
+
+    if root_uri do
+      case uri_to_path(root_uri) do
+        {:ok, root_path} ->
+          discover_workspace(db, languages, root_path)
+
+        :error ->
+          :ok
+      end
+    end
+
     {:noreply, lsp}
   end
 
@@ -464,6 +477,86 @@ defmodule Roux.Lang.LSP do
     case URI.parse(uri) do
       %URI{scheme: "file", path: path} when is_binary(path) -> {:ok, path}
       _ -> :error
+    end
+  end
+
+  defp path_to_uri(path) do
+    "file://" <> Path.expand(path)
+  end
+
+  # -- Private: workspace discovery --
+
+  # Discovers all source files in the workspace, sets their source_text inputs,
+  # and calls prepare/2 on each language so cross-file registries are populated.
+  defp discover_workspace(db, languages, root_path) do
+    extensions =
+      languages
+      |> Enum.flat_map(& &1.file_extensions())
+      |> MapSet.new()
+
+    source_paths =
+      root_path
+      |> walk_directory()
+      |> Enum.filter(fn path -> MapSet.member?(extensions, Path.extname(path)) end)
+      |> Enum.sort()
+
+    # Set source_text for files not already open in the editor.
+    Enum.each(source_paths, fn path ->
+      uri = path_to_uri(path)
+
+      unless input_set?(db, :source_text, uri) do
+        case File.read(path) do
+          {:ok, content} -> Input.set(db, :source_text, uri, content)
+          {:error, _} -> :ok
+        end
+      end
+    end)
+
+    # Build extension→language map and call prepare/2.
+    ext_to_lang =
+      Map.new(
+        for lang <- languages,
+            ext <- lang.file_extensions() do
+          {ext, lang}
+        end
+      )
+
+    paths_by_lang =
+      Enum.group_by(source_paths, fn path ->
+        Map.get(ext_to_lang, Path.extname(path))
+      end)
+
+    Enum.each(languages, fn lang ->
+      if function_exported?(lang, :prepare, 2) do
+        lang_uris =
+          paths_by_lang
+          |> Map.get(lang, [])
+          |> Enum.map(&path_to_uri/1)
+
+        lang.prepare(db, lang_uris)
+      end
+    end)
+  end
+
+  defp input_set?(db, input_name, key) do
+    Input.exists?(db, input_name, key)
+  end
+
+  defp walk_directory(dir) do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        Enum.flat_map(entries, fn entry ->
+          full = Path.join(dir, entry)
+
+          if File.dir?(full) do
+            walk_directory(full)
+          else
+            [full]
+          end
+        end)
+
+      {:error, _} ->
+        []
     end
   end
 end
