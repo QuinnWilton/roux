@@ -13,8 +13,8 @@ defmodule Roux.Lang.CompilerTest do
     %{tmp_dir: tmp_dir}
   end
 
-  defp compile(languages, tmp_dir) do
-    Compiler.compile(languages: languages, source_dirs: [tmp_dir])
+  defp compile(languages, tmp_dir, opts \\ []) do
+    Compiler.compile([languages: languages, source_dirs: [tmp_dir]] ++ opts)
   end
 
   # -- no languages configured --
@@ -113,6 +113,18 @@ defmodule Roux.Lang.CompilerTest do
 
       # Second compile — nothing changed, warm start returns noop.
       assert {:noop, []} = compile([Roux.Test.MiniLang], tmp_dir)
+    end
+
+    test "verbose: true prints message on noop", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "app.mini"), "source code")
+      compile([Roux.Test.MiniLang], tmp_dir)
+
+      output =
+        capture_io(fn ->
+          assert {:noop, []} = compile([Roux.Test.MiniLang], tmp_dir, verbose: true)
+        end)
+
+      assert output =~ "up to date"
     end
 
     test "stale file triggers recompilation", %{tmp_dir: tmp_dir} do

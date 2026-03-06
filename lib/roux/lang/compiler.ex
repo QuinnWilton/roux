@@ -75,6 +75,10 @@ defmodule Roux.Lang.Compiler do
 
         case change_status do
           :noop ->
+            if Keyword.get(roux_config, :verbose, false) do
+              Mix.shell().info("All roux files are up to date")
+            end
+
             {:noop, []}
 
           {:changed, stale_paths} ->
