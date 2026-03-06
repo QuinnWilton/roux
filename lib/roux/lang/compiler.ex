@@ -198,13 +198,7 @@ defmodule Roux.Lang.Compiler do
 
   # Calls prepare/2 on languages that implement it, passing their source paths.
   defp prepare_languages(db, languages, source_paths) do
-    ext_to_lang =
-      Map.new(
-        for lang <- languages,
-            ext <- lang.file_extensions() do
-          {ext, lang}
-        end
-      )
+    ext_to_lang = build_ext_to_lang(languages)
 
     paths_by_lang =
       Enum.group_by(source_paths, fn path ->
@@ -226,13 +220,7 @@ defmodule Roux.Lang.Compiler do
     output_dir = Mix.Project.compile_path()
     File.mkdir_p!(output_dir)
 
-    ext_to_lang =
-      Map.new(
-        for lang <- languages,
-            ext <- lang.file_extensions() do
-          {ext, lang}
-        end
-      )
+    ext_to_lang = build_ext_to_lang(languages)
 
     # Phase 1: Run compile queries and collect results + diagnostics.
     {modules, diagnostics} =
@@ -395,6 +383,16 @@ defmodule Roux.Lang.Compiler do
       end
 
     IO.puts(:stderr, "#{location}: #{prefix}: #{diag.message}")
+  end
+
+  # Builds an extension→language map from a list of language modules.
+  defp build_ext_to_lang(languages) do
+    Map.new(
+      for lang <- languages,
+          ext <- lang.file_extensions() do
+        {ext, lang}
+      end
+    )
   end
 
   # Builds a Mix compiler diagnostic with an absolute file path.
