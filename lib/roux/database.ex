@@ -101,15 +101,13 @@ defmodule Roux.Database do
   Registers a derived query definition.
 
   Called during module compilation by the `defquery` macro, or manually.
-  Raises `ArgumentError` if a query with the same name is already registered.
+  Idempotent — re-registering the same name overwrites the previous definition.
   """
   @spec register_query(t(), atom(), map()) :: :ok
   def register_query(%__MODULE__{query_registry: reg}, name, definition)
       when is_atom(name) and is_map(definition) do
-    case :ets.insert_new(reg, {name, definition}) do
-      true -> :ok
-      false -> raise ArgumentError, "query #{inspect(name)} is already registered"
-    end
+    :ets.insert(reg, {name, definition})
+    :ok
   end
 
   @doc """

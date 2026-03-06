@@ -173,13 +173,12 @@ defmodule Roux.QueryTest do
       assert is_integer(entity_id)
     end
 
-    test "duplicate registration raises ArgumentError", %{db: db} do
+    test "duplicate registration is idempotent", %{db: db} do
       defn = Definition.new(:parse, Roux.Test.SampleQueries, :parse)
       Database.register_query(db, defn.name, Map.from_struct(defn))
 
-      assert_raise ArgumentError, ~r/already registered/, fn ->
-        Database.register_query(db, defn.name, Map.from_struct(defn))
-      end
+      # Re-registering does not raise.
+      assert :ok = Database.register_query(db, defn.name, Map.from_struct(defn))
     end
   end
 
