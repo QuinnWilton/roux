@@ -284,21 +284,23 @@ defmodule Roux.Runtime do
     check_ctx = %Context{db: db, query_stack: parent_stack}
     Cycle.check!(check_ctx, query_key)
 
+    job = %{
+      db: db,
+      query_name: query_name,
+      key: key,
+      query_key: query_key,
+      current_rev: current_rev,
+      query_fun: query_fun,
+      old_entry: old_entry,
+      parent_stack: parent_stack
+    }
+
     case claim_dedup(db, query_key) do
       :claimed ->
         Cancellation.register_task(db, query_key, self())
 
         try do
-          do_compute(
-            db,
-            query_name,
-            key,
-            query_key,
-            current_rev,
-            query_fun,
-            old_entry,
-            parent_stack
-          )
+          do_compute(job)
         after
           Cancellation.unregister_task(db, query_key)
           :ets.delete(db.dedup_table, query_key)
@@ -310,7 +312,18 @@ defmodule Roux.Runtime do
     end
   end
 
-  defp do_compute(db, query_name, key, query_key, current_rev, query_fun, old_entry, parent_stack) do
+  defp do_compute(job) do
+    %{
+      db: db,
+      query_name: query_name,
+      key: key,
+      query_key: query_key,
+      current_rev: current_rev,
+      query_fun: query_fun,
+      old_entry: old_entry,
+      parent_stack: parent_stack
+    } = job
+
     # Fresh context for this query's execution.
     exec_ctx = %Context{
       db: db,
