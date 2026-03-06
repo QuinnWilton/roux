@@ -105,6 +105,19 @@ defmodule Roux.Input do
   end
 
   @doc """
+  Reads an input value, returning `{:ok, value}` or `:error`.
+
+  Unlike `get/3`, does not raise when the key has not been set.
+  """
+  @spec fetch(Database.t(), atom(), term()) :: {:ok, term()} | :error
+  def fetch(%Database{} = db, input_name, key) when is_atom(input_name) do
+    case Memo.get(db, {:input, input_name, key}) do
+      {:ok, %Entry{value: value}} -> {:ok, value}
+      :miss -> :error
+    end
+  end
+
+  @doc """
   Checks whether an input value has been set for the given key.
   """
   @spec exists?(Database.t(), atom(), term()) :: boolean()
