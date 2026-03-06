@@ -242,6 +242,9 @@ defmodule Roux.Lang.Compiler do
 
   # Builds an extension→language map, then compiles each source file.
   defp compile_all(db, languages, source_paths) do
+    output_dir = Mix.Project.compile_path()
+    File.mkdir_p!(output_dir)
+
     ext_to_lang =
       Map.new(
         for lang <- languages,
@@ -250,28 +253,65 @@ defmodule Roux.Lang.Compiler do
         end
       )
 
-    source_paths
-    |> Enum.flat_map(fn path ->
-      ext = Path.extname(path)
+    # Phase 1: Run compile queries and collect results + diagnostics.
+    {modules, diagnostics} =
+      Enum.reduce(source_paths, {[], []}, fn path, {mods, diags} ->
+        ext = Path.extname(path)
 
-      case Map.fetch(ext_to_lang, ext) do
-        {:ok, lang} -> compile_file(db, lang, path)
-        :error -> []
-      end
-    end)
+        case Map.fetch(ext_to_lang, ext) do
+          {:ok, lang} ->
+            {mod, file_diags} = compile_file(db, lang, path)
+            {[mod | mods], diags ++ file_diags}
+
+          :error ->
+            {mods, diags}
+        end
+      end)
+
+    # Phase 2: Emit all modules at once so cross-module references resolve.
+    emit_modules(modules, output_dir)
+
+    diagnostics
   end
 
   # Compiles a single file, catching errors and converting to diagnostics.
+  # Returns {quoted_ast | nil, diagnostics}.
   defp compile_file(db, lang, path) do
     compile_query = lang.compile_query()
 
     try do
-      dispatch_query(db, compile_query, path)
-      collect_diagnostics(db, lang, path)
+      result = dispatch_query(db, compile_query, path)
+      diags = collect_diagnostics(db, lang, path)
+      quoted = if match?({:ok, _}, result), do: {path, elem(result, 1)}
+      {quoted, diags}
     rescue
       error ->
         message = Exception.message(error)
-        [diagnostic(path, message, :error)]
+        {nil, [diagnostic(path, message, :error)]}
+    end
+  end
+
+  # Compiles all quoted module ASTs together and writes .beam files.
+  # Compiling as a single block ensures cross-module references resolve.
+  defp emit_modules(modules, output_dir) do
+    quoted_asts =
+      modules
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(fn {_path, quoted} -> quoted end)
+
+    case quoted_asts do
+      [] ->
+        :ok
+
+      asts ->
+        block = {:__block__, [], asts}
+
+        compiled = Code.compile_quoted(block)
+
+        Enum.each(compiled, fn {module, binary} ->
+          beam_path = Path.join(output_dir, "#{module}.beam")
+          File.write!(beam_path, binary)
+        end)
     end
   end
 
