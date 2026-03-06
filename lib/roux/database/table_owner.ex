@@ -51,8 +51,18 @@ defmodule Roux.Database.TableOwner do
 
     tables =
       case Heir.reclaim(heir_pid) do
-        {:ok, reclaimed} when reclaimed != %{} -> reclaimed
-        {:ok, _empty} -> create_tables(heir_pid)
+        {:ok, reclaimed} when reclaimed != %{} ->
+          # Re-set heir on all reclaimed tables. After transfer through the
+          # heir the heir option is cleared (owner == heir), so without this
+          # a second TableOwner crash would lose the tables.
+          for {tag, table} <- reclaimed do
+            :ets.setopts(table, {:heir, heir_pid, tag})
+          end
+
+          reclaimed
+
+        {:ok, _empty} ->
+          create_tables(heir_pid)
       end
 
     {:ok, %{tables: tables, heir: heir_pid}}
@@ -69,8 +79,11 @@ defmodule Roux.Database.TableOwner do
     {:noreply, state}
   end
 
-  def handle_info({:"ETS-TRANSFER", _table, _from, :dynamic}, state) do
-    # Accept ownership of dynamically created tables (entity and intern tables).
+  def handle_info({:"ETS-TRANSFER", table, _from, :dynamic}, state) do
+    # Set heir so dynamically created tables (entity, intern) survive crashes
+    # just like core tables. Use a unique tag to avoid collisions in the Heir's
+    # table map.
+    :ets.setopts(table, {:heir, state.heir, {:dynamic, table}})
     {:noreply, state}
   end
 
