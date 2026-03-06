@@ -166,13 +166,17 @@ defmodule Roux.Lang do
   """
   @spec register_module(Database.t(), module()) :: :ok
   def register_module(%Database{} = db, module) when is_atom(module) do
-    %{queries: queries, inputs: inputs} = module.__roux_queries__()
+    metadata = module.__roux_queries__()
 
-    Enum.each(inputs, fn %Input.Definition{} = defn ->
+    Enum.each(Map.get(metadata, :entities, []), fn entity_module ->
+      Database.register_entity(db, entity_module)
+    end)
+
+    Enum.each(metadata.inputs, fn %Input.Definition{} = defn ->
       Input.register(db, defn)
     end)
 
-    Enum.each(queries, fn %Query.Definition{} = defn ->
+    Enum.each(metadata.queries, fn %Query.Definition{} = defn ->
       Database.register_query(db, defn.name, %{module: defn.module, function: defn.function})
     end)
 
