@@ -80,11 +80,11 @@ defmodule Roux.RevisionTest do
     end
   end
 
-  describe "last_changed_at_or_below/2" do
+  describe "last_changed_at_or_above/2" do
     test "returns 0 on fresh tracker for all levels", %{rev: rev} do
-      assert Revision.last_changed_at_or_below(rev, :high) == 0
-      assert Revision.last_changed_at_or_below(rev, :medium) == 0
-      assert Revision.last_changed_at_or_below(rev, :low) == 0
+      assert Revision.last_changed_at_or_above(rev, :high) == 0
+      assert Revision.last_changed_at_or_above(rev, :medium) == 0
+      assert Revision.last_changed_at_or_above(rev, :low) == 0
     end
 
     test ":high includes only :high changes", %{rev: rev} do
@@ -92,7 +92,7 @@ defmodule Roux.RevisionTest do
       _r2 = Revision.advance(rev, :medium)
       _r3 = Revision.advance(rev, :low)
 
-      assert Revision.last_changed_at_or_below(rev, :high) == r1
+      assert Revision.last_changed_at_or_above(rev, :high) == r1
     end
 
     test ":medium includes :medium + :high changes", %{rev: rev} do
@@ -101,7 +101,7 @@ defmodule Roux.RevisionTest do
       _r3 = Revision.advance(rev, :low)
 
       # :medium should be max(:high, :medium) = max(1, 2) = 2
-      assert Revision.last_changed_at_or_below(rev, :medium) == r2
+      assert Revision.last_changed_at_or_above(rev, :medium) == r2
     end
 
     test ":low includes :low + :medium + :high changes", %{rev: rev} do
@@ -110,7 +110,7 @@ defmodule Roux.RevisionTest do
       r3 = Revision.advance(rev, :low)
 
       # :low should be max(:high, :medium, :low) = max(1, 2, 3) = 3
-      assert Revision.last_changed_at_or_below(rev, :low) == r3
+      assert Revision.last_changed_at_or_above(rev, :low) == r3
     end
 
     test "returns max across relevant levels regardless of advance order", %{rev: rev} do
@@ -119,10 +119,10 @@ defmodule Roux.RevisionTest do
       r2 = Revision.advance(rev, :high)
 
       # :medium includes :medium + :high, and :high (r2) is the max.
-      assert Revision.last_changed_at_or_below(rev, :medium) == r2
+      assert Revision.last_changed_at_or_above(rev, :medium) == r2
 
       # :low includes all three, and :high (r2) is still the max.
-      assert Revision.last_changed_at_or_below(rev, :low) == r2
+      assert Revision.last_changed_at_or_above(rev, :low) == r2
     end
   end
 
@@ -166,9 +166,9 @@ defmodule Roux.RevisionTest do
         rev = Revision.new()
         Enum.each(levels, &Revision.advance(rev, &1))
 
-        low = Revision.last_changed_at_or_below(rev, :low)
-        medium = Revision.last_changed_at_or_below(rev, :medium)
-        high = Revision.last_changed_at_or_below(rev, :high)
+        low = Revision.last_changed_at_or_above(rev, :low)
+        medium = Revision.last_changed_at_or_above(rev, :medium)
+        high = Revision.last_changed_at_or_above(rev, :high)
 
         assert low >= medium
         assert medium >= high

@@ -109,7 +109,7 @@ defmodule Roux.ValidationTest do
       current_rev = Revision.current(db.revision)
 
       # Entry with :high durability, verified at rev 1.
-      # last_changed_at_or_below(:high) == 0 <= 1, so durability skip fires.
+      # last_changed_at_or_above(:high) == 0 <= 1, so durability skip fires.
       entry = make_entry(verified_at: 1, durability: :high)
       Memo.put(db, {:parse, "file.ex"}, entry)
 
@@ -143,7 +143,7 @@ defmodule Roux.ValidationTest do
       Memo.put(db, dep_key, make_entry(changed_at: 1, verified_at: 1))
 
       # Entry verified at 0, durability :high.
-      # last_changed_at_or_below(:high) == 1 > 0, durability skip doesn't fire.
+      # last_changed_at_or_above(:high) == 1 > 0, durability skip doesn't fire.
       entry = make_entry(verified_at: 0, durability: :high, dependencies: [dep_key])
       Memo.put(db, {:parse, "file.ex"}, entry)
 
@@ -393,7 +393,7 @@ defmodule Roux.ValidationTest do
         # Brute-force: stale iff any dep's changed_at > query's verified_at.
         # Case 2 never fires because gap >= 1 ensures current_rev > query_verified_at.
         # Durability skip never fires: all revisions advanced via :low, so
-        # last_changed_at_or_below(:low) == current_rev > query_verified_at.
+        # last_changed_at_or_above(:low) == current_rev > query_verified_at.
         expected =
           if Enum.any?(dep_changed_ats, &(&1 > query_verified_at)),
             do: :stale,
@@ -435,7 +435,7 @@ defmodule Roux.ValidationTest do
           end)
 
         # Use :high durability. Since all revisions advanced via :low,
-        # last_changed_at_or_below(:high) == 0, which is <= any verified_at >= 1.
+        # last_changed_at_or_above(:high) == 0, which is <= any verified_at >= 1.
         # The durability skip should fire and return :valid.
         entry =
           make_entry(verified_at: query_verified_at, dependencies: deps, durability: :high)
@@ -446,7 +446,7 @@ defmodule Roux.ValidationTest do
 
         # Verify the precondition that justifies the skip:
         # no input at the :high durability level has changed since verified_at.
-        assert Revision.last_changed_at_or_below(db.revision, :high) <= query_verified_at
+        assert Revision.last_changed_at_or_above(db.revision, :high) <= query_verified_at
 
         Database.shutdown(db)
       end

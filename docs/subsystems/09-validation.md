@@ -60,7 +60,7 @@ validate(db, query_key, ensure_fn):
   # Case 3: durability optimization
   # If this query's minimum dependency durability is D, and no input
   # of durability D or higher has changed since verified_at, skip traversal.
-  if Revision.last_changed_at_or_below(db.revision, entry.durability) <= entry.verified_at:
+  if Revision.last_changed_at_or_above(db.revision, entry.durability) <= entry.verified_at:
     Memo.update_verified(db, query_key, current_rev)
     emit [:roux, :validation, :durability_skip]
     emit [:roux, :validation, :stop] with duration, result: :valid
@@ -182,7 +182,7 @@ The durability optimization avoids walking the dependency graph entirely for que
 - If `durability == :high` and no `:high` input has changed since `verified_at`, the query cannot possibly be stale.
 - If `durability == :medium` and no `:medium` or `:high` input has changed since `verified_at`, same.
 
-The `last_changed_at_or_below/2` function on Revision returns the max revision across all levels at or below the given level. If this value is ≤ `verified_at`, validation can skip entirely.
+The `last_changed_at_or_above/2` function on Revision returns the max revision across all levels at or below the given level. If this value is ≤ `verified_at`, validation can skip entirely.
 
 ## Testing strategy
 
@@ -207,7 +207,7 @@ The `last_changed_at_or_below/2` function on Revision returns the max revision a
 
 **Staleness correctness**: generate random dependency sets with random `changed_at` / `verified_at` values. Assert validation result matches brute-force "any dep changed?" check. Durability skip is excluded by using `:low` durability and advancing all revisions via `:low`.
 
-**Durability precondition verification**: generate random dependency sets with `:high` durability while advancing all revisions via `:low`. Assert the durability skip fires and verify the skip precondition (`last_changed_at_or_below(:high) <= verified_at`) holds.
+**Durability precondition verification**: generate random dependency sets with `:high` durability while advancing all revisions via `:low`. Assert the durability skip fires and verify the skip precondition (`last_changed_at_or_above(:high) <= verified_at`) holds.
 
 **The critical correctness property** (deferred — needs Runtime): for any sequence of input changes and query requests, the incremental result equals the batch (non-incremental) result. This is the single most important test in the entire framework.
 

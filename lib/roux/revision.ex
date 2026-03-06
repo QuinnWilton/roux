@@ -23,7 +23,7 @@ defmodule Roux.Revision do
 
   All operations are lock-free. `advance/2` uses `:atomics.add_get/3` for
   the global counter and `:atomics.put/3` for durability tracking.
-  `last_changed_at_or_below/2` reads multiple atomics slots without
+  `last_changed_at_or_above/2` reads multiple atomics slots without
   cross-slot atomicity — the worst case is a spurious validation
   (conservative, not incorrect).
   """
@@ -90,26 +90,28 @@ defmodule Roux.Revision do
   end
 
   @doc """
-  Returns the maximum revision across all durability levels at or below the
+  Returns the maximum revision across all durability levels at or above the
   given level. Used for the durability optimization during validation.
 
-  - `:low` includes `:low` + `:medium` + `:high` changes.
+  Higher durability means more stable (changes less often):
+
+  - `:low` includes `:low` + `:medium` + `:high` changes (all levels).
   - `:medium` includes `:medium` + `:high` changes.
   - `:high` includes only `:high` changes.
   """
-  @spec last_changed_at_or_below(t(), durability()) :: revision()
-  def last_changed_at_or_below(%__MODULE__{durability: dur}, :high) do
+  @spec last_changed_at_or_above(t(), durability()) :: revision()
+  def last_changed_at_or_above(%__MODULE__{durability: dur}, :high) do
     :atomics.get(dur, @high_slot)
   end
 
-  def last_changed_at_or_below(%__MODULE__{durability: dur}, :medium) do
+  def last_changed_at_or_above(%__MODULE__{durability: dur}, :medium) do
     max(
       :atomics.get(dur, @high_slot),
       :atomics.get(dur, @medium_slot)
     )
   end
 
-  def last_changed_at_or_below(%__MODULE__{durability: dur}, :low) do
+  def last_changed_at_or_above(%__MODULE__{durability: dur}, :low) do
     high = :atomics.get(dur, @high_slot)
     medium = :atomics.get(dur, @medium_slot)
     low = :atomics.get(dur, @low_slot)

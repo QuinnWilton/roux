@@ -75,7 +75,7 @@ defmodule Roux.Validation do
 
       {:ok, %Entry{} = entry} ->
         # Case 3: durability skip.
-        if Revision.last_changed_at_or_below(db.revision, entry.durability) <=
+        if Revision.last_changed_at_or_above(db.revision, entry.durability) <=
              entry.verified_at do
           Memo.update_verified(db, query_key, current_rev)
           Telemetry.durability_skip(query_name, key, entry.durability, current_rev)

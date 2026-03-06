@@ -50,7 +50,7 @@ Durability levels map to atomics slots:
 # Return the revision at which the given durability level last had an input change.
 # Used during validation to skip subgraphs.
 
-@spec last_changed_at_or_below(t(), durability()) :: revision()
+@spec last_changed_at_or_above(t(), durability()) :: revision()
 # Return the maximum revision across all durability levels at or below the given level.
 # :low includes :low + :medium + :high changes.
 # :medium includes :medium + :high changes.
@@ -76,7 +76,7 @@ The ordering is: `:high` > `:medium` > `:low` (high durability = changes less of
 
 - Use `:atomics.add_get/3` for the revision counter — atomic increment, returns new value.
 - Use `:atomics.put/3` for durability tracking — store the new revision at the appropriate slot.
-- `last_changed_at_or_below/2` reads multiple atomics slots and returns the max. This is not atomic across slots, but that's fine — the worst case is a spurious validation (conservative, not incorrect).
+- `last_changed_at_or_above/2` reads multiple atomics slots and returns the max. This is not atomic across slots, but that's fine — the worst case is a spurious validation (conservative, not incorrect).
 - Revision starts at 0. The first `advance/2` call sets it to 1.
 
 ## Testing strategy
@@ -86,9 +86,9 @@ The ordering is: `:high` > `:medium` > `:low` (high durability = changes less of
 - `advance/2` increments and returns consecutive values
 - `last_changed/2` returns 0 for levels that haven't changed
 - `last_changed/2` returns correct revision after advance
-- `last_changed_at_or_below/2` returns max across relevant levels
+- `last_changed_at_or_above/2` returns max across relevant levels
 
 ### Property tests
 - Revision is strictly monotonically increasing across any sequence of advance calls
 - `last_changed(level)` is always ≤ `current()`
-- `last_changed_at_or_below(:low) >= last_changed_at_or_below(:medium) >= last_changed_at_or_below(:high)`
+- `last_changed_at_or_above(:low) >= last_changed_at_or_above(:medium) >= last_changed_at_or_above(:high)`
