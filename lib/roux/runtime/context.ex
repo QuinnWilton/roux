@@ -31,7 +31,7 @@ defmodule Roux.Runtime.Context do
           active_query: Roux.Memo.query_key() | nil,
           query_stack: [Roux.Memo.query_key()],
           recorded_deps: [Roux.Memo.dependency()],
-          created_entities: [{module(), term()}],
+          created_entities: [{module(), Roux.Entity.entity_id()}],
           min_durability: Roux.Revision.durability()
         }
 
