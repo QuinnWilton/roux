@@ -141,7 +141,7 @@ defmodule Roux.Runtime do
   def input(%Database{} = db, input_name, key) when is_atom(input_name) do
     query_key = {:input, input_name, key}
     record_dep(query_key)
-    track_input_durability(db, input_name)
+    track_input_durability(db, input_name, query_key)
 
     Roux.Input.get(db, input_name, key)
   end
@@ -157,11 +157,54 @@ defmodule Roux.Runtime do
   def input!(%Database{} = db, input_name, key) when is_atom(input_name) do
     query_key = {:input, input_name, key}
     record_dep(query_key)
-    track_input_durability(db, input_name)
+    track_input_durability(db, input_name, query_key)
 
     case Roux.Input.fetch(db, input_name, key) do
       {:ok, value} -> value
       :error -> throw({:roux_query_error, {:input_not_set, input_name, key}})
+    end
+  end
+
+  @doc """
+  Runs `fun` with dependency recording and durability propagation
+  suppressed for the ENCLOSING query.
+
+  Nested queries inside the block still execute normally — memoized,
+  deduplicated, and cycle-checked in the same process — and record their
+  own dependencies in their own memo entries. Only the caller's edges are
+  discarded.
+
+  For demand-driven warm-up whose exact dependencies are recorded
+  separately: a compiler pre-loading hinted modules before compiling, with
+  precise edges recorded from a tracer afterward. The hint list
+  over-approximates, so tracking it would over-invalidate.
+
+  By design the enclosing query does NOT re-run when an untracked-only
+  input changes — that is the whole point, and it means the caller is
+  responsible for recording the real edges some other way.
+
+  The query stack is deliberately preserved, so a cycle through an
+  untracked call still raises `Roux.Cycle.Error`.
+  """
+  @spec untracked((-> result)) :: result when result: var
+  def untracked(fun) when is_function(fun, 0) do
+    case get_context() do
+      nil ->
+        fun.()
+
+      %Context{recorded_deps: deps, min_durability: durability} ->
+        try do
+          fun.()
+        after
+          # Re-read: nested execution replaces the context struct, and the
+          # parent's is restored by the time we get here. Rolling back these
+          # two fields discards everything recorded inside the block while
+          # leaving query_stack (cycle detection) alone.
+          case get_context() do
+            nil -> :ok
+            ctx -> put_context(%{ctx | recorded_deps: deps, min_durability: durability})
+          end
+        end
     end
   end
 
@@ -453,13 +496,13 @@ defmodule Roux.Runtime do
 
   # -- Private: durability propagation --
 
-  defp track_input_durability(db, input_name) do
+  defp track_input_durability(db, input_name, query_key) do
     case get_context() do
       nil ->
         :ok
 
       ctx ->
-        durability = lookup_input_durability(db, input_name)
+        durability = input_durability(db, input_name, query_key)
         put_context(%{ctx | min_durability: min_durability(ctx.min_durability, durability)})
     end
   end
@@ -477,6 +520,14 @@ defmodule Roux.Runtime do
           :miss ->
             :ok
         end
+    end
+  end
+
+  # Per-KEY durability, falling back to the input definition's default.
+  defp input_durability(db, input_name, query_key) do
+    case Memo.get(db, query_key) do
+      {:ok, %Entry{durability: durability}} when not is_nil(durability) -> durability
+      _ -> lookup_input_durability(db, input_name)
     end
   end
 

@@ -88,9 +88,15 @@ defmodule Roux.Validation do
   end
 
   defp walk_dependencies(db, query_key, entry, current_rev, ensure_fn) do
-    case check_deps(db, entry.dependencies, entry.verified_at, ensure_fn) do
-      :clean ->
-        Memo.update_verified(db, query_key, current_rev)
+    case check_deps(db, entry.dependencies, entry.verified_at, ensure_fn, :high) do
+      {:clean, durability} ->
+        # Refresh durability, not just verified_at. It is the minimum over
+        # transitive inputs and is otherwise only recomputed when an entry
+        # EXECUTES — but early cutoff means a dependent is usually
+        # validated without executing, so a stale level would persist and
+        # then skip a change at a lower one. The walk just read every
+        # dependency's entry, so the current minimum is already in hand.
+        Memo.update_verified(db, query_key, current_rev, durability)
         :valid
 
       :stale ->
@@ -98,7 +104,7 @@ defmodule Roux.Validation do
     end
   end
 
-  defp check_deps(_db, [], _verified_at, _ensure_fn), do: :clean
+  defp check_deps(_db, [], _verified_at, _ensure_fn, durability), do: {:clean, durability}
 
   # Entity field dependencies are checked by reading the field's changed_at
   # directly from the entity table. No ensure_fn call needed — entities are
@@ -107,34 +113,44 @@ defmodule Roux.Validation do
          db,
          [{:entity_field, module, entity_id, field_name} | rest],
          verified_at,
-         ensure_fn
+         ensure_fn,
+         durability
        ) do
     changed_at = Entity.field_changed_at(db, module, entity_id, field_name)
 
     if changed_at > verified_at do
       :stale
     else
-      check_deps(db, rest, verified_at, ensure_fn)
+      # Entities carry no durability of their own, so they neither raise
+      # nor lower the minimum.
+      check_deps(db, rest, verified_at, ensure_fn, durability)
     end
   rescue
     ArgumentError -> :stale
   end
 
-  defp check_deps(db, [dep | rest], verified_at, ensure_fn) do
+  defp check_deps(db, [dep | rest], verified_at, ensure_fn, durability) do
     ensure_fn.(db, dep)
 
     case Memo.get(db, dep) do
       {:ok, %Entry{changed_at: changed_at}} when changed_at > verified_at ->
         :stale
 
-      {:ok, _entry} ->
-        check_deps(db, rest, verified_at, ensure_fn)
+      {:ok, %Entry{durability: dep_durability}} ->
+        check_deps(db, rest, verified_at, ensure_fn, min_durability(durability, dep_durability))
 
       # Dependency removed after ensure_fn — treat as stale.
       :miss ->
         :stale
     end
   end
+
+  # `:low` is absorbing, matching Runtime's propagation.
+  defp min_durability(:low, _), do: :low
+  defp min_durability(_, :low), do: :low
+  defp min_durability(:medium, _), do: :medium
+  defp min_durability(_, :medium), do: :medium
+  defp min_durability(_, _), do: :high
 
   # Extracts query_name and key for telemetry from the query_key tuple.
   defp decompose_query_key({:input, input_name, key}), do: {:input, {input_name, key}}

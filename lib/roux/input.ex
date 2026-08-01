@@ -58,10 +58,19 @@ defmodule Roux.Input do
   structural equality), no revision advance occurs. Otherwise, the revision
   counter advances at the input's durability level.
 
+  `:durability` overrides the input definition's default FOR THIS KEY.
+  Durability is otherwise a property of the whole input, which is too
+  coarse for an editor: the file being typed in changes constantly while
+  its neighbours do not, and one shared level means validation's
+  durability check can never short-circuit. Marking the active buffer
+  `:low` and leaving everything else `:medium` lets a keystroke advance
+  only the low slot, so queries that do not read the edited file skip
+  their dependency walk entirely.
+
   Raises `ArgumentError` if the input is not registered.
   """
-  @spec set(Database.t(), atom(), term(), term()) :: :ok
-  def set(%Database{} = db, input_name, key, value) when is_atom(input_name) do
+  @spec set(Database.t(), atom(), term(), term(), keyword()) :: :ok
+  def set(%Database{} = db, input_name, key, value, opts \\ []) when is_atom(input_name) do
     query_key = {:input, input_name, key}
     new_hash = :erlang.phash2(value)
 
@@ -70,9 +79,24 @@ defmodule Roux.Input do
       when old_hash == new_hash and old_value == value ->
         :ok
 
-      _miss_or_changed ->
-        durability = lookup_durability!(db, input_name)
-        new_rev = Revision.advance(db.revision, durability)
+      other ->
+        durability =
+          Keyword.get_lazy(opts, :durability, fn -> lookup_durability!(db, input_name) end)
+
+        # When a key's durability CHANGES, advance at the level it USED to
+        # have, not the new one. Readers recorded at the old level check
+        # only that level and above; advancing solely at the new (lower)
+        # one leaves them skipping validation and serving stale values.
+        # Advancing at the old level invalidates them once, after which
+        # they re-record the new level — validation refreshes it — and
+        # subsequent writes are cheap again.
+        advance_at =
+          case other do
+            {:ok, %Entry{durability: old}} when old != nil and old != durability -> old
+            _ -> durability
+          end
+
+        new_rev = Revision.advance(db.revision, advance_at)
 
         entry = %Entry{
           value: value,

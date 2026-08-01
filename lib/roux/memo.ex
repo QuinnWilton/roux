@@ -11,6 +11,7 @@ defmodule Roux.Memo do
   """
 
   alias Roux.Database
+  alias Roux.Revision
   alias Roux.Memo.Entry
 
   @type query_key :: {query_name :: atom(), key :: term()} | {:input, atom(), term()}
@@ -58,6 +59,25 @@ defmodule Roux.Memo do
     # Atomically update only verified_at (position 5 in the ETS tuple).
     # No-op if no entry exists for this key.
     :ets.update_element(table, key, {5, revision})
+    :ok
+  end
+
+  @doc """
+  Updates `verified_at` and `durability` together.
+
+  Durability is the minimum over an entry's transitive inputs, computed
+  when the entry EXECUTES. Early cutoff means a dependent is frequently
+  validated WITHOUT executing, so without refreshing it here an entry
+  keeps whatever level it was first computed with — and then skips a
+  change at a lower level, serving a stale value with no error. Validation
+  already reads every dependency's entry, so the current minimum is in
+  hand exactly where it needs to be written.
+  """
+  @spec update_verified(Database.t(), query_key(), non_neg_integer(), Revision.durability()) ::
+          :ok
+  def update_verified(%Database{memo_table: table}, key, revision, durability) do
+    # verified_at is position 5, durability position 7.
+    :ets.update_element(table, key, [{5, revision}, {7, durability}])
     :ok
   end
 

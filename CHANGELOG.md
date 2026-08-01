@@ -4,6 +4,44 @@
 
 ### Added
 
+- **Per-key durability**, and the two soundness fixes it needs.
+  `Roux.Input.set/5` takes `durability:` to override the input
+  definition's level for one key — Salsa's
+  `set_file_text_with_durability`, which lets a consumer mark the file
+  being edited `:low` while its neighbours stay `:medium`, so a write
+  advances only the low slot and validation can skip everything that
+  cannot be affected. `Runtime` now reads a key's level from its own
+  entry rather than from the input registry.
+
+  Both failure modes below produce STALE VALUES with no error, and
+  `test/roux/durability_test.exs` checks values rather than bookkeeping:
+
+    * a key whose durability CHANGES now advances the revision at its OLD
+      level. Readers recorded at that level check only it and above;
+      advancing solely at the new, lower one left them skipping validation
+      forever.
+    * `Validation` now refreshes an entry's durability during the
+      dependency walk. Durability is the minimum over transitive inputs
+      and was only recomputed when an entry EXECUTED — but early cutoff
+      means a dependent is usually validated WITHOUT executing, so it kept
+      its first level indefinitely and then skipped a change at a lower
+      one. The walk already reads every dependency's entry, so the current
+      minimum is in hand exactly where it needs writing.
+      `Memo.update_verified/4` writes both fields together.
+
+  Worth knowing before reaching for this: measured on planchette, marking
+  the edited buffer `:low` changed nothing — 57-60ms per keystroke with
+  and without, on a 256-file project. Validation already short-circuits on
+  `verified_at == current_rev`, which saves the same work. The technique
+  is sound and available; it is not automatically a win.
+
+- `Roux.Runtime.untracked/1` — runs a fun with dependency recording and
+  durability propagation suppressed for the enclosing query, while nested
+  queries still execute normally (memoized, deduplicated, cycle-checked in
+  the same process). For demand-driven warm-up work whose exact
+  dependencies are recorded separately, e.g. a compiler pre-loading hinted
+  modules before compiling, with precise edges recorded from a tracer
+  afterward.
 - `Roux.Runtime.create/3`, `Roux.Runtime.field/4`, `Roux.Runtime.lookup/3` — entity helpers for use inside `defquery` blocks. `create/3` creates or updates an entity and records it in the output set for GC. `field/4` reads a field and records a field-level dependency for fine-grained invalidation. `lookup/3` performs a non-interning identity lookup without recording a dependency.
 - `Roux.Runtime.read/3` — reads all fields from an entity as a map, recording a field-level dependency on each. Eliminates per-field reconstitution boilerplate.
 - `Roux.Runtime.query!/3` — like `query/3` but throws on `{:error, reason}`, enabling flat error propagation instead of nested `case` statements. The throw is caught automatically by `defquery`-generated functions.
