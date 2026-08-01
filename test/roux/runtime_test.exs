@@ -285,6 +285,127 @@ defmodule Roux.RuntimeTest do
     end
   end
 
+  # -- Untracked --
+
+  describe "untracked/1" do
+    test "discards deps recorded inside the block, keeps deps outside it", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "dep", "v1")
+      Input.set(db, :source, "real", "r1")
+
+      fun = fn db, _key ->
+        warm = Runtime.untracked(fn -> Runtime.input(db, :source, "dep") end)
+        real = Runtime.input(db, :source, "real")
+        {warm, real}
+      end
+
+      assert Runtime.execute(db, :untracked_outer, "a", fun) == {"v1", "r1"}
+
+      {:ok, entry} = Memo.get(db, {:untracked_outer, "a"})
+      assert {:input, :source, "real"} in entry.dependencies
+      refute {:input, :source, "dep"} in entry.dependencies
+    end
+
+    test "changing an untracked-only input does not invalidate the query", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "dep", "v1")
+
+      counter = :counters.new(1, [])
+
+      fun = fn db, _key ->
+        :counters.add(counter, 1, 1)
+        Runtime.untracked(fn -> Runtime.input(db, :source, "dep") end)
+      end
+
+      assert Runtime.execute(db, :untracked_only, "a", fun) == "v1"
+      assert :counters.get(counter, 1) == 1
+
+      Input.set(db, :source, "dep", "v2")
+
+      # By design: the untracked read is not a dependency, so the memo
+      # stays valid and the stale value is served without recomputing.
+      assert Runtime.execute(db, :untracked_only, "a", fun) == "v1"
+      assert :counters.get(counter, 1) == 1
+    end
+
+    test "does not lower the enclosing query's durability", %{db: db} do
+      register_input(db, :volatile, durability: :low)
+      Input.set(db, :volatile, "a", "v")
+
+      fun = fn db, _key ->
+        Runtime.untracked(fn -> Runtime.input(db, :volatile, "a") end)
+        :constant
+      end
+
+      Runtime.execute(db, :untracked_durability, "a", fun)
+
+      {:ok, entry} = Memo.get(db, {:untracked_durability, "a"})
+      assert entry.durability == :high
+    end
+
+    test "nested queries inside the block still memoize with their own deps", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "k", "v1")
+
+      inner = fn db, key -> Runtime.input(db, :source, key) end
+
+      fun = fn db, _key ->
+        Runtime.untracked(fn -> Runtime.execute(db, :untracked_inner, "k", inner) end)
+      end
+
+      assert Runtime.execute(db, :untracked_caller, "a", fun) == "v1"
+
+      # The inner query's own memo entry is intact, with its input dep.
+      {:ok, inner_entry} = Memo.get(db, {:untracked_inner, "k"})
+      assert {:input, :source, "k"} in inner_entry.dependencies
+
+      # The caller recorded no dep on the inner query.
+      {:ok, outer_entry} = Memo.get(db, {:untracked_caller, "a"})
+      refute {:untracked_inner, "k"} in outer_entry.dependencies
+    end
+
+    test "preserves cycle detection through untracked calls", %{db: db} do
+      recursive_fun = fn db, key ->
+        Runtime.untracked(fn ->
+          Runtime.execute(db, :untracked_cycle, key, fn _db2, _key2 -> :unreachable end)
+        end)
+      end
+
+      assert_raise Roux.Cycle.Error, fn ->
+        Runtime.execute(db, :untracked_cycle, "a", recursive_fun)
+      end
+    end
+
+    test "restores dep tracking after an exception inside the block", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "dep", "v1")
+      Input.set(db, :source, "real", "r1")
+
+      fun = fn db, _key ->
+        try do
+          Runtime.untracked(fn ->
+            Runtime.input(db, :source, "dep")
+            raise "boom"
+          end)
+        rescue
+          _ -> :ok
+        end
+
+        Runtime.input(db, :source, "real")
+      end
+
+      assert Runtime.execute(db, :untracked_raise, "a", fun) == "r1"
+
+      {:ok, entry} = Memo.get(db, {:untracked_raise, "a"})
+      assert {:input, :source, "real"} in entry.dependencies
+      refute {:input, :source, "dep"} in entry.dependencies
+    end
+
+    test "runs the fun plainly when no query context is active", %{db: _db} do
+      assert Runtime.untracked(fn -> :plain end) == :plain
+    end
+  end
+
   # -- Dedup --
 
   describe "dedup" do
