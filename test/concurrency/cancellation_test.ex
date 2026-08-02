@@ -93,6 +93,7 @@ defmodule Roux.Concurrency.CancellationCompletionRaceTest do
   defp make_db do
     memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
     dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
     task_reg = :ets.new(:task_reg, [:set, :public, write_concurrency: true])
     reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
 
@@ -103,6 +104,7 @@ defmodule Roux.Concurrency.CancellationCompletionRaceTest do
       input_registry: reg,
       task_registry: task_reg,
       dedup_table: dedup,
+      dedup_waiters: waiters,
       intern_registry: reg,
       entity_registry: reg,
       table_owner: self(),
@@ -196,6 +198,7 @@ defmodule Roux.Concurrency.CancellationRegistrationRaceTest do
   defp make_db do
     memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
     dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
     task_reg = :ets.new(:task_reg, [:set, :public, write_concurrency: true])
     reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
 
@@ -206,6 +209,7 @@ defmodule Roux.Concurrency.CancellationRegistrationRaceTest do
       input_registry: reg,
       task_registry: task_reg,
       dedup_table: dedup,
+      dedup_waiters: waiters,
       intern_registry: reg,
       entity_registry: reg,
       table_owner: self(),
@@ -346,6 +350,7 @@ defmodule Roux.Concurrency.CancellationDedupCleanupRaceTest do
   defp make_db do
     memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
     dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
     task_reg = :ets.new(:task_reg, [:set, :public, write_concurrency: true])
     reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
 
@@ -356,6 +361,7 @@ defmodule Roux.Concurrency.CancellationDedupCleanupRaceTest do
       input_registry: reg,
       task_registry: task_reg,
       dedup_table: dedup,
+      dedup_waiters: waiters,
       intern_registry: reg,
       entity_registry: reg,
       table_owner: self(),
@@ -489,6 +495,7 @@ defmodule Roux.Concurrency.CancellationInputSetRaceTest do
   defp make_db do
     memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
     dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
     task_reg = :ets.new(:task_reg, [:set, :public, write_concurrency: true])
     reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
 
@@ -499,6 +506,7 @@ defmodule Roux.Concurrency.CancellationInputSetRaceTest do
       input_registry: reg,
       task_registry: task_reg,
       dedup_table: dedup,
+      dedup_waiters: waiters,
       intern_registry: reg,
       entity_registry: reg,
       table_owner: self(),

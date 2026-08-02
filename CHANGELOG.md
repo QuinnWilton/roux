@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Fixed (correctness)
+
+- **A duplicate requester now waits for the claimant to FINISH, not to
+  die.** `Roux.Runtime`'s dedup slot let one process compute a key while
+  others waited — but the only wakeup was a monitor `:DOWN`. That is
+  indistinguishable from completion when the computing process is a
+  short-lived `Task`, which is what every test used and what the original
+  design assumed. It is a permanent hang when the computing process is
+  long-lived: a GenServer, an LSP loop, an IEx session. Planchette hit this
+  and had to serialise its query fan-out to work around it.
+
+  The claimant now publishes completion to a `dedup_waiters` bag. The
+  ordering is what makes it race-free: a waiter registers itself and *then*
+  re-checks the claim row, while the claimant deletes the claim row and
+  *then* reads the waiter list — so a row still present after registering
+  means the claimant cannot have read the list yet, and a row already gone
+  means the result is in the memo. The monitor is kept for the abnormal
+  path, where no completion message is ever sent.
+
+  Also fixes a related liveness bug: a claimant that died abnormally left
+  its claim row behind (its `after` block never ran), so a woken waiter
+  re-entered, failed `insert_new` against the dead claimant's row, monitored
+  a dead pid, got an immediate `:noproc`, and looped — forever, because
+  nothing else removed that row. A waiter now reaps a claim whose owner is
+  gone, using `delete_object/2` so a claim since taken over by a live
+  process is left alone.
+
+  Note `release_dedup/2` uses `lookup` + `delete` rather than the atomic
+  `take/2`: Concuerror does not model `ets:take`, and this is exactly the
+  code its dedup scenarios exist to explore. The lost atomicity is safe —
+  the completion message is the fast path, the waiter's re-check is the
+  correctness guarantee. 326 of 326 interleavings explored clean.
+
+- **`Roux.GC.sweep/1` no longer deletes the cache of any consumer that uses
+  entities.** Entity-field dependencies are recorded in the same list as
+  query and input dependencies but are not memo keys, so `Memo.get/2` on
+  one always misses — and the orphan sweep read that miss as proof the
+  entry was dead. The first `sweep/1` would have deleted every memo entry
+  belonging to a query that reads an entity field, then cascaded to
+  everything downstream. For lark or haruspex that is the entire cache.
+
+  It never fired because nothing in `lib/` calls `sweep/1` and the existing
+  orphan tests build their scenarios from input and query keys only. An
+  entity-field dependency is now resolved against the entity table, which
+  is where that liveness actually lives.
+
+
 ### Added
 
 - **Per-key durability**, and the two soundness fixes it needs.

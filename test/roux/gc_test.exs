@@ -105,6 +105,61 @@ defmodule Roux.GCTest do
 
   # -- sweep/1 tests ----------------------------------------------------------
 
+  describe "sweep/1 and entity-field dependencies" do
+    # An entity-field dependency is recorded in the same list as query and
+    # input dependencies (Roux.Runtime.field/4) but it is NOT a memo key —
+    # Memo.get/2 on one always misses. The orphan sweep treated any missing
+    # dependency as proof its entry was dead, so the first sweep would have
+    # deleted every memo entry belonging to a query that reads an entity
+    # field, then cascaded to everything downstream. For a consumer built
+    # on entities that is the whole cache.
+    #
+    # It never fired because nothing in lib/ calls sweep/1 and the orphan
+    # tests below build their scenarios out of input and query keys only.
+
+    test "a reader of a live entity's field survives a sweep", %{db: db} do
+      id = create_entity(db, :live)
+      Entity.increment_refcount(db, @sample, id)
+
+      Memo.put(db, {:reader, :k}, make_entry(dependencies: [{:entity_field, @sample, id, :body}]))
+
+      GC.sweep(db)
+
+      assert {:ok, _} = Memo.get(db, {:reader, :k}),
+             "the sweep deleted a query that reads a live entity's field"
+    end
+
+    test "the survivor's dependents survive too", %{db: db} do
+      # The damage was never one entry: orphan sweeping cascades.
+      id = create_entity(db, :live)
+      Entity.increment_refcount(db, @sample, id)
+
+      Memo.put(db, {:reader, :k}, make_entry(dependencies: [{:entity_field, @sample, id, :body}]))
+      Memo.put(db, {:mid, :k}, make_entry(dependencies: [{:reader, :k}]))
+      Memo.put(db, {:top, :k}, make_entry(dependencies: [{:mid, :k}]))
+
+      GC.sweep(db)
+
+      assert {:ok, _} = Memo.get(db, {:reader, :k})
+      assert {:ok, _} = Memo.get(db, {:mid, :k})
+      assert {:ok, _} = Memo.get(db, {:top, :k})
+    end
+
+    test "a reader of a reclaimed entity's field is still swept", %{db: db} do
+      # The guard must not be a blanket exemption: once the entity itself
+      # is gone, a query that read its fields really is orphaned.
+      id = create_entity(db, :doomed)
+      assert Entity.refcount(db, @sample, id) == 0
+
+      Memo.put(db, {:reader, :k}, make_entry(dependencies: [{:entity_field, @sample, id, :body}]))
+
+      GC.sweep(db)
+
+      assert Entity.get_fields(db, @sample, id) == :error, "precondition: entity was reclaimed"
+      assert Memo.get(db, {:reader, :k}) == :miss
+    end
+  end
+
   describe "sweep/1" do
     test "deletes zero-refcount entities", %{db: db} do
       id = create_entity(db, :dead)

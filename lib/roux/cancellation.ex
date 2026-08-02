@@ -157,6 +157,12 @@ defmodule Roux.Cancellation do
     :ets.delete(db.dedup_table, query_key)
     :ets.delete(db.task_registry, query_key)
 
+    # Anyone blocked on this key is woken by their monitor firing on the
+    # kill, so there is no completion message to send — but their rows
+    # would otherwise sit here until the next successful computation of the
+    # same key swept them up.
+    :ets.delete(db.dedup_waiters, query_key)
+
     {query_name, key} = decompose_query_key(query_key)
     Telemetry.cancel_task(query_name, key, reason)
   end

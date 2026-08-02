@@ -430,6 +430,98 @@ defmodule Roux.RuntimeTest do
       assert Enum.all?(results, &(&1 == "HELLO"))
       assert :counters.get(counter, 1) == 1
     end
+
+    test "a waiter is released when the claimant FINISHES, not when it dies", %{db: db} do
+      # The test above passes with or without a correct wakeup, because
+      # Task.async processes exit as soon as they are done and the waiter's
+      # monitor fires. That is the only reason waiting on `:DOWN` ever
+      # looked like it worked.
+      #
+      # Here the claimant stays alive afterwards — a GenServer, an LSP
+      # loop, an IEx session, or planchette's Session.Server, all of which
+      # run queries and then keep running. Waiting for it to die is waiting
+      # forever.
+      parent = self()
+      counter = :counters.new(1, [])
+
+      fun = fn _db, key ->
+        :counters.add(counter, 1, 1)
+        send(parent, :computing)
+        Process.sleep(100)
+        String.upcase(key)
+      end
+
+      claimant =
+        spawn(fn ->
+          send(parent, {:claimed, Runtime.execute(db, :slow_upper, "hello", fun)})
+          Process.sleep(:infinity)
+        end)
+
+      # Only start waiting once the claimant is demonstrably inside the
+      # query, so this really exercises the contended path.
+      assert_receive :computing, 1_000
+
+      waiter = Task.async(fn -> Runtime.execute(db, :slow_upper, "hello", fun) end)
+
+      assert Task.await(waiter, 2_000) == "HELLO",
+             "the waiter never woke: it was waiting for the claimant to exit"
+
+      assert_receive {:claimed, "HELLO"}, 1_000
+      assert :counters.get(counter, 1) == 1, "the waiter recomputed instead of reusing the memo"
+
+      assert Process.alive?(claimant), "the claimant exited; this test proves nothing"
+      Process.exit(claimant, :kill)
+    end
+
+    test "several waiters on one key are all released", %{db: db} do
+      parent = self()
+
+      fun = fn _db, key ->
+        send(parent, :computing)
+        Process.sleep(100)
+        String.upcase(key)
+      end
+
+      claimant =
+        spawn(fn ->
+          Runtime.execute(db, :slow_upper, "hello", fun)
+          Process.sleep(:infinity)
+        end)
+
+      assert_receive :computing, 1_000
+
+      waiters =
+        for _ <- 1..5, do: Task.async(fn -> Runtime.execute(db, :slow_upper, "hello", fun) end)
+
+      assert Task.await_many(waiters, 2_000) == List.duplicate("HELLO", 5)
+
+      Process.exit(claimant, :kill)
+    end
+
+    test "a waiter still wakes when the claimant dies mid-computation", %{db: db} do
+      # The monitor path has to survive: an abnormal exit leaves no
+      # completion message, and a waiter that only listened for one would
+      # hang exactly as badly as before, just in a rarer case.
+      parent = self()
+
+      fun = fn _db, key ->
+        send(parent, :computing)
+        Process.sleep(:infinity)
+        key
+      end
+
+      claimant = spawn(fn -> Runtime.execute(db, :doomed, "k", fun) end)
+      assert_receive :computing, 1_000
+
+      waiter =
+        Task.async(fn ->
+          Runtime.execute(db, :doomed, "k", fn _db, key -> String.upcase(key) end)
+        end)
+
+      Process.exit(claimant, :kill)
+
+      assert Task.await(waiter, 2_000) == "K"
+    end
   end
 
   # -- Validation integration --

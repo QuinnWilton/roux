@@ -155,8 +155,7 @@ defmodule Roux.GC do
       db
       |> Memo.entries()
       |> Enum.filter(fn {_key, entry} ->
-        entry.dependencies != [] and
-          Enum.any?(entry.dependencies, fn dep -> Memo.get(db, dep) == :miss end)
+        entry.dependencies != [] and Enum.any?(entry.dependencies, &orphaned_dep?(db, &1))
       end)
 
     if orphaned == [] do
@@ -167,4 +166,40 @@ defmodule Roux.GC do
       sweep_orphaned_memo_entries(db, acc + length(orphaned))
     end
   end
+
+  # A dependency is orphaned when the thing it points at is gone.
+  #
+  # Entity-field dependencies are recorded in the same list as query and
+  # input dependencies (see `Roux.Runtime.field/4`) but they are NOT memo
+  # keys — `Memo.get/2` on one always misses. Treating that miss as an
+  # orphan meant the first `sweep/1` would delete every memo entry
+  # belonging to any query that reads an entity field, and then cascade to
+  # everything downstream of those. For a consumer built on entities that
+  # is the entire cache.
+  #
+  # It has never fired because nothing in `lib/` calls `sweep/1`, and the
+  # existing orphan tests build their scenarios out of input and query keys
+  # only, so the case was never exercised.
+  #
+  # An entity field is live as long as its entity row is. `sweep/1` reclaims
+  # zero-refcount entities BEFORE this runs, so by the time a dependency is
+  # examined the entity is either still there or has just been collected —
+  # and a query that read a collected entity's fields genuinely is orphaned.
+  #
+  # Deliberately `get_fields/3` and not `alive?/3`. Refcount answers "does
+  # any query still produce this entity", which is the question
+  # `sweep_entities/1` asks; it is not the same as "does this row exist",
+  # and `alive?/3` additionally RAISES on a reclaimed entity rather than
+  # reporting it, which would make the rescue below invert the verdict.
+  defp orphaned_dep?(db, {:entity_field, module, entity_id, _field}) do
+    Entity.get_fields(db, module, entity_id) == :error
+  rescue
+    # The entity type was never registered. That is a programming error
+    # rather than a reclaimed entity, so keep the entry: over-deletion
+    # costs a recomputation of everything downstream, which is the failure
+    # this clause exists to prevent in the first place.
+    ArgumentError -> false
+  end
+
+  defp orphaned_dep?(db, dep), do: Memo.get(db, dep) == :miss
 end

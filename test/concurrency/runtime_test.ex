@@ -57,6 +57,7 @@ defmodule Roux.Concurrency.RuntimeDedupTest do
   defp make_db do
     memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
     dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
     reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
 
     %Roux.Database{
@@ -66,6 +67,7 @@ defmodule Roux.Concurrency.RuntimeDedupTest do
       input_registry: reg,
       task_registry: reg,
       dedup_table: dedup,
+      dedup_waiters: waiters,
       intern_registry: reg,
       entity_registry: reg,
       table_owner: self(),
@@ -131,6 +133,7 @@ defmodule Roux.Concurrency.RuntimeDedupCompletionRaceTest do
   defp make_db do
     memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
     dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
     reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
 
     %Roux.Database{
@@ -140,6 +143,7 @@ defmodule Roux.Concurrency.RuntimeDedupCompletionRaceTest do
       input_registry: reg,
       task_registry: reg,
       dedup_table: dedup,
+      dedup_waiters: waiters,
       intern_registry: reg,
       entity_registry: reg,
       table_owner: self(),
@@ -198,6 +202,7 @@ defmodule Roux.Concurrency.RuntimeWriteBufferingTest do
   defp make_db do
     memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
     dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
     reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
 
     %Roux.Database{
@@ -207,6 +212,7 @@ defmodule Roux.Concurrency.RuntimeWriteBufferingTest do
       input_registry: reg,
       task_registry: reg,
       dedup_table: dedup,
+      dedup_waiters: waiters,
       intern_registry: reg,
       entity_registry: reg,
       table_owner: self(),

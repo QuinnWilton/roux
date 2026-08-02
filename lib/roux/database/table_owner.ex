@@ -22,6 +22,10 @@ defmodule Roux.Database.TableOwner do
     input_registry: [:set, :public],
     task_registry: [:set, :public, write_concurrency: true],
     dedup_table: [:set, :public, write_concurrency: true],
+    # Waiters are a bag: several processes can be blocked on the same
+    # in-flight key, and each needs its own row so the claimant can wake
+    # all of them.
+    dedup_waiters: [:duplicate_bag, :public, write_concurrency: true],
     intern_registry: [:set, :public],
     entity_registry: [:set, :public]
   }

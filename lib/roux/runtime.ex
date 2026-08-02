@@ -365,7 +365,7 @@ defmodule Roux.Runtime do
           do_compute(job)
         after
           Cancellation.unregister_task(db, query_key)
-          :ets.delete(db.dedup_table, query_key)
+          release_dedup(db, query_key)
         end
 
       :wait ->
@@ -450,25 +450,112 @@ defmodule Roux.Runtime do
 
   # -- Private: dedup --
 
+  # Two processes demanding the same key must not both compute it. The
+  # loser waits for the winner to FINISH.
+  #
+  # It used to wait for the winner to DIE — the only wakeup was a monitor
+  # `:DOWN`. That is indistinguishable from completion when the computing
+  # process is a short-lived Task, which is what the tests and the original
+  # design assumed. It is a permanent hang when the computing process is
+  # long-lived: a GenServer, an LSP loop, an IEx session. Planchette hit
+  # exactly this and had to serialise its query fan-out around it.
+  #
+  # The claimant now publishes completion. The ordering is what makes it
+  # race-free: a waiter registers itself and THEN re-checks the claim row,
+  # while the claimant deletes the claim row and THEN reads the waiter list.
+  # So if the row is still there after registering, the claimant has not yet
+  # read the list and is guaranteed to see us; and if it is gone, the result
+  # is already in the memo and there is nothing to wait for.
   defp claim_dedup(db, query_key) do
     case :ets.insert_new(db.dedup_table, {query_key, self()}) do
-      true ->
-        :claimed
-
-      false ->
-        case :ets.lookup(db.dedup_table, query_key) do
-          [{^query_key, pid}] ->
-            ref = Process.monitor(pid)
-
-            receive do
-              {:DOWN, ^ref, :process, ^pid, _reason} -> :wait
-            end
-
-          [] ->
-            # Entry was deleted between insert_new and lookup. Retry.
-            claim_dedup(db, query_key)
-        end
+      true -> :claimed
+      false -> wait_for_claimant(db, query_key)
     end
+  end
+
+  defp wait_for_claimant(db, query_key) do
+    case :ets.lookup(db.dedup_table, query_key) do
+      [{^query_key, pid}] ->
+        ref = Process.monitor(pid)
+        :ets.insert(db.dedup_waiters, {query_key, self()})
+
+        if :ets.member(db.dedup_table, query_key) do
+          await_claimant(query_key, pid, ref)
+        end
+
+        Process.demonitor(ref, [:flush])
+        forget_waiter(db, query_key)
+        drain_completion(query_key)
+        reap_dead_claim(db, query_key, pid)
+        :wait
+
+      [] ->
+        # Claimed and released between insert_new and lookup. Retry rather
+        # than wait: whoever held it is gone, so this key is free again.
+        claim_dedup(db, query_key)
+    end
+  end
+
+  defp await_claimant(query_key, pid, ref) do
+    receive do
+      {:roux_computed, ^query_key} -> :ok
+      # An abnormal exit leaves no completion message. The claimant's
+      # `after` block never ran, so its dedup row may still be there — the
+      # caller re-enters execute/4, finds no memo entry, and claims it.
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    end
+  end
+
+  defp forget_waiter(db, query_key) do
+    :ets.delete_object(db.dedup_waiters, {query_key, self()})
+  end
+
+  # A claimant that dies abnormally never runs its `after` block, so its
+  # claim row outlives it. Without this the woken waiter re-enters
+  # `execute/4`, misses the memo, fails `insert_new` against the dead
+  # claimant's row, monitors a dead pid, gets an immediate `:noproc`, and
+  # loops — forever, because nothing else ever removes that row.
+  #
+  # `delete_object/2` rather than `delete/2`: it removes only the exact
+  # tuple, so a claim taken over by a live process in the meantime is left
+  # alone.
+  defp reap_dead_claim(db, query_key, pid) do
+    unless Process.alive?(pid) do
+      :ets.delete_object(db.dedup_table, {query_key, pid})
+    end
+
+    :ok
+  end
+
+  # A waiter that registered and then found the row already gone can still
+  # be sent a completion message by a claimant that read the list first.
+  # Leaving it in the mailbox would satisfy a later, unrelated wait on the
+  # same key.
+  defp drain_completion(query_key) do
+    receive do
+      {:roux_computed, ^query_key} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  # Delete the claim BEFORE reading the waiter list — see claim_dedup/2.
+  #
+  # `lookup` + `delete` rather than the atomic `take/2`, because Concuerror
+  # does not model `ets:take` and this is precisely the code its dedup
+  # scenarios exist to explore. Losing the atomicity is safe: a waiter that
+  # registers between the lookup and the delete gets dropped without a
+  # message, but it registered AFTER the claim row was already deleted, so
+  # its own re-check finds no claim and it returns immediately. The message
+  # is the fast path; the re-check is the correctness guarantee.
+  defp release_dedup(db, query_key) do
+    :ets.delete(db.dedup_table, query_key)
+
+    waiters = :ets.lookup(db.dedup_waiters, query_key)
+    :ets.delete(db.dedup_waiters, query_key)
+
+    Enum.each(waiters, fn {^query_key, pid} -> send(pid, {:roux_computed, query_key}) end)
+    :ok
   end
 
   # -- Private: process dictionary context --
