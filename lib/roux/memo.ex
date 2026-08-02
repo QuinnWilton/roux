@@ -35,6 +35,86 @@ defmodule Roux.Memo do
   end
 
   @doc """
+  Reads just the two fields dependency validation needs, without
+  materializing the entry's value.
+
+  Validation asks one question of each dependency — "did you change after I
+  was verified, and how durable are you?" — and answering it through
+  `get/2` copies the dependency's whole value out of ETS to read two
+  integers.
+
+  That is not the cheap operation it looks like. ETS copies terms on read;
+  a large binary is refcounted and so escapes with a pointer copy, but a
+  memoized *structure* does not. Fact rows — lists of lists of short
+  binaries, which is what most of planchette's memo values are — get deep
+  copied in full. Measured at **747×** the cost of reading the two fields
+  directly, and validating a dependency graph touches every dependency of
+  every node, so it dominated the per-edit budget: a comment edit on a
+  256-module project spent 2.5s validating entries it then discarded.
+
+  Returns `{:ok, changed_at, durability}` or `:miss`.
+  """
+  @spec dep_state(Database.t(), query_key()) ::
+          {:ok, Roux.Revision.revision(), Roux.Revision.durability()} | :miss
+  def dep_state(%Database{memo_table: table}, key) do
+    # changed_at is position 4, durability position 7 (see the layout above).
+    # `lookup_element/4` returns the default rather than raising on a
+    # missing key, so a concurrent delete between the two reads surfaces as
+    # a miss instead of an exception.
+    case :ets.lookup_element(table, key, 4, :missing) do
+      :missing ->
+        :miss
+
+      changed_at ->
+        case :ets.lookup_element(table, key, 7, :missing) do
+          :missing -> :miss
+          durability -> {:ok, changed_at, durability}
+        end
+    end
+  end
+
+  @doc """
+  Reads an entry's `verified_at` and `durability` without its value.
+
+  The first two questions validation asks of an entry — "have I already
+  checked you this revision?" and "can I skip you on durability?" — and
+  neither needs the value. See `dep_state/2` for why reading it anyway is
+  expensive.
+
+  Returns `{:ok, verified_at, durability}` or `:miss`.
+  """
+  @spec verification_state(Database.t(), query_key()) ::
+          {:ok, Roux.Revision.revision(), Roux.Revision.durability()} | :miss
+  def verification_state(%Database{memo_table: table}, key) do
+    # verified_at is position 5, durability position 7.
+    case :ets.lookup_element(table, key, 5, :missing) do
+      :missing ->
+        :miss
+
+      verified_at ->
+        case :ets.lookup_element(table, key, 7, :missing) do
+          :missing -> :miss
+          durability -> {:ok, verified_at, durability}
+        end
+    end
+  end
+
+  @doc """
+  Reads an entry's dependency list without its value.
+
+  Only needed on the path that actually walks dependencies, which is why it
+  is separate from `verification_state/2` rather than returned alongside.
+  """
+  @spec dependencies(Database.t(), query_key()) :: {:ok, [dependency()]} | :miss
+  def dependencies(%Database{memo_table: table}, key) do
+    # dependencies is position 6.
+    case :ets.lookup_element(table, key, 6, :missing) do
+      :missing -> :miss
+      deps -> {:ok, deps}
+    end
+  end
+
+  @doc """
   Stores a memo entry, overwriting any existing entry for this key.
 
   Called after successful query execution with the buffered result.

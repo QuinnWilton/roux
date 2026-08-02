@@ -333,4 +333,67 @@ defmodule Roux.MemoTest do
       }
     end
   end
+
+  describe "value-free accessors" do
+    # Validation asks only ever three things of an entry: has it been
+    # verified this revision, how durable is it, and what does it depend
+    # on. Reading any of those through get/2 deep-copies the entry's value
+    # out of ETS — measured at 747x the cost on realistic fact rows, and
+    # validation touches every dependency of every node, so it dominated
+    # the per-edit budget. These accessors read the fields directly.
+    #
+    # The value is never involved, so these must agree with get/2 exactly
+    # while never depending on what the value is.
+
+    test "dep_state/2 agrees with get/2", %{db: db} do
+      entry = make_entry(%{changed_at: 7, durability: :medium})
+      Memo.put(db, {:q, :k}, entry)
+
+      assert {:ok, 7, :medium} = Memo.dep_state(db, {:q, :k})
+      assert {:ok, %Entry{changed_at: 7, durability: :medium}} = Memo.get(db, {:q, :k})
+    end
+
+    test "verification_state/2 agrees with get/2", %{db: db} do
+      Memo.put(db, {:q, :k}, make_entry(%{verified_at: 9, durability: :low}))
+
+      assert {:ok, 9, :low} = Memo.verification_state(db, {:q, :k})
+    end
+
+    test "dependencies/2 agrees with get/2", %{db: db} do
+      deps = [{:other, :k}, {:input, :src, "a"}, {:entity_field, Some.Entity, 1, :body}]
+      Memo.put(db, {:q, :k}, make_entry(%{dependencies: deps}))
+
+      assert {:ok, ^deps} = Memo.dependencies(db, {:q, :k})
+    end
+
+    test "all three miss on an absent key", %{db: db} do
+      assert Memo.dep_state(db, {:nope, :k}) == :miss
+      assert Memo.verification_state(db, {:nope, :k}) == :miss
+      assert Memo.dependencies(db, {:nope, :k}) == :miss
+    end
+
+    test "they read the entry, not a value-shaped guess", %{db: db} do
+      # A value that would break any accessor secretly reconstructing the
+      # entry from position 2, and one whose shape resembles the fields
+      # being read.
+      Memo.put(db, {:q, :k}, make_entry(%{value: {1, 2, 3, 4, 5, 6, 7, 8}, changed_at: 3}))
+      assert {:ok, 3, _} = Memo.dep_state(db, {:q, :k})
+
+      Memo.put(
+        db,
+        {:q, :big},
+        make_entry(%{value: List.duplicate(["a", "b"], 1000), changed_at: 4})
+      )
+
+      assert {:ok, 4, _} = Memo.dep_state(db, {:q, :big})
+    end
+
+    test "they track update_verified/4", %{db: db} do
+      Memo.put(db, {:q, :k}, make_entry(%{verified_at: 1, durability: :high}))
+      Memo.update_verified(db, {:q, :k}, 5, :low)
+
+      assert {:ok, 5, :low} = Memo.verification_state(db, {:q, :k})
+      assert {:ok, _changed_at, :low} = Memo.dep_state(db, {:q, :k})
+    end
+  end
 end

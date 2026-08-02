@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Changed (performance)
+
+- **Validation no longer copies the values it is not looking at.** It asks
+  each entry three things — has it been verified this revision, how durable
+  is it, what does it depend on — and every one of them came from
+  `Memo.get/2`, which materializes the whole `%Entry{}` including the
+  memoized value.
+
+  That is not the cheap read it looks like. ETS copies terms out on read;
+  a large binary is refcounted and escapes with a pointer copy, but a
+  memoized *structure* does not. Fact rows — lists of lists of short
+  binaries — are deep-copied in full, and validation touches every
+  dependency of every node.
+
+  Measured at **747×** the cost of reading the fields directly (300 deps of
+  800 fact rows each: 347 ms vs 0.47 ms). `Memo.dep_state/2`,
+  `verification_state/2` and `dependencies/2` read the fields they need via
+  `:ets.lookup_element/4` instead.
+
+  End to end on planchette over credo (256 files):
+
+  | | before | after |
+  |---|---|---|
+  | comment edit → analyze | 2693 ms | **122 ms** |
+  | comment edit → supervision tree | 487 ms | **15 ms** |
+  | body edit → analyze | 2656 ms | **106 ms** |
+  | body edit → supervision tree | 499 ms | **2.9 ms** |
+  | semantic edit → analyze | 4747 ms | **1404 ms** |
+
+  Nothing about *what* validation decides changes; the new accessors are
+  tested to agree with `get/2` exactly. Cold builds are unaffected, since
+  they execute rather than validate.
+
+
 ### Fixed (correctness)
 
 - **A duplicate requester now waits for the claimant to FINISH, not to

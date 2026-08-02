@@ -30,7 +30,6 @@ defmodule Roux.Validation do
 
   alias Roux.Database
   alias Roux.{Entity, Memo, Revision, Telemetry}
-  alias Roux.Memo.Entry
 
   @type ensure_fn :: (Database.t(), Memo.query_key() -> :ok)
 
@@ -63,32 +62,41 @@ defmodule Roux.Validation do
 
   # -- Private --
 
+  # Reads only the fields each case needs. Every one of these used to come
+  # from a full `Memo.get/2`, which deep-copies the entry's value out of ETS
+  # — and none of the four cases looks at the value. See Memo.dep_state/2.
   defp do_validate(db, query_key, current_rev, query_name, key, ensure_fn) do
-    case Memo.get(db, query_key) do
+    case Memo.verification_state(db, query_key) do
       # Case 1: no memo.
       :miss ->
         :stale
 
       # Case 2: already validated this revision.
-      {:ok, %Entry{verified_at: ^current_rev}} ->
+      {:ok, ^current_rev, _durability} ->
         :valid
 
-      {:ok, %Entry{} = entry} ->
+      {:ok, verified_at, durability} ->
         # Case 3: durability skip.
-        if Revision.last_changed_at_or_above(db.revision, entry.durability) <=
-             entry.verified_at do
+        if Revision.last_changed_at_or_above(db.revision, durability) <= verified_at do
           Memo.update_verified(db, query_key, current_rev)
-          Telemetry.durability_skip(query_name, key, entry.durability, current_rev)
+          Telemetry.durability_skip(query_name, key, durability, current_rev)
           :valid
         else
-          # Case 4: walk dependencies.
-          walk_dependencies(db, query_key, entry, current_rev, ensure_fn)
+          # Case 4: walk dependencies. Only this path needs the dependency
+          # list, so it is fetched here rather than alongside the above.
+          case Memo.dependencies(db, query_key) do
+            {:ok, deps} ->
+              walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn)
+
+            :miss ->
+              :stale
+          end
         end
     end
   end
 
-  defp walk_dependencies(db, query_key, entry, current_rev, ensure_fn) do
-    case check_deps(db, entry.dependencies, entry.verified_at, ensure_fn, :high) do
+  defp walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn) do
+    case check_deps(db, deps, verified_at, ensure_fn, :high) do
       {:clean, durability} ->
         # Refresh durability, not just verified_at. It is the minimum over
         # transitive inputs and is otherwise only recomputed when an entry
@@ -132,11 +140,16 @@ defmodule Roux.Validation do
   defp check_deps(db, [dep | rest], verified_at, ensure_fn, durability) do
     ensure_fn.(db, dep)
 
-    case Memo.get(db, dep) do
-      {:ok, %Entry{changed_at: changed_at}} when changed_at > verified_at ->
+    # `dep_state/2` rather than `get/2`: this asks only for `changed_at` and
+    # `durability`, and reading them through a full entry deep-copies the
+    # dependency's value out of ETS for nothing. See Memo.dep_state/2 — it
+    # was 747x the cost on realistic values and dominated the per-edit
+    # budget, because validation touches every dependency of every node.
+    case Memo.dep_state(db, dep) do
+      {:ok, changed_at, _durability} when changed_at > verified_at ->
         :stale
 
-      {:ok, %Entry{durability: dep_durability}} ->
+      {:ok, _changed_at, dep_durability} ->
         check_deps(db, rest, verified_at, ensure_fn, min_durability(durability, dep_durability))
 
       # Dependency removed after ensure_fn — treat as stale.
