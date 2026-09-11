@@ -244,9 +244,17 @@ defmodule Roux.Database do
   # giving away to close the race window where TableOwner owns the table
   # but hasn't set heir yet.
   defp give_away_table(tid, owner_pid, sup_pid) do
-    heir_pid = Roux.Database.Heir.whereis(sup_pid)
-    :ets.setopts(tid, {:heir, heir_pid, {:dynamic, tid}})
-    :ets.give_away(tid, owner_pid, :dynamic)
+    # A database assembled without a supervisor (the Concuerror fixtures)
+    # names the calling process as owner: the table is already where it
+    # belongs, and there is no heir to look up. `give_away` to self is a
+    # badarg in any case.
+    if owner_pid != self() do
+      heir_pid = Roux.Database.Heir.whereis(sup_pid)
+      :ets.setopts(tid, {:heir, heir_pid, {:dynamic, tid}})
+      :ets.give_away(tid, owner_pid, :dynamic)
+    end
+
+    :ok
   end
 
   defp find_table_owner(sup_pid) do
