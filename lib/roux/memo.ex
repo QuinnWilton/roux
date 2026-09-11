@@ -11,8 +11,8 @@ defmodule Roux.Memo do
   """
 
   alias Roux.Database
-  alias Roux.Revision
   alias Roux.Memo.Entry
+  alias Roux.Revision
 
   @type query_key :: {query_name :: atom(), key :: term()} | {:input, atom(), term()}
 

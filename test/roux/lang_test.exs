@@ -2,6 +2,7 @@ defmodule Roux.LangTest do
   use ExUnit.Case, async: true
 
   alias Roux.{Database, Input, Lang, Runtime}
+  alias Roux.Test.MiniLang
 
   setup do
     db = Database.new()
@@ -139,11 +140,11 @@ defmodule Roux.LangTest do
 
   describe "behaviour callbacks" do
     test "compile_query returns the correct name" do
-      assert Roux.Test.MiniLang.compile_query() == :mini_compile
+      assert MiniLang.compile_query() == :mini_compile
     end
 
     test "file_extensions returns the correct list" do
-      assert Roux.Test.MiniLang.file_extensions() == [".mini"]
+      assert MiniLang.file_extensions() == [".mini"]
     end
   end
 
@@ -189,7 +190,7 @@ defmodule Roux.LangTest do
       Input.set(db, :tiny_source, "app.tiny", "tiny source")
 
       # Execute each language's compile query through the runtime.
-      mini_result = Roux.Test.MiniLang.mini_compile(db, "app.mini")
+      mini_result = MiniLang.mini_compile(db, "app.mini")
       assert mini_result == {:compiled, "mini source"}
 
       tiny_result = Roux.Test.TinyLang.tiny_compile(db, "app.tiny")

@@ -42,7 +42,7 @@ defmodule Roux.Lang.LSP do
 
   alias Roux.{Cancellation, Database, Input, Lang}
 
-  alias GenLSP.Enumerations.{DiagnosticSeverity, MarkupKind, TextDocumentSyncKind}
+  alias GenLSP.Enumerations.{DiagnosticSeverity, MarkupKind, SymbolKind, TextDocumentSyncKind}
 
   alias GenLSP.Notifications.{
     Exit,
@@ -431,11 +431,11 @@ defmodule Roux.Lang.LSP do
     }
   end
 
-  defp symbol_kind(:function), do: GenLSP.Enumerations.SymbolKind.function()
-  defp symbol_kind(:variable), do: GenLSP.Enumerations.SymbolKind.variable()
-  defp symbol_kind(:module), do: GenLSP.Enumerations.SymbolKind.module()
-  defp symbol_kind(:class), do: GenLSP.Enumerations.SymbolKind.class()
-  defp symbol_kind(:constant), do: GenLSP.Enumerations.SymbolKind.constant()
+  defp symbol_kind(:function), do: SymbolKind.function()
+  defp symbol_kind(:variable), do: SymbolKind.variable()
+  defp symbol_kind(:module), do: SymbolKind.module()
+  defp symbol_kind(:class), do: SymbolKind.class()
+  defp symbol_kind(:constant), do: SymbolKind.constant()
   defp symbol_kind(n) when is_integer(n), do: n
 
   # -- Private: capabilities --

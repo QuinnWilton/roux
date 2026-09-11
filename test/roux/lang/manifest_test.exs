@@ -31,7 +31,7 @@ defmodule Roux.Lang.ManifestTest do
       Database.register_input(db, :source_text, durability: :low)
       Input.set(db, :source_text, "a.mini", "hello")
 
-      source_meta = %{"a.mini" => %{mtime: {{2024, 1, 1}, {0, 0, 0}}, hash: 12345}}
+      source_meta = %{"a.mini" => %{mtime: {{2024, 1, 1}, {0, 0, 0}}, hash: 12_345}}
       Manifest.write(db, source_meta, path)
 
       assert {:ok, data} = Manifest.load(path)

@@ -314,9 +314,6 @@ defmodule Roux.Runtime do
     end
   end
 
-  # Entity field deps are checked directly by Validation — no re-execution.
-  defp re_execute(_db, {:entity_field, _module, _entity_id, _field_name}), do: :ok
-
   defp re_execute(_db, {:input, _input_name, _key}) do
     # Inputs are set externally and cannot be re-executed.
     # Staleness will propagate to the parent query.

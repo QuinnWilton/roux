@@ -60,7 +60,7 @@ defmodule Roux.Lang do
 
   # -- Required callbacks --
 
-  @doc "File extensions this language handles (e.g., `[\".myex\", \".myl\"]`)."
+  @doc ~S|File extensions this language handles (e.g., `[".myex", ".myl"]`).|
   @callback file_extensions() :: [String.t()]
 
   @doc "Register all queries for this language with the database."

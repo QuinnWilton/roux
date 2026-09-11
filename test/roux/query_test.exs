@@ -3,6 +3,8 @@ defmodule Roux.QueryTest do
 
   alias Roux.Database
   alias Roux.Query.Definition
+  alias Roux.Test.EmptyQueries
+  alias Roux.Test.SampleQueries
 
   # Ensure fixture modules are loaded before function_exported? checks.
   Code.ensure_loaded!(Roux.Test.SampleQueries)
@@ -44,7 +46,7 @@ defmodule Roux.QueryTest do
     end
 
     test "__query_definition__/1 returns correct Definition for each query" do
-      parse_defn = Roux.Test.SampleQueries.__query_definition__(:parse)
+      parse_defn = SampleQueries.__query_definition__(:parse)
 
       assert %Definition{
                name: :parse,
@@ -53,7 +55,7 @@ defmodule Roux.QueryTest do
                opts: []
              } = parse_defn
 
-      typecheck_defn = Roux.Test.SampleQueries.__query_definition__(:typecheck)
+      typecheck_defn = SampleQueries.__query_definition__(:typecheck)
 
       assert %Definition{
                name: :typecheck,
@@ -64,7 +66,7 @@ defmodule Roux.QueryTest do
     end
 
     test "multiple queries in one module all registered" do
-      %{queries: queries} = Roux.Test.SampleQueries.__roux_queries__()
+      %{queries: queries} = SampleQueries.__roux_queries__()
       names = Enum.map(queries, & &1.name)
       assert :parse in names
       assert :typecheck in names
@@ -72,7 +74,7 @@ defmodule Roux.QueryTest do
 
     test "destructured key pattern works" do
       assert function_exported?(Roux.Test.SampleQueries, :typecheck, 2)
-      defn = Roux.Test.SampleQueries.__query_definition__(:typecheck)
+      defn = SampleQueries.__query_definition__(:typecheck)
       assert defn.name == :typecheck
     end
   end
@@ -81,7 +83,7 @@ defmodule Roux.QueryTest do
 
   describe "definput" do
     test "input definitions accumulated in __roux_queries__/0" do
-      %{inputs: inputs} = Roux.Test.SampleQueries.__roux_queries__()
+      %{inputs: inputs} = SampleQueries.__roux_queries__()
       names = Enum.map(inputs, & &1.name)
       assert :source_text in names
       assert :config in names
@@ -89,13 +91,13 @@ defmodule Roux.QueryTest do
     end
 
     test "default durability is :medium" do
-      %{inputs: inputs} = Roux.Test.SampleQueries.__roux_queries__()
+      %{inputs: inputs} = SampleQueries.__roux_queries__()
       events = Enum.find(inputs, &(&1.name == :events))
       assert events.durability == :medium
     end
 
     test "explicit durability preserved" do
-      %{inputs: inputs} = Roux.Test.SampleQueries.__roux_queries__()
+      %{inputs: inputs} = SampleQueries.__roux_queries__()
       source_text = Enum.find(inputs, &(&1.name == :source_text))
       config = Enum.find(inputs, &(&1.name == :config))
       assert source_text.durability == :low
@@ -107,14 +109,14 @@ defmodule Roux.QueryTest do
 
   describe "__roux_queries__/0" do
     test "returns %{queries: [...], inputs: [...]}" do
-      result = Roux.Test.SampleQueries.__roux_queries__()
+      result = SampleQueries.__roux_queries__()
       assert %{queries: queries, inputs: inputs} = result
       assert is_list(queries)
       assert is_list(inputs)
     end
 
     test "queries and inputs in definition order" do
-      %{queries: queries, inputs: inputs} = Roux.Test.SampleQueries.__roux_queries__()
+      %{queries: queries, inputs: inputs} = SampleQueries.__roux_queries__()
       query_names = Enum.map(queries, & &1.name)
       input_names = Enum.map(inputs, & &1.name)
       assert query_names == [:parse, :typecheck]
@@ -123,7 +125,7 @@ defmodule Roux.QueryTest do
 
     test "empty module returns %{queries: [], inputs: [], entities: []}" do
       assert %{queries: [], inputs: [], entities: []} =
-               Roux.Test.EmptyQueries.__roux_queries__()
+               EmptyQueries.__roux_queries__()
     end
   end
 
@@ -131,12 +133,12 @@ defmodule Roux.QueryTest do
 
   describe "defentity" do
     test "entity modules accumulated in __roux_queries__/0" do
-      %{entities: entities} = Roux.Test.SampleQueries.__roux_queries__()
+      %{entities: entities} = SampleQueries.__roux_queries__()
       assert Roux.Test.SampleEntity in entities
     end
 
     test "empty module has no entities" do
-      %{entities: entities} = Roux.Test.EmptyQueries.__roux_queries__()
+      %{entities: entities} = EmptyQueries.__roux_queries__()
       assert entities == []
     end
   end
