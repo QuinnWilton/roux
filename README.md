@@ -18,7 +18,52 @@ end
 
 ## Usage
 
-TODO
+Queries are pure functions from a key to a value. Roux memoizes them,
+records which inputs and queries each one read, and on the next demand
+re-executes only what a changed input can reach — stopping early wherever
+a recomputed value equals the memoized one.
+
+```elixir
+defmodule MyLang do
+  use Roux.Query
+
+  alias Roux.Runtime
+
+  definput(:source_text, durability: :low)
+
+  defquery :parsed, key: path, returns: {:ok, term()} | {:error, term()} do
+    Runtime.input!(db, :source_text, path)
+    |> Code.string_to_quoted()
+  end
+
+  defquery :declared_modules, key: path, returns: [module()] do
+    case Runtime.query(db, :parsed, path) do
+      {:ok, ast} -> MyLang.Ast.modules(ast)
+      {:error, _} -> []
+    end
+  end
+end
+
+db = Roux.Database.new()
+:ok = Roux.Lang.register_module(db, MyLang)
+
+Roux.Input.set(db, :source_text, "lib/a.ex", "defmodule A do end")
+Roux.Runtime.query(db, :declared_modules, "lib/a.ex")
+#=> [A]
+
+# A whitespace-only edit re-parses the file, but `parsed` returns an
+# equal AST, so `declared_modules` is validated without executing.
+Roux.Input.set(db, :source_text, "lib/a.ex", "defmodule A do\nend")
+Roux.Runtime.query(db, :declared_modules, "lib/a.ex")
+#=> [A]
+```
+
+`Roux.Lang` is the convention layer for compilers built this way: a
+behaviour naming the compile and diagnostics queries, a Mix compiler shim
+with a persisted manifest for cross-run incrementality (`Roux.Lang.Manifest`),
+and a generic LSP adapter over `gen_lsp`. See
+[`docs/architecture.md`](docs/architecture.md) for the design and
+[`docs/subsystems/`](docs/subsystems/) for each layer.
 
 ## Background & prior art
 
@@ -37,8 +82,7 @@ roots:
   situates roux's early-cutoff/rebuild design in the incremental-build design space.
 
 The critical correctness property (incremental result equals batch result) is
-property-tested. Full citations with DOIs:
-[`../keynote/citations.md`](../keynote/citations.md).
+property-tested.
 
 ## License
 
