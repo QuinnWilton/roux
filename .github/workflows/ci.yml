@@ -25,15 +25,20 @@ jobs:
       - run: mix format --check-formatted
 
   test:
-    name: Test
+    name: Test / Elixir ${{ matrix.elixir }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        elixir: ["1.18.4", "1.19.4"]
+        otp: ["28.3"]
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
         id: setup-beam
         with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
       - uses: actions/cache@v4
         with:
           path: |

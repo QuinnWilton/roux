@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-09-11
+
+### Changed
+
+- Elixir requirement lowered to `~> 1.18`; OTP 28 remains required.
 
 ### Changed (performance)
 
