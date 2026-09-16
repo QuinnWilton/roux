@@ -1,4 +1,5 @@
 [
+  import_deps: [:presubmit],
   locals_without_parens: [
     defquery: 2,
     defquery: 3,
