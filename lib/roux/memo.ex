@@ -99,6 +99,24 @@ defmodule Roux.Memo do
     end
   end
 
+  @doc "Reads an entry's `changed_at` without its value."
+  @spec changed_at(Database.t(), query_key()) :: {:ok, Roux.Revision.revision()} | :miss
+  def changed_at(%Database{memo_table: table}, key) do
+    case :ets.lookup_element(table, key, 4, :missing) do
+      :missing -> :miss
+      changed_at -> {:ok, changed_at}
+    end
+  end
+
+  @doc "Reads an entry's `durability` without its value."
+  @spec durability(Database.t(), query_key()) :: {:ok, Roux.Revision.durability()} | :miss
+  def durability(%Database{memo_table: table}, key) do
+    case :ets.lookup_element(table, key, 7, :missing) do
+      :missing -> :miss
+      durability -> {:ok, durability}
+    end
+  end
+
   @doc """
   Reads an entry's dependency list without its value.
 

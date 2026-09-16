@@ -22,6 +22,85 @@ defmodule Roux.RuntimeTest do
     Input.register(db, Input.define(name, opts))
   end
 
+  # -- Served values --
+
+  describe "served values" do
+    test "a hit hands back the memoized value without reading it out of ETS again", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", [["row", "1"]])
+      fun = fn db, key -> Runtime.input(db, :source, key) end
+
+      first = Runtime.execute(db, :rows, "a", fun)
+      second = Runtime.execute(db, :rows, "a", fun)
+
+      assert first == second
+      # The same heap term, not a fresh ETS copy: the cache serves it.
+      assert {:ok, %Memo.Entry{value: ^first}} = Memo.get(db, {:rows, "a"})
+      assert :erts_debug.same(first, second)
+    end
+
+    test "a changed value replaces the served one; an unchanged one keeps it", %{db: db} do
+      register_input(db, :source, durability: :low)
+      register_input(db, :other, durability: :low)
+      Input.set(db, :source, "a", "v1")
+      Input.set(db, :other, "a", 0)
+
+      fun = fn db, key ->
+        _ = Runtime.input(db, :other, key)
+        Runtime.input(db, :source, key)
+      end
+
+      assert Runtime.execute(db, :read_source, "a", fun) == "v1"
+
+      # A revision that leaves the value alone: early cutoff, same value served.
+      Input.set(db, :other, "a", 1)
+      assert Runtime.execute(db, :read_source, "a", fun) == "v1"
+
+      Input.set(db, :source, "a", "v2")
+      assert Runtime.execute(db, :read_source, "a", fun) == "v2"
+      assert Runtime.execute(db, :read_source, "a", fun) == "v2"
+    end
+
+    test "two databases in one process never serve each other's values", %{db: db} do
+      other = Database.new()
+
+      on_exit(fn ->
+        try do
+          Database.shutdown(other)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      for d <- [db, other] do
+        register_input(d, :source, durability: :low)
+      end
+
+      Input.set(db, :source, "a", :from_db)
+      Input.set(other, :source, "a", :from_other)
+      fun = fn d, key -> Runtime.input(d, :source, key) end
+
+      assert Runtime.execute(db, :read_source, "a", fun) == :from_db
+      assert Runtime.execute(other, :read_source, "a", fun) == :from_other
+      assert Runtime.execute(db, :read_source, "a", fun) == :from_db
+      assert Runtime.execute(other, :read_source, "a", fun) == :from_other
+    end
+
+    test "drop_cached_values/1 forgets this process's copies for one database", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", "v1")
+      fun = fn db, key -> Runtime.input(db, :source, key) end
+      assert Runtime.execute(db, :read_source, "a", fun) == "v1"
+
+      assert Enum.any?(Process.get(), fn {k, _} -> match?({{Runtime, :value}, _, _}, k) end)
+      assert :ok = Runtime.drop_cached_values(db)
+      refute Enum.any?(Process.get(), fn {k, _} -> match?({{Runtime, :value}, _, _}, k) end)
+
+      # Served again from ETS, and equal.
+      assert Runtime.execute(db, :read_source, "a", fun) == "v1"
+    end
+  end
+
   # -- Unit tests: execute/4 --
 
   describe "execute/4" do

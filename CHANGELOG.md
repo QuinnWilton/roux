@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.2 — 2026-09-16
+
+### Changed (performance)
+
+- **A hit hands back the value it already served.** Serving a memo hit
+  read the whole entry out of ETS — a deep copy of the value — and then
+  read it twice more (once after validation, once to propagate
+  durability). A query graph that reads one large value many times per
+  revision (scry reads each module's fact map once per relation, 47,000
+  times on a 600-module project) paid a full copy every time. Values are
+  now cached on the serving process, keyed by the entry's `changed_at`
+  (a key executes at most once per revision and takes a new `changed_at`
+  whenever its value changes), and durability is read through a field
+  accessor. `Roux.Runtime.drop_cached_values/1` releases a process's
+  copies for one database; `Roux.Memo.changed_at/2` and
+  `Roux.Memo.durability/2` are the new accessors.
+
 ## 0.1.1 — 2026-09-11
 
 ### Changed

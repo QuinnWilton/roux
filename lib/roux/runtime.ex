@@ -29,6 +29,17 @@ defmodule Roux.Runtime do
 
   @context_key {__MODULE__, :context}
 
+  # Served values, per process: `{@values_key, memo_table, query_key} =>
+  # {changed_at, value}`. ETS copies a term out on every read, and a
+  # memoized structure (fact rows, syntax trees) is deep-copied in full;
+  # a hot query graph reads the same large values thousands of times per
+  # revision, so the first read caches the value on this process's heap
+  # and later reads hand back the same term. `changed_at` is the guard:
+  # a key executes at most once per revision and takes a new `changed_at`
+  # whenever its value changes, so an equal `changed_at` is an equal
+  # value. The table id keeps caches of different databases apart.
+  @values_key {__MODULE__, :value}
+
   # -- Public API --
 
   @doc """
@@ -55,27 +66,21 @@ defmodule Roux.Runtime do
     current_rev = Revision.current(db.revision)
 
     result =
-      case Memo.get(db, query_key) do
-        {:ok, %Entry{verified_at: ^current_rev} = entry} ->
-          Telemetry.cache_hit(query_name, key, current_rev, entry.changed_at, entry.verified_at)
-          entry.value
+      case Memo.verification_state(db, query_key) do
+        {:ok, ^current_rev, _durability} ->
+          {changed_at, value} = served_value(db, query_key)
+          Telemetry.cache_hit(query_name, key, current_rev, changed_at, current_rev)
+          value
 
-        {:ok, %Entry{} = old_entry} ->
+        {:ok, _verified_at, _durability} ->
           case Validation.validate(db, query_key, &ensure_up_to_date/2) do
             :valid ->
-              {:ok, fresh} = Memo.get(db, query_key)
-
-              Telemetry.cache_hit(
-                query_name,
-                key,
-                current_rev,
-                fresh.changed_at,
-                fresh.verified_at
-              )
-
-              fresh.value
+              {changed_at, value} = served_value(db, query_key)
+              Telemetry.cache_hit(query_name, key, current_rev, changed_at, current_rev)
+              value
 
             :stale ->
+              {:ok, old_entry} = Memo.get(db, query_key)
               compute(db, query_name, key, query_key, current_rev, query_fun, old_entry)
           end
 
@@ -427,6 +432,7 @@ defmodule Roux.Runtime do
       }
 
       Memo.put(db, query_key, entry)
+      cache_value(db, query_key, changed_at, value)
 
       # Update entity refcounts for the output entity diff (D15).
       old_entities = if old_entry, do: old_entry.output_entities, else: []
@@ -597,8 +603,8 @@ defmodule Roux.Runtime do
         :ok
 
       ctx ->
-        case Memo.get(db, query_key) do
-          {:ok, %Entry{durability: dur}} ->
+        case Memo.durability(db, query_key) do
+          {:ok, dur} ->
             put_context(%{ctx | min_durability: min_durability(ctx.min_durability, dur)})
 
           :miss ->
@@ -609,10 +615,45 @@ defmodule Roux.Runtime do
 
   # Per-KEY durability, falling back to the input definition's default.
   defp input_durability(db, input_name, query_key) do
-    case Memo.get(db, query_key) do
-      {:ok, %Entry{durability: durability}} when not is_nil(durability) -> durability
+    case Memo.durability(db, query_key) do
+      {:ok, durability} when not is_nil(durability) -> durability
       _ -> lookup_input_durability(db, input_name)
     end
+  end
+
+  # -- Private: served values --
+
+  defp served_value(%Database{memo_table: table} = db, query_key) do
+    {:ok, changed_at} = Memo.changed_at(db, query_key)
+
+    case Process.get({@values_key, table, query_key}) do
+      {^changed_at, value} ->
+        {changed_at, value}
+
+      _ ->
+        {:ok, %Entry{value: value}} = Memo.get(db, query_key)
+        cache_value(db, query_key, changed_at, value)
+        {changed_at, value}
+    end
+  end
+
+  defp cache_value(%Database{memo_table: table}, query_key, changed_at, value) do
+    Process.put({@values_key, table, query_key}, {changed_at, value})
+    :ok
+  end
+
+  @doc """
+  Drops the values this process cached while serving `db`'s queries.
+
+  A process that serves queries keeps every value it served on its own
+  heap until the key is recomputed or the process exits. A long-lived
+  process that shuts a database down should call this alongside
+  `Roux.Database.shutdown/1`.
+  """
+  @spec drop_cached_values(Database.t()) :: :ok
+  def drop_cached_values(%Database{memo_table: table}) do
+    for {{@values_key, ^table, _query_key} = key, _} <- Process.get(), do: Process.delete(key)
+    :ok
   end
 
   defp lookup_input_durability(%Database{input_registry: reg}, input_name) do
