@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.4 — 2026-09-16
+
+### Changed
+
+- Depends on `gen_lsp` from Hex (`~> 0.11.3`) instead of a fork, so roux
+  can be published. The fork existed for the test runner: the buffer's
+  reader calls `System.stop/0` when the client socket closes, which under
+  ExUnit happens on every test's cleanup and took the VM down mid-run.
+  Upstream exposes that as the `:exit_on_end` application setting; the
+  test config sets it to `false`. The fork's other change — the TCP
+  reader crashing instead of reporting `:eof` when the socket closes
+  mid-message — stays staged for upstream; nothing in roux's suite
+  reaches it once the VM keeps running.
+
 ## 0.1.3 — 2026-09-16
 
 ### Changed (performance)

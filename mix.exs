@@ -1,7 +1,7 @@
 defmodule Roux.MixProject do
   use Mix.Project
 
-  @version "0.1.3"
+  @version "0.1.4"
   @source_url "https://github.com/QuinnWilton/roux"
 
   def project do
@@ -40,9 +40,7 @@ defmodule Roux.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.0"},
-      # hex: {:gen_lsp, "~> 0.11.0"}
-      {:gen_lsp,
-       github: "QuinnWilton/gen_lsp", branch: "fix/beam-box/tcp-read-crash", override: true},
+      {:gen_lsp, "~> 0.11.3"},
       {:assert_boundary, "~> 0.1.0", only: :test, runtime: false},
       {:concuerror,
        github: "QuinnWilton/Concuerror", only: :test, runtime: false, manager: :rebar3},
