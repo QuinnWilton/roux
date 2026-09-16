@@ -211,16 +211,14 @@ defmodule Roux.Memo do
   end
 
   @doc """
-  Bulk-inserts memo entries from a list of `{query_key, entry}` pairs.
-
-  Used by manifest restore to repopulate the memo table from serialized
-  state. Overwrites any existing entries with the same keys.
+  Folds over every entry as `{query_key, entry}` without materializing
+  the table as a list: each entry is copied out of ETS on its own turn
+  and is garbage once the reducer is done with it.
   """
-  @spec restore(Database.t(), [{query_key(), Entry.t()}]) :: :ok
-  def restore(%Database{memo_table: table}, entries) when is_list(entries) do
-    tuples = Enum.map(entries, fn {key, entry} -> to_tuple(key, entry) end)
-    :ets.insert(table, tuples)
-    :ok
+  @spec reduce_entries(Database.t(), acc, ({query_key(), Entry.t()}, acc -> acc)) :: acc
+        when acc: term()
+  def reduce_entries(%Database{memo_table: table}, acc, fun) when is_function(fun, 2) do
+    :ets.foldl(fn tuple, acc -> fun.({elem(tuple, 0), to_entry(tuple)}, acc) end, acc, table)
   end
 
   # -- Private helpers --

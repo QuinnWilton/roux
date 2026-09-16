@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.3 — 2026-09-16
+
+### Changed (performance)
+
+- **Manifests serialize memo entries one at a time** (format 2; older
+  manifests are discarded and rebuilt once). Writing dumped the whole
+  memo table into one term — a second heap copy of everything the
+  database held — and compressed hundreds of megabytes in one call; on a
+  600-module project that was 17 s and the peak of the run's memory.
+  Entries now cross the heap singly in both directions and compress at
+  level 1. `Roux.Memo.reduce_entries/3` folds over the table without
+  listing it; `Roux.Lang.Manifest.memo_entries/1` decodes a loaded
+  manifest's entries for inspection. `Roux.Memo.restore/2` is gone.
+
 ## 0.1.2 — 2026-09-16
 
 ### Changed (performance)

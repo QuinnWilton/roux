@@ -202,7 +202,7 @@ defmodule Roux.Lang.ManifestTest do
 
       # Both entries should be present — input entries are always kept.
       input_entries =
-        Enum.filter(data.memo_entries, fn
+        Enum.filter(Manifest.memo_entries(data), fn
           {{:input, _, _}, _entry} -> true
           _ -> false
         end)
@@ -239,7 +239,7 @@ defmodule Roux.Lang.ManifestTest do
 
       {:ok, data} = Manifest.load(path)
 
-      keys = Enum.map(data.memo_entries, fn {key, _} -> key end)
+      keys = Enum.map(Manifest.memo_entries(data), fn {key, _} -> key end)
       refute {:query, :hover_info, "a.mini"} in keys
       assert {:query, :diagnostics, "a.mini"} in keys
     end
