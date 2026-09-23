@@ -154,6 +154,91 @@ defmodule Roux.InternTest do
     end
   end
 
+  # -- snapshot/1 and restore/2 --
+
+  describe "snapshot/1 and restore/2" do
+    test "stores each value once, tagged with the format version" do
+      table = Intern.new(:snap_once)
+      Enum.each(~w(alpha beta gamma), &Intern.intern(table, &1))
+
+      snapshot = Intern.snapshot(table)
+
+      assert %{version: 2, counter: 3} = snapshot
+      refute Map.has_key?(snapshot, :reverse)
+      assert snapshot.forward |> Enum.map(&elem(&1, 0)) |> Enum.sort() == ~w(alpha beta gamma)
+
+      Intern.destroy(table)
+    end
+
+    test "rebuilds the reverse table on restore" do
+      table = Intern.new(:snap_src)
+      id = Intern.intern(table, "hello")
+      snapshot = Intern.snapshot(table)
+      Intern.destroy(table)
+
+      restored = Intern.new(:snap_dst)
+      assert :ok = Intern.restore(restored, snapshot)
+
+      assert Intern.resolve(restored, id) == {:ok, "hello"}
+      assert Intern.lookup(restored, "hello") == {:ok, id}
+      assert Intern.intern(restored, "world") == id + 1
+
+      Intern.destroy(restored)
+    end
+
+    test "does not persist an orphaned reverse row from a lost insert race" do
+      table = Intern.new(:snap_orphan)
+      id = Intern.intern(table, "winner")
+      # The state a losing `intern/2` leaves between its reverse insert and
+      # its cleanup: a reverse row no forward row points at.
+      :ets.insert(table.reverse, {id + 1, "winner"})
+      :atomics.put(table.counter, 1, id + 1)
+
+      restored = Intern.new(:snap_orphan_dst)
+      Intern.restore(restored, Intern.snapshot(table))
+
+      assert Intern.lookup(restored, "winner") == {:ok, id}
+      assert Intern.resolve(restored, id + 1) == :error
+
+      Intern.destroy(table)
+      Intern.destroy(restored)
+    end
+
+    test "refuses the unversioned two-table format" do
+      table = Intern.new(:snap_legacy)
+
+      legacy = %{forward: [{"a", 1}], reverse: [{1, "a"}], counter: 1}
+
+      assert_raise ArgumentError, ~r/unsupported Roux.Intern snapshot/, fn ->
+        Intern.restore(table, legacy)
+      end
+
+      assert Intern.size(table) == 0
+      Intern.destroy(table)
+    end
+
+    property "restore(snapshot(t)) reproduces both tables and the counter" do
+      check all(values <- list_of(term(), max_length: 50)) do
+        table = Intern.new(:prop_snap_src)
+        Enum.each(values, &Intern.intern(table, &1))
+
+        restored = Intern.new(:prop_snap_dst)
+        Intern.restore(restored, Intern.snapshot(table))
+
+        assert Enum.sort(:ets.tab2list(restored.forward)) ==
+                 Enum.sort(:ets.tab2list(table.forward))
+
+        assert Enum.sort(:ets.tab2list(restored.reverse)) ==
+                 Enum.sort(:ets.tab2list(table.reverse))
+
+        assert :atomics.get(restored.counter, 1) == :atomics.get(table.counter, 1)
+
+        Intern.destroy(table)
+        Intern.destroy(restored)
+      end
+    end
+  end
+
   # -- Property tests --
 
   describe "properties" do

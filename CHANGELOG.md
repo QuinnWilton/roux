@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Changed (performance)
+
+- **Intern tables persist in one direction** (manifest format 3; older
+  manifests are discarded and rebuilt once). `Roux.Intern.snapshot/1`
+  stored both the forward and the reverse table, so every interned value
+  was written twice — 29 MB of a 75 MB scry manifest on an 859-module
+  project. Snapshots now carry the forward table (the authoritative one:
+  it never holds the orphaned ID of a lost insert race) plus the counter,
+  tagged `version: 2`; `Roux.Intern.restore/2` rebuilds the reverse table
+  and raises `ArgumentError` for any other format. On that project the
+  manifest shrinks from 75 MB to 61 MB and restoring it takes 1.7 s
+  instead of 2.0 s.
+
 ## 0.1.4 — 2026-09-16
 
 ### Changed

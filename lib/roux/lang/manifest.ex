@@ -15,7 +15,8 @@ defmodule Roux.Lang.Manifest do
   - Derived memo entries with durability `:high` or `:medium` (`:low`
     derived entries like hover info are cheap to recompute).
   - Entity table data (identity keys, tracked fields, refcounts).
-  - Intern table data (forward/reverse mappings, counter state).
+  - Intern table data (the forward mapping and counter state; the
+    reverse mapping is rebuilt on restore — see `Roux.Intern.snapshot/1`).
   - Revision counter and durability tracking state.
   - Source file metadata (mtime, content hash) for staleness detection.
 
@@ -36,12 +37,14 @@ defmodule Roux.Lang.Manifest do
 
   A `@manifest_vsn` tag enables graceful migration — if the version
   doesn't match, the manifest is discarded and a full rebuild runs.
+  Format 3 stores each intern table in one direction only; format-2
+  manifests (both directions) are discarded rather than restored.
   """
 
   alias Roux.{Database, Entity, Intern, Memo, Revision}
   alias Roux.Memo.Entry
 
-  @manifest_vsn 2
+  @manifest_vsn 3
 
   @entry_opts [{:compressed, 1}]
 

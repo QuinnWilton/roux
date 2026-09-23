@@ -70,6 +70,24 @@ defmodule Roux.Lang.ManifestTest do
       File.write!(path, :erlang.term_to_binary(data))
       assert :error = Manifest.load(path)
     end
+
+    test "returns :error for a format-2 manifest (intern tables stored twice)", %{
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "format2.roux")
+
+      data = %{
+        vsn: 2,
+        sources: %{},
+        memo_entries: [],
+        entity_data: [],
+        intern_data: [{:names, %{forward: [{"a", 1}], reverse: [{1, "a"}], counter: 1}}],
+        revision: %{}
+      }
+
+      File.write!(path, :erlang.term_to_binary(data))
+      assert :error = Manifest.load(path)
+    end
   end
 
   # -- restore/2 --

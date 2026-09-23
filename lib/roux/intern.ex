@@ -125,31 +125,67 @@ defmodule Roux.Intern do
     :ets.info(table.forward, :size)
   end
 
-  @doc """
-  Captures the current state of both ETS tables and the counter for
-  manifest persistence.
+  @snapshot_version 2
+
+  @typedoc """
+  A persisted intern table: the forward rows and the ID counter, tagged
+  with the snapshot format's version.
+
+  Only one direction is stored. Every value appears in both tables, so
+  persisting both stored each value twice — on a large scry project the
+  interned symbols were a third of the manifest. The forward table is the
+  one kept because it is authoritative: an ID only becomes live when its
+  `{value, id}` row wins `:ets.insert_new/2`, while the reverse table can
+  briefly hold the orphaned ID of a process that lost that race. The
+  reverse table is rebuilt from it on restore.
   """
-  @spec snapshot(t()) :: %{forward: list(), reverse: list(), counter: non_neg_integer()}
+  @type snapshot :: %{
+          version: 2,
+          forward: [{term(), id()}],
+          counter: non_neg_integer()
+        }
+
+  @doc """
+  Captures the forward table and the counter for manifest persistence.
+
+  The snapshot is versioned; `restore/2` refuses any other format rather
+  than misreading it.
+  """
+  @spec snapshot(t()) :: snapshot()
   def snapshot(%__MODULE__{} = table) do
     %{
+      version: @snapshot_version,
       forward: :ets.tab2list(table.forward),
-      reverse: :ets.tab2list(table.reverse),
       counter: :atomics.get(table.counter, 1)
     }
   end
 
   @doc """
-  Restores ETS tables and counter from a snapshot produced by `snapshot/1`.
+  Restores both tables and the counter from a snapshot produced by
+  `snapshot/1`, rebuilding the reverse table from the forward rows.
 
   Used during manifest loading. The caller must ensure the tables are empty
-  or freshly created.
+  or freshly created. Raises `ArgumentError` for a snapshot in any other
+  format (such as the unversioned format that stored both tables).
   """
-  @spec restore(t(), %{forward: list(), reverse: list(), counter: non_neg_integer()}) :: :ok
-  def restore(%__MODULE__{} = table, data) do
-    :ets.insert(table.forward, data.forward)
-    :ets.insert(table.reverse, data.reverse)
-    :atomics.put(table.counter, 1, data.counter)
+  @spec restore(t(), snapshot()) :: :ok
+  def restore(%__MODULE__{} = table, %{
+        version: @snapshot_version,
+        forward: forward,
+        counter: counter
+      })
+      when is_list(forward) and is_integer(counter) and counter >= 0 do
+    :ets.insert(table.forward, forward)
+    :ets.insert(table.reverse, Enum.map(forward, fn {value, id} -> {id, value} end))
+    :atomics.put(table.counter, 1, counter)
     :ok
+  end
+
+  def restore(%__MODULE__{}, snapshot) do
+    raise ArgumentError,
+          "unsupported Roux.Intern snapshot: expected version #{@snapshot_version} " <>
+            "(%{version: #{@snapshot_version}, forward: rows, counter: n}), got: " <>
+            inspect(snapshot, limit: 5)
   end
 
   @doc """
