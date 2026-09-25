@@ -1,7 +1,9 @@
 defmodule Roux.Lang.ManifestTest do
   use ExUnit.Case, async: true
 
-  alias Roux.{Database, Input, Intern, Memo, Revision}
+  use ExUnitProperties
+
+  alias Roux.{Database, Input, Intern, Memo, Revision, Runtime}
   alias Roux.Lang.Manifest
   alias Roux.Memo.Entry
 
@@ -55,7 +57,7 @@ defmodule Roux.Lang.ManifestTest do
       assert :error = Manifest.load(path)
     end
 
-    test "returns :error for wrong version", %{tmp_dir: tmp_dir} do
+    test "returns :error for a bare term, as formats 1 to 3 were", %{tmp_dir: tmp_dir} do
       path = Path.join(tmp_dir, "wrong_vsn.roux")
 
       data = %{
@@ -68,6 +70,34 @@ defmodule Roux.Lang.ManifestTest do
       }
 
       File.write!(path, :erlang.term_to_binary(data))
+      assert :error = Manifest.load(path)
+    end
+
+    test "returns :error for a format-3 manifest (entries compressed one by one)", %{
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "format3.roux")
+
+      entry = %Entry{
+        value: "hello",
+        hash: :erlang.phash2("hello"),
+        changed_at: 1,
+        verified_at: 1,
+        dependencies: [],
+        durability: :medium,
+        output_entities: []
+      }
+
+      data = %{
+        vsn: 3,
+        sources: %{},
+        memo_entries: [:erlang.term_to_binary({{:input, :src, "a"}, entry}, compressed: 1)],
+        entity_data: [],
+        intern_data: [{:names, %{version: 2, forward: [{"a", 1}], counter: 1}}],
+        revision: %{counter: 1, high: 0, medium: 1, low: 0}
+      }
+
+      File.write!(path, :erlang.term_to_binary(data, compressed: 1))
       assert :error = Manifest.load(path)
     end
 
@@ -275,6 +305,368 @@ defmodule Roux.Lang.ManifestTest do
       assert %{mtime: mtime, hash: hash} = meta[path]
       assert is_tuple(mtime)
       assert hash == :erlang.phash2("hello world")
+    end
+  end
+
+  # -- format 4 --
+
+  # A database with every kind of state a manifest carries: inputs,
+  # derived entries with structured values, an intern table, entity rows
+  # and a revision past zero.
+  defp populate(db) do
+    Database.register_input(db, :source_text, durability: :medium)
+    Input.set(db, :source_text, "a.mini", "alpha")
+    Input.set(db, :source_text, "b.mini", "beta")
+
+    for file <- ["a.mini", "b.mini"] do
+      Runtime.execute(db, :rows, file, fn db, file ->
+        text = Runtime.input(db, :source_text, file)
+        for i <- 1..50, do: [text, i, %{file: file}]
+      end)
+    end
+
+    intern = Database.intern_table(db, :names)
+    Enum.each(~w(alpha beta gamma), &Intern.intern(intern, &1))
+
+    Database.register_entity(db, Roux.Test.ManifestEntity)
+    [{_, tid}] = :ets.lookup(db.entity_registry, Roux.Test.ManifestEntity)
+    :ets.insert(tid, {1, %{name: %{value: "foo", hash: 123, changed_at: 1}}, 0})
+    db
+  end
+
+  # Registrations are not persisted: a run registers its inputs again.
+  defp restored(path) do
+    {:ok, data} = Manifest.load(path)
+    db = Database.new()
+    Database.register_input(db, :source_text, durability: :medium)
+    :ok = Manifest.restore(db, data)
+    db
+  end
+
+  defp entity_rows(db) do
+    [{_, tid}] = :ets.lookup(db.entity_registry, Roux.Test.ManifestEntity)
+    :ets.tab2list(tid)
+  end
+
+  describe "format 4" do
+    test "a restored database holds what the written one held", %{db: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      Manifest.write(populate(db), %{}, path)
+      db2 = restored(path)
+
+      try do
+        assert Enum.sort(Memo.entries(db2)) == Enum.sort(Memo.entries(db))
+        assert Revision.snapshot(db2.revision) == Revision.snapshot(db.revision)
+        assert entity_rows(db2) == entity_rows(db)
+
+        intern = Database.intern_table(db, :names)
+        intern2 = Database.intern_table(db2, :names)
+
+        for value <- ~w(alpha beta gamma) do
+          assert Intern.lookup(intern2, value) == Intern.lookup(intern, value)
+        end
+
+        assert Intern.intern(intern2, "delta") == Intern.intern(intern, "delta")
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    test "a restored database serves its entries without recomputing them", %{
+      db: db,
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "compile.roux")
+      Manifest.write(populate(db), %{}, path)
+      db2 = restored(path)
+
+      try do
+        # The same revision: validation passes, and the served value is
+        # the persisted one, decoded on this first read.
+        served =
+          Runtime.execute(db2, :rows, "a.mini", fn _db, _file ->
+            flunk("a restored entry was recomputed")
+          end)
+
+        assert {:ok, %Entry{value: ^served}} = Memo.get(db, {:rows, "a.mini"})
+
+        # An input change recomputes what read it, and only that.
+        Input.set(db2, :source_text, "a.mini", "changed")
+
+        assert [["changed", 1, _] | _] =
+                 Runtime.execute(db2, :rows, "a.mini", fn db, file ->
+                   text = Runtime.input(db, :source_text, file)
+                   for i <- 1..50, do: [text, i, %{file: file}]
+                 end)
+
+        assert [["beta", 1, _] | _] =
+                 Runtime.execute(db2, :rows, "b.mini", fn _db, _file ->
+                   flunk("an unaffected entry was recomputed")
+                 end)
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    test "restore leaves interned rows pending until the table is used", %{
+      db: db,
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "compile.roux")
+      Manifest.write(populate(db), %{}, path)
+      db2 = restored(path)
+
+      try do
+        intern2 = Database.intern_table(db2, :names)
+        assert :ets.info(intern2.forward, :size) == 0
+        assert Intern.size(intern2) == 3
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    test "writing a restored database again reuses every unreplaced encoding", %{
+      db: db,
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "compile.roux")
+      again = Path.join(tmp_dir, "again.roux")
+      Manifest.write(populate(db), %{"a.mini" => %{mtime: 1, hash: 2}}, path)
+      db2 = restored(path)
+
+      try do
+        # Read one value: reading decodes it but keeps the encoding.
+        {:ok, _} = Memo.get(db2, {:rows, "a.mini"})
+        Manifest.write(db2, %{"a.mini" => %{mtime: 1, hash: 2}}, again)
+
+        {:ok, first} = Manifest.load(path)
+        {:ok, second} = Manifest.load(again)
+        assert Enum.sort(second.memo_entries) == Enum.sort(first.memo_entries)
+        assert second.intern_data == first.intern_data
+        assert second.sources == first.sources
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    test "writes a recomputed entry's new value", %{db: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      Manifest.write(populate(db), %{}, path)
+      db2 = restored(path)
+
+      try do
+        Input.set(db2, :source_text, "a.mini", "changed")
+        Runtime.execute(db2, :rows, "a.mini", fn _db, _file -> :recomputed end)
+        Manifest.write(db2, %{}, path)
+
+        db3 = restored(path)
+
+        try do
+          assert {:ok, %Entry{value: :recomputed}} = Memo.get(db3, {:rows, "a.mini"})
+          assert {:ok, %Entry{value: "changed"}} = Memo.get(db3, {:input, :source_text, "a.mini"})
+          assert Memo.get(db3, {:rows, "b.mini"}) == Memo.get(db, {:rows, "b.mini"})
+        after
+          Database.shutdown(db3)
+        end
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    property "write, load and restore reproduce any database" do
+      check all(
+              inputs <- map_of(string(:alphanumeric), term(), max_length: 15),
+              derived <- map_of(term(), term(), max_length: 15),
+              interned <- uniq_list_of(term(), max_length: 20)
+            ) do
+        tmp =
+          Path.join(System.tmp_dir!(), "roux_manifest_prop_#{System.unique_integer([:positive])}")
+
+        db = Database.new()
+
+        try do
+          Database.register_input(db, :src, durability: :medium)
+          Enum.each(inputs, fn {key, value} -> Input.set(db, :src, key, value) end)
+
+          Enum.each(derived, fn {key, value} ->
+            Runtime.execute(db, :derived, key, fn _db, _key -> value end)
+          end)
+
+          intern = Database.intern_table(db, :values)
+          Enum.each(interned, &Intern.intern(intern, &1))
+
+          Manifest.write(db, %{}, tmp)
+          db2 = restored(tmp)
+
+          try do
+            # Every entry, whichever the first read is.
+            assert Enum.sort(Memo.entries(db2)) == Enum.sort(Memo.entries(db))
+            assert Revision.snapshot(db2.revision) == Revision.snapshot(db.revision)
+
+            intern2 = Database.intern_table(db2, :values)
+
+            for value <- Enum.reverse(interned) do
+              assert Intern.lookup(intern2, value) == Intern.lookup(intern, value)
+            end
+
+            assert Intern.size(intern2) == Intern.size(intern)
+          after
+            Database.shutdown(db2)
+          end
+        after
+          Database.shutdown(db)
+          File.rm(tmp)
+        end
+      end
+    end
+  end
+
+  describe "write/3 encodes in a process of its own" do
+    test "leaves nothing in the mailbox of a caller that traps exits", %{
+      db: db,
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "compile.roux")
+      populate(db)
+
+      {:messages, messages} =
+        Task.async(fn ->
+          Process.flag(:trap_exit, true)
+          :ok = Manifest.write(db, %{}, path)
+          Process.info(self(), :messages)
+        end)
+        |> Task.await()
+
+      assert messages == []
+      assert {:ok, _} = Manifest.load(path)
+    end
+
+    test "raises what encoding raised, in the caller", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      gone = Database.new()
+      Database.shutdown(gone)
+
+      # The memo table is gone: reading it raises in the encoder.
+      assert_raise ArgumentError, fn -> Manifest.write(gone, %{}, path) end
+      refute File.exists?(path)
+    end
+  end
+
+  # -- integrity --
+
+  describe "integrity" do
+    setup %{db: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      Manifest.write(populate(db), %{}, path)
+      %{path: path, bytes: File.read!(path)}
+    end
+
+    @header_size 16
+
+    test "the manifest it writes loads", %{path: path} do
+      assert {:ok, %{vsn: 4}} = Manifest.load(path)
+    end
+
+    test "refuses a manifest with any payload byte changed", %{path: path, bytes: bytes} do
+      payload_size = byte_size(bytes) - @header_size
+
+      for offset <- [0, div(payload_size, 3), div(payload_size, 2), payload_size - 1] do
+        at = @header_size + offset
+        <<before::binary-size(at), byte, rest::binary>> = bytes
+        File.write!(path, [before, Bitwise.bxor(byte, 0x5A), rest])
+        assert Manifest.load(path) == :error, "a change at payload byte #{offset} was read"
+      end
+    end
+
+    test "refuses a truncated manifest", %{path: path, bytes: bytes} do
+      for size <- [
+            0,
+            7,
+            @header_size - 1,
+            @header_size,
+            div(byte_size(bytes), 2),
+            byte_size(bytes) - 1
+          ] do
+        File.write!(path, binary_part(bytes, 0, size))
+        assert Manifest.load(path) == :error, "a manifest cut to #{size} bytes was read"
+      end
+    end
+
+    test "refuses another format, even with a good checksum", %{path: path, bytes: bytes} do
+      <<magic::binary-size(8), 4::32, rest::binary>> = bytes
+
+      for format <- [3, 5] do
+        File.write!(path, [magic, <<format::32>>, rest])
+        assert Manifest.load(path) == :error
+      end
+
+      File.write!(path, ["ROUXMNFX", <<4::32>>, rest])
+      assert Manifest.load(path) == :error
+    end
+
+    test "refuses a checksummed payload that is not manifest data", %{path: path} do
+      {:ok, data} = Manifest.load(path)
+      good = Map.delete(data, :vsn)
+      [entry | entries] = good.memo_entries
+
+      for payload <- [
+            :not_a_manifest,
+            Map.delete(good, :memo_entries),
+            %{good | memo_entries: [put_elem(entry, 7, :not_encoded) | entries]},
+            %{good | memo_entries: [{:not, :an, :entry} | entries]},
+            %{good | intern_data: [{:names, %{version: 2, forward: [], counter: 0}}]},
+            %{good | revision: %{counter: -1, high: 0, medium: 0, low: 0}}
+          ] do
+        payload = :erlang.term_to_binary(payload)
+        File.write!(path, ["ROUXMNFT", <<4::32, :erlang.crc32(payload)::32>>, payload])
+        assert Manifest.load(path) == :error, "read #{inspect(payload, limit: 3)}"
+      end
+    end
+
+    test "a write replaces the manifest whole and leaves nothing beside it", %{
+      db: db,
+      path: path,
+      tmp_dir: tmp_dir
+    } do
+      Input.set(db, :source_text, "a.mini", "rewritten")
+      Manifest.write(db, %{}, path)
+
+      assert File.ls!(tmp_dir) == ["compile.roux"]
+      db2 = restored(path)
+
+      try do
+        assert Input.get(db2, :source_text, "a.mini") == "rewritten"
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    test "a write that fails leaves the old manifest in place", %{
+      db: db,
+      path: path,
+      bytes: bytes,
+      tmp_dir: tmp_dir
+    } do
+      Input.set(db, :source_text, "a.mini", "never written")
+      File.chmod!(tmp_dir, 0o555)
+
+      try do
+        assert_raise File.Error, fn -> Manifest.write(db, %{}, path) end
+      after
+        File.chmod!(tmp_dir, 0o755)
+      end
+
+      assert File.read!(path) == bytes
+      assert File.ls!(tmp_dir) == ["compile.roux"]
+    end
+
+    test "a write whose rename fails removes its temporary file", %{db: db, tmp_dir: tmp_dir} do
+      # A non-empty directory where the manifest goes: the rename fails.
+      target = Path.join(tmp_dir, "occupied")
+      File.mkdir_p!(Path.join(target, "inside"))
+
+      assert_raise File.RenameError, fn -> Manifest.write(db, %{}, target) end
+      assert Enum.sort(File.ls!(tmp_dir)) == ["compile.roux", "occupied"]
     end
   end
 end

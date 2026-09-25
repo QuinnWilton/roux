@@ -4,6 +4,68 @@
 
 ### Changed (performance)
 
+- **Manifests restore lazily and write only what changed** (manifest
+  format 4; manifests of any earlier format are discarded and rebuilt
+  once — no release carried format 3 below). Restoring a manifest decoded
+  every memoized value and copied it into ETS, and rebuilt every intern
+  table, though a warm run validates entries by their metadata and reads
+  the values of a handful. Each value is now its own binary inside the
+  payload (level-1 compressed, as before): `Roux.Lang.Manifest.restore/2`
+  inserts entries with their values still encoded, the first read that
+  needs a value decodes it, and an intern table loads on its first miss.
+  Writing reuses those encodings for every value that was not replaced —
+  and for every value re-execution found unchanged, see below — and an
+  intern table nothing was interned into hands back its restored rows; the
+  encoding runs in a process of its own, so its garbage does not trigger
+  collections of the caller's heap. On a 350-module scry project (realtime)
+  loading and restoring the 25 MB manifest takes 13 ms instead of 320, a
+  warm `mix compile` spends 0.40 s in scry instead of 0.78, and a
+  one-module edit 2.9 s instead of 3.9 (the manifest write in it: 0.3 s
+  instead of 0.9). The manifest grows from 17 to 25 MB: the intern rows are
+  no longer compressed, as decoding them compressed on first use cost more
+  than reading the extra bytes.
+- **Manifests are checksummed and written atomically.** A format-4
+  manifest is a header (`ROUXMNFT`, the format number, a CRC-32 of the
+  payload) and the payload; `Roux.Lang.Manifest.load/1` refuses a
+  manifest whose checksum or shape does not hold, so a truncated or
+  corrupted file is rebuilt from scratch, never partly read — which lazy
+  decoding requires, as a value is decoded long after the load. `write/3`
+  writes a temporary file beside the manifest and renames it over the old
+  one, so an interrupted write leaves the previous manifest in place.
+- **A re-execution that comes back unchanged keeps the stored value.** A
+  stale entry's value was copied out of ETS before its query re-ran, only
+  to be compared with the new one, and the equal new value was then
+  copied back in. `Roux.Runtime` now reads the replaced entry's hash,
+  `changed_at` and output entities (`Roux.Memo.prior_state/2`, under the
+  key's dedup claim, where no other computation can replace the entry),
+  reads the stored value only when the hashes agree, and on early cutoff
+  rewrites everything but the value (`Roux.Memo.put_unchanged/3`). Reading
+  the prior state under the claim also means a re-execution compares
+  against the entry it actually replaces, where it used to compare against
+  the one it saw before claiming.
+
+### Added
+
+- `Roux.Memo.persisted/2`, `restore_persisted/2` and `decode_persisted/1`:
+  entries in the form a manifest carries them, with each value in the
+  external term format. A restored entry's value stays encoded until
+  `get/2`, `entries/1` or `reduce_entries/3` returns it; the value-free
+  accessors never decode it.
+- `Roux.Memo.prior_state/2` and `Roux.Memo.put_unchanged/3` (see above).
+- `Roux.Intern.encode_snapshot/1` (`%{version: 3, forward: binary, counter:
+  n}`), which `Roux.Intern.restore/2` now also accepts, leaving the rows
+  pending until the table is first used.
+
+### Changed
+
+- The memo table's ETS rows have a ninth element: the value's encoding
+  for an entry restored from a manifest, `nil` otherwise (the value
+  position is then `nil`). Code that matches the table directly must
+  match nine elements; `Roux.Input.keys/2` does.
+- `Roux.Lang.Manifest.manifest_data`'s `memo_entries` are
+  `Roux.Memo.persisted()` tuples and its `intern_data` holds encoded
+  snapshots; `Roux.Lang.Manifest.memo_entries/1` still decodes them.
+
 - **Intern tables persist in one direction** (manifest format 3; older
   manifests are discarded and rebuilt once). `Roux.Intern.snapshot/1`
   stored both the forward and the reverse table, so every interned value

@@ -144,7 +144,13 @@ The durability system (see [02-revision.md](02-revision.md)) provides a natural 
 
 ### Manifest format
 
-Uses `:erlang.term_to_binary/2` and `:erlang.binary_to_term/1`, same as the Elixir compiler's manifest. A `@manifest_vsn` tag enables graceful migration — if the version doesn't match, the manifest is discarded and a full rebuild runs.
+`Roux.Lang.Manifest` writes format 4: an 8-byte magic (`ROUXMNFT`), the format number, a CRC-32 of the payload, and the payload — one uncompressed `term_to_binary/1` of the manifest data. Inside it, each memo entry's value is a binary of its own (its external term format, compressed at level 1), and so is each intern table's forward rows.
+
+- **Load** reads the file, checks the magic, format and CRC, decodes the payload and checks its shape. Anything else — a missing file, formats 1 to 3 (a bare `term_to_binary/2` of the data), a truncated or corrupted file — is `:error`, and the compiler rebuilds from scratch. Nothing is ever partly read.
+- **Restore** inserts the memo entries with their values still encoded (`Roux.Memo.restore_persisted/2`) and leaves the intern rows pending (`Roux.Intern.restore/2`). A value is decoded by the first read that needs it; an intern table loads on its first miss. Validation reads only metadata, so a warm run that changed nothing decodes a handful of values and loads no intern table.
+- **Write** encodes only what the run replaced: a restored value that was never replaced, or that re-execution found unchanged, goes out in the encoding it came in with, and so does an intern table nothing was interned into. The encoding runs in a process of its own, so its garbage never triggers collections of the caller's heap, and the file is written to a temporary name and renamed over the old one.
+
+On a 350-module scry project (a 25 MB manifest), load and restore take about 13 ms (format 3: 320 ms, decoding and copying every value), and rewriting the manifest after a one-module edit about 300 ms (format 3: 880 ms).
 
 ### Why not just use Roux's content comparison?
 
@@ -227,6 +233,7 @@ The data model already carries everything needed for serialization (values, hash
 - Compile writes a manifest; second compile loads it and skips unchanged queries
 - Edit one file between compiles — only affected queries re-execute
 - Delete a file between compiles — removed input triggers downstream cleanup
-- Corrupt manifest — falls back to full rebuild gracefully
-- Manifest with wrong `@manifest_vsn` — discarded, full rebuild
+- Corrupt manifest (any changed byte, any truncation) — falls back to full rebuild gracefully
+- Manifest of another format (including the bare-term formats 1 to 3) — discarded, full rebuild
+- A write that fails leaves the previous manifest in place
 - Touch a file without changing content — mtime changes but content hash matches, no recomputation
