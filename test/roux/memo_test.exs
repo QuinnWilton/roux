@@ -396,4 +396,176 @@ defmodule Roux.MemoTest do
       assert {:ok, _changed_at, :low} = Memo.dep_state(db, {:q, :k})
     end
   end
+
+  describe "persistence" do
+    # A manifest carries each entry with its value in the external term
+    # format, and restore puts it back that way: the value is decoded by
+    # the first read that needs it, and goes out to the next manifest in
+    # the encoding it came in with.
+
+    defp persisted_row(key, encoded, attrs \\ %{}) do
+      entry = make_entry(attrs)
+
+      {key, entry.hash, entry.changed_at, entry.verified_at, entry.dependencies, entry.durability,
+       entry.output_entities, encoded}
+    end
+
+    defp keep_all(_key, _durability), do: true
+
+    test "restored entries read back as they were written", %{db: db} do
+      Memo.put(db, {:q, :a}, make_entry(%{value: %{rows: [["a", 1]]}, changed_at: 3}))
+      Memo.put(db, {:input, :src, "b"}, make_entry(%{value: "text", durability: :medium}))
+
+      restored = Database.new()
+
+      try do
+        :ok = Memo.restore_persisted(restored, Memo.persisted(db, &keep_all/2))
+
+        assert Enum.sort(Memo.entries(restored)) == Enum.sort(Memo.entries(db))
+        assert Memo.get(restored, {:q, :a}) == Memo.get(db, {:q, :a})
+        assert Memo.get(restored, {:input, :src, "b"}) == Memo.get(db, {:input, :src, "b"})
+      after
+        Database.shutdown(restored)
+      end
+    end
+
+    test "the value-free accessors never decode a restored value", %{db: db} do
+      # Not the external term format: any accessor that decoded it would
+      # raise.
+      row =
+        persisted_row({:q, :k}, "not a term", %{
+          changed_at: 4,
+          verified_at: 6,
+          durability: :medium,
+          dependencies: [{:dep, 1}]
+        })
+
+      :ok = Memo.restore_persisted(db, [row])
+
+      assert Memo.dep_state(db, {:q, :k}) == {:ok, 4, :medium}
+      assert Memo.verification_state(db, {:q, :k}) == {:ok, 6, :medium}
+      assert Memo.dependencies(db, {:q, :k}) == {:ok, [{:dep, 1}]}
+      assert Memo.changed_at(db, {:q, :k}) == {:ok, 4}
+      assert Memo.durability(db, {:q, :k}) == {:ok, :medium}
+      assert :ok = Memo.update_verified(db, {:q, :k}, 7, :high)
+      assert Memo.verification_state(db, {:q, :k}) == {:ok, 7, :high}
+
+      assert_raise ArgumentError, fn -> Memo.get(db, {:q, :k}) end
+    end
+
+    test "a restored value goes back out in the encoding it came in with", %{db: db} do
+      # Uncompressed, which `persisted/2` would never produce itself: an
+      # entry that was re-encoded would come out compressed.
+      encoded = :erlang.term_to_binary(List.duplicate("row", 100))
+      :ok = Memo.restore_persisted(db, [persisted_row({:q, :k}, encoded)])
+
+      assert [{{:q, :k}, _, _, _, _, _, _, ^encoded}] = Memo.persisted(db, &keep_all/2)
+      assert {:ok, %Entry{value: value}} = Memo.get(db, {:q, :k})
+      assert value == List.duplicate("row", 100)
+
+      # Reading it does not replace the encoding, and neither does
+      # verifying it again.
+      Memo.update_verified(db, {:q, :k}, 9)
+      assert [{{:q, :k}, _, _, 9, _, _, _, ^encoded}] = Memo.persisted(db, &keep_all/2)
+    end
+
+    test "put/3 over a restored entry replaces its encoding", %{db: db} do
+      :ok = Memo.restore_persisted(db, [persisted_row({:q, :k}, "not a term")])
+      Memo.put(db, {:q, :k}, make_entry(%{value: :new, hash: :erlang.phash2(:new)}))
+
+      assert {:ok, %Entry{value: :new}} = Memo.get(db, {:q, :k})
+      assert [{{:q, :k}, _, _, _, _, _, _, encoded}] = Memo.persisted(db, &keep_all/2)
+      assert :erlang.binary_to_term(encoded) == :new
+    end
+
+    test "persisted/2 offers each entry's key and durability to keep?", %{db: db} do
+      Memo.put(db, {:q, :low}, make_entry(%{durability: :low}))
+      Memo.put(db, {:q, :high}, make_entry(%{durability: :high}))
+      :ok = Memo.restore_persisted(db, [persisted_row({:q, :restored}, "not a term")])
+
+      kept = Memo.persisted(db, fn _key, durability -> durability != :low end)
+
+      assert Enum.sort(Enum.map(kept, &elem(&1, 0))) == [{:q, :high}]
+    end
+
+    test "restore_persisted/2 refuses anything but persisted entries", %{db: db} do
+      assert_raise ArgumentError, ~r/not a persisted memo entry/, fn ->
+        Memo.restore_persisted(db, [{{:q, :k}, make_entry()}])
+      end
+
+      assert_raise ArgumentError, ~r/not a persisted memo entry/, fn ->
+        Memo.restore_persisted(db, [put_elem(persisted_row({:q, :k}, "x"), 7, :not_binary)])
+      end
+
+      assert Memo.get(db, {:q, :k}) == :miss
+    end
+
+    test "decode_persisted/1 is what a restore would read", %{db: db} do
+      Memo.put(db, {:q, :k}, make_entry(%{value: {:a, "b"}, changed_at: 2}))
+      [row] = Memo.persisted(db, &keep_all/2)
+
+      assert Memo.decode_persisted(row) == {{:q, :k}, elem(Memo.get(db, {:q, :k}), 1)}
+    end
+
+    test "Roux.Input.keys/2 lists restored inputs", %{db: db} do
+      :ok =
+        Memo.restore_persisted(db, [
+          persisted_row({:input, :src, "a"}, :erlang.term_to_binary("x")),
+          persisted_row({:q, :k}, :erlang.term_to_binary("y"))
+        ])
+
+      assert Roux.Input.keys(db, :src) == ["a"]
+    end
+
+    property "restore_persisted(persisted(db)) reproduces every entry" do
+      check all(
+              entries <-
+                uniq_list_of(
+                  tuple(
+                    {tuple({atom(:alphanumeric), term()}), term(), positive_integer(),
+                     member_of([:high, :medium, :low])}
+                  ),
+                  uniq_fun: &elem(&1, 0),
+                  max_length: 20
+                )
+            ) do
+        db = Database.new()
+        restored = Database.new()
+
+        try do
+          for {key, value, changed_at, durability} <- entries do
+            Memo.put(
+              db,
+              key,
+              make_entry(%{
+                value: value,
+                hash: :erlang.phash2(value),
+                changed_at: changed_at,
+                verified_at: changed_at,
+                durability: durability,
+                dependencies: [key]
+              })
+            )
+          end
+
+          persisted = Memo.persisted(db, &keep_all/2)
+          :ok = Memo.restore_persisted(restored, persisted)
+
+          assert Enum.sort(Memo.entries(restored)) == Enum.sort(Memo.entries(db))
+
+          for {key, _, _, _} <- entries do
+            assert Memo.dep_state(restored, key) == Memo.dep_state(db, key)
+            assert Memo.get(restored, key) == Memo.get(db, key)
+          end
+
+          # A second round trip carries the same bytes: nothing was
+          # encoded again.
+          assert Enum.sort(Memo.persisted(restored, &keep_all/2)) == Enum.sort(persisted)
+        after
+          Database.shutdown(db)
+          Database.shutdown(restored)
+        end
+      end
+    end
+  end
 end

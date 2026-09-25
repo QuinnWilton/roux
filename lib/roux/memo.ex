@@ -8,6 +8,25 @@ defmodule Roux.Memo do
 
   Entries are stored as flat tuples in ETS for efficiency and to support
   atomic partial updates via `:ets.select_replace/2`.
+
+  ## Restored values stay encoded
+
+  An entry restored from a manifest (`restore_persisted/2`) keeps its
+  value in the external term format until something reads it: `get/2`,
+  `entries/1` and `reduce_entries/3` decode it on the way out, and the
+  value-free accessors never touch it. A warm run validates thousands of
+  entries and reads the values of a handful, so decoding every value up
+  front and copying it into ETS was most of the cost of restoring a
+  manifest (on a 350-module scry project, 13 million words decoded and
+  copied, of which a warm run that changed nothing reads about 15,000).
+  The encoding also goes back out unchanged: `persisted/2` hands a
+  still-encoded value to the next manifest without encoding it again.
+
+  Nothing writes a decoded value back into the table. Doing that safely
+  would need a compare-and-swap against a concurrent `put/3` of a newer
+  entry for the same key, and a lost race would pair the newer entry's
+  metadata with the older value. A process that reads a restored value
+  more than once caches it itself (`Roux.Runtime` does, per revision).
   """
 
   alias Roux.Database
@@ -18,10 +37,32 @@ defmodule Roux.Memo do
 
   @type dependency :: query_key() | {:entity_field, module(), term(), atom()}
 
+  @typedoc """
+  An entry as a manifest persists it: every field of `Roux.Memo.Entry`,
+  with the value in the external term format. See `persisted/2`.
+  """
+  @type persisted ::
+          {query_key(), hash :: integer(), changed_at :: Revision.revision(),
+           verified_at :: Revision.revision(), [dependency()], Revision.durability(),
+           output_entities :: [{module(), term()}], encoded_value :: binary()}
+
   # -- ETS tuple layout --
   #
-  # {query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities}
-  #  pos 1      pos 2  pos 3 pos 4       pos 5        pos 6         pos 7       pos 8
+  # {query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities, encoded}
+  #  pos 1      pos 2  pos 3 pos 4       pos 5        pos 6         pos 7       pos 8            pos 9
+  #
+  # `encoded` is nil when `value` holds the entry's value, and the value in
+  # the external term format when the entry was restored and has not been
+  # replaced since; `value` is then nil and means nothing. Only `put/3`
+  # (nil) and `restore_persisted/2` (a binary) write position 9, each
+  # together with position 2 in one insert, and `update_verified` leaves
+  # both alone. So the two never disagree.
+
+  # Level 1 is a fifth of the default level's encode time for a fifth
+  # more bytes. Against no compression, it takes twice as long to encode
+  # and decodes as fast, and it keeps the manifest, and the memory an
+  # undecoded value holds, a third of the size.
+  @value_opts [{:compressed, 1}]
 
   @doc """
   Looks up a memo entry. Returns `{:ok, entry}` or `:miss`.
@@ -201,36 +242,100 @@ defmodule Roux.Memo do
   Returns all memo entries with their keys.
 
   Returns `[{query_key, entry}]` rather than `[entry]` so that callers (e.g.
-  GC) can identify entries for deletion without a second lookup.
+  GC) can identify entries for deletion without a second lookup. Every
+  value is materialized, restored ones decoded.
   """
   @spec entries(Database.t()) :: [{query_key(), Entry.t()}]
   def entries(%Database{memo_table: table}) do
     table
     |> :ets.tab2list()
-    |> Enum.map(fn tuple -> {elem(tuple, 0), to_entry(tuple)} end)
+    |> Enum.map(&to_entry_pair/1)
   end
 
   @doc """
   Folds over every entry as `{query_key, entry}` without materializing
   the table as a list: each entry is copied out of ETS on its own turn
-  and is garbage once the reducer is done with it.
+  (a restored value decoded) and is garbage once the reducer is done
+  with it.
   """
   @spec reduce_entries(Database.t(), acc, ({query_key(), Entry.t()}, acc -> acc)) :: acc
         when acc: term()
   def reduce_entries(%Database{memo_table: table}, acc, fun) when is_function(fun, 2) do
-    :ets.foldl(fn tuple, acc -> fun.({elem(tuple, 0), to_entry(tuple)}, acc) end, acc, table)
+    :ets.foldl(fn tuple, acc -> fun.(to_entry_pair(tuple), acc) end, acc, table)
+  end
+
+  @doc """
+  The entries `keep?` accepts, in the form a manifest persists them.
+
+  `keep?` receives each entry's key and durability, before its value is
+  touched. A restored value that was never replaced goes out in the
+  encoding it came in with; any other value is encoded here, one entry
+  at a time.
+  """
+  @spec persisted(Database.t(), (query_key(), Revision.durability() -> boolean())) ::
+          [persisted()]
+  def persisted(%Database{memo_table: table}, keep?) when is_function(keep?, 2) do
+    :ets.foldl(
+      fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded}, acc ->
+        if keep?.(key, durability) do
+          encoded = if is_binary(encoded), do: encoded, else: encode_value(value)
+          [{key, hash, changed_at, verified_at, deps, durability, outputs, encoded} | acc]
+        else
+          acc
+        end
+      end,
+      [],
+      table
+    )
+  end
+
+  @doc """
+  Inserts persisted entries (`persisted/2`) with their values still
+  encoded: each is decoded by the first read that needs it.
+
+  Used by manifest restore. Overwrites entries with the same keys.
+  Raises `ArgumentError` for anything that is not a persisted entry.
+  """
+  @spec restore_persisted(Database.t(), [persisted()]) :: :ok
+  def restore_persisted(%Database{memo_table: table}, entries) when is_list(entries) do
+    rows =
+      Enum.map(entries, fn
+        {key, hash, changed_at, verified_at, deps, durability, outputs, encoded}
+        when is_binary(encoded) ->
+          {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded}
+
+        other ->
+          raise ArgumentError, "not a persisted memo entry: #{inspect(other, limit: 5)}"
+      end)
+
+    :ets.insert(table, rows)
+    :ok
+  end
+
+  @doc """
+  Decodes a persisted entry (`persisted/2`) into `{query_key, entry}`,
+  for inspecting a manifest without restoring it.
+  """
+  @spec decode_persisted(persisted()) :: {query_key(), Entry.t()}
+  def decode_persisted({key, hash, changed_at, verified_at, deps, durability, outputs, encoded})
+      when is_binary(encoded) do
+    to_entry_pair({key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded})
   end
 
   # -- Private helpers --
 
   defp to_tuple(key, %Entry{} = e) do
     {key, e.value, e.hash, e.changed_at, e.verified_at, e.dependencies, e.durability,
-     e.output_entities}
+     e.output_entities, nil}
   end
 
-  defp to_entry({_key, value, hash, changed_at, verified_at, deps, durability, output_entities}) do
+  defp to_entry_pair(tuple), do: {elem(tuple, 0), to_entry(tuple)}
+
+  defp to_entry(
+         {_key, value, hash, changed_at, verified_at, deps, durability, output_entities, encoded}
+       ) do
     %Entry{
-      value: value,
+      value: if(is_binary(encoded), do: decode_value(encoded), else: value),
       hash: hash,
       changed_at: changed_at,
       verified_at: verified_at,
@@ -239,4 +344,8 @@ defmodule Roux.Memo do
       output_entities: output_entities
     }
   end
+
+  defp encode_value(value), do: :erlang.term_to_binary(value, @value_opts)
+
+  defp decode_value(encoded), do: :erlang.binary_to_term(encoded)
 end

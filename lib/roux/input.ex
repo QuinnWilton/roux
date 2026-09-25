@@ -197,8 +197,9 @@ defmodule Roux.Input do
   """
   @spec keys(Database.t(), atom()) :: [term()]
   def keys(%Database{memo_table: table}, input_name) when is_atom(input_name) do
-    # Match the 8-element ETS tuple with a 3-tuple key prefix.
-    pattern = {{:input, input_name, :"$1"}, :_, :_, :_, :_, :_, :_, :_}
+    # Match the 9-element ETS tuple (see `Roux.Memo`) with a 3-tuple key
+    # prefix.
+    pattern = {{:input, input_name, :"$1"}, :_, :_, :_, :_, :_, :_, :_, :_}
 
     table
     |> :ets.match(pattern)

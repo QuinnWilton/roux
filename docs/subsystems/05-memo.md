@@ -71,10 +71,26 @@ end
 The memo table stores entries as:
 
 ```elixir
-{query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities}
+{query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities, encoded}
 ```
 
 Using a flat tuple (not a struct) in ETS avoids the overhead of map storage and allows `ets.select_replace` for partial updates.
+
+`encoded` is `nil` for an entry put by `put/3`. An entry restored from a manifest (`restore_persisted/2`) holds its value there instead, in the external term format, with `value` set to `nil`: the value is decoded by the first `get/2` (or `entries/1`, `reduce_entries/3`) that returns it, and the value-free accessors never decode it. Nothing writes the decoded value back — a write-back would race a `put/3` of a newer entry for the same key — so a process that reads a restored value repeatedly caches it itself, as `Roux.Runtime` does. `persisted/2` hands a still-encoded value to the next manifest without encoding it again.
+
+## Persistence
+
+```elixir
+@spec persisted(Roux.Database.t(), (query_key(), durability() -> boolean())) :: [persisted()]
+# The entries keep? accepts, each as {key, hash, changed_at, verified_at,
+# dependencies, durability, output_entities, encoded_value}.
+
+@spec restore_persisted(Roux.Database.t(), [persisted()]) :: :ok
+# Inserts persisted entries with their values still encoded.
+
+@spec decode_persisted(persisted()) :: {query_key(), entry()}
+# Decodes one persisted entry, for inspecting a manifest.
+```
 
 ## Early cutoff comparison
 
