@@ -213,6 +213,91 @@ defmodule Roux.RuntimeTest do
     end
   end
 
+  # -- Re-execution over a stored entry --
+
+  describe "re-execution over a stored entry" do
+    # A stale entry is re-executed and its new value compared against the
+    # stored one. The stored value is read only when the hashes agree, and
+    # an equal value stays as it is stored — for an entry restored from a
+    # manifest, still encoded, so the next manifest reuses the encoding.
+
+    # An entry for `{:rows, "a"}`, restored as a manifest would restore
+    # it, that read the `:source` input at revision 1; the input then
+    # changes, so the entry is stale.
+    defp restore_stale(db, hash, encoded) do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", "hello")
+
+      :ok =
+        Memo.restore_persisted(db, [
+          {{:rows, "a"}, hash, 1, 1, [{:input, :source, "a"}], :low, [], encoded}
+        ])
+
+      Input.set(db, :source, "a", "world")
+      Roux.Revision.current(db.revision)
+    end
+
+    defp reading_source(value) do
+      fn db, key ->
+        _ = Runtime.input(db, :source, key)
+        value
+      end
+    end
+
+    test "an unchanged value keeps the stored encoding and changed_at", %{db: db} do
+      value = [["row", 1], ["row", 2]]
+      # Uncompressed: an encoding `Memo.persisted/2` never produces itself.
+      encoded = :erlang.term_to_binary(value)
+      rev = restore_stale(db, :erlang.phash2(value), encoded)
+
+      assert Runtime.execute(db, :rows, "a", reading_source(value)) == value
+
+      assert {:ok, %Memo.Entry{value: ^value, changed_at: 1, verified_at: ^rev}} =
+               Memo.get(db, {:rows, "a"})
+
+      assert [{{:rows, "a"}, _, 1, ^rev, _, :low, [], ^encoded}] =
+               Memo.persisted(db, fn key, _ -> key == {:rows, "a"} end)
+    end
+
+    test "a different hash never reads the stored value", %{db: db} do
+      # Not the external term format: reading it would raise.
+      rev = restore_stale(db, :erlang.phash2(:old), "not a term")
+
+      assert Runtime.execute(db, :rows, "a", reading_source(:new)) == :new
+      assert {:ok, %Memo.Entry{value: :new, changed_at: ^rev}} = Memo.get(db, {:rows, "a"})
+    end
+
+    test "an equal hash over a different value is a change", %{db: db} do
+      # A hash collision, as the stored entry claims the new value's hash.
+      rev = restore_stale(db, :erlang.phash2(:new), :erlang.term_to_binary(:old))
+
+      assert Runtime.execute(db, :rows, "a", reading_source(:new)) == :new
+      assert {:ok, %Memo.Entry{value: :new, changed_at: ^rev}} = Memo.get(db, {:rows, "a"})
+    end
+
+    test "an unchanged live value is not replaced by the new equal one", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", "hello")
+
+      Runtime.execute(db, :rows, "a", fn db, key ->
+        _ = Runtime.input(db, :source, key)
+        [["row", 1]]
+      end)
+
+      Input.set(db, :source, "a", "world")
+
+      Runtime.execute(db, :rows, "a", fn db, key ->
+        _ = Runtime.input(db, :source, key)
+        [["row", 1]]
+      end)
+
+      {:ok, entry} = Memo.get(db, {:rows, "a"})
+      assert entry.value == [["row", 1]]
+      assert entry.verified_at == Roux.Revision.current(db.revision)
+      assert entry.changed_at < entry.verified_at
+    end
+  end
+
   # -- Integration tests: query chains --
 
   describe "query chains" do

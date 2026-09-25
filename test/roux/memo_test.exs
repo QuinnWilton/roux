@@ -397,6 +397,67 @@ defmodule Roux.MemoTest do
     end
   end
 
+  describe "prior_state/2 and put_unchanged/3" do
+    test "prior_state/2 reads hash, changed_at and output entities", %{db: db} do
+      Memo.put(
+        db,
+        {:q, :k},
+        make_entry(%{hash: 42, changed_at: 5, output_entities: [{Some.Entity, 1}]})
+      )
+
+      assert Memo.prior_state(db, {:q, :k}) == {:ok, 42, 5, [{Some.Entity, 1}]}
+      assert Memo.prior_state(db, {:q, :absent}) == :miss
+    end
+
+    test "prior_state/2 never decodes a restored value", %{db: db} do
+      :ok =
+        Memo.restore_persisted(db, [{{:q, :k}, 7, 2, 3, [], :medium, [], "not a term"}])
+
+      assert Memo.prior_state(db, {:q, :k}) == {:ok, 7, 2, []}
+    end
+
+    test "put_unchanged/3 rewrites every field but the stored value", %{db: db} do
+      encoded = :erlang.term_to_binary(:stored)
+
+      :ok =
+        Memo.restore_persisted(db, [
+          {{:q, :k}, :erlang.phash2(:stored), 2, 3, [], :medium, [], encoded}
+        ])
+
+      Memo.put_unchanged(
+        db,
+        {:q, :k},
+        make_entry(%{
+          value: :stored,
+          hash: :erlang.phash2(:stored),
+          changed_at: 2,
+          verified_at: 8,
+          dependencies: [{:dep, 1}],
+          durability: :high,
+          output_entities: [{Some.Entity, 2}]
+        })
+      )
+
+      assert {:ok,
+              %Entry{
+                value: :stored,
+                changed_at: 2,
+                verified_at: 8,
+                dependencies: [{:dep, 1}],
+                durability: :high,
+                output_entities: [{Some.Entity, 2}]
+              }} = Memo.get(db, {:q, :k})
+
+      assert [{{:q, :k}, _, 2, 8, _, :high, _, ^encoded}] =
+               Memo.persisted(db, fn _, _ -> true end)
+    end
+
+    test "put_unchanged/3 over no stored entry stores the entry", %{db: db} do
+      Memo.put_unchanged(db, {:q, :k}, make_entry(%{value: :fresh}))
+      assert {:ok, %Entry{value: :fresh}} = Memo.get(db, {:q, :k})
+    end
+  end
+
   describe "persistence" do
     # A manifest carries each entry with its value in the external term
     # format, and restore puts it back that way: the value is decoded by

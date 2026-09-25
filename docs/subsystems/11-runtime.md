@@ -59,6 +59,12 @@ end
 # 5. Compare result to old value (if exists) for early cutoff.
 # 6. Flush results to ETS atomically.
 # 7. Return the value.
+#
+# Step 5 reads the replaced entry's hash, changed_at and output entities
+# (`Roux.Memo.prior_state/2`) under the dedup claim, and its value only when
+# the hashes agree. An unchanged value stays as it is stored
+# (`Roux.Memo.put_unchanged/3`): the equal new one is not copied in, and a
+# value restored from a manifest keeps its encoding for the next one.
 
 @spec query(Roux.Database.t(), query_name, key) :: term()
 # Call a derived query from within another query. Records a dependency.

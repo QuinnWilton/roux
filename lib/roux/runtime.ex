@@ -80,13 +80,12 @@ defmodule Roux.Runtime do
               value
 
             :stale ->
-              {:ok, old_entry} = Memo.get(db, query_key)
-              compute(db, query_name, key, query_key, current_rev, query_fun, old_entry)
+              compute(db, query_name, key, query_key, current_rev, query_fun, :replace)
           end
 
         :miss ->
           Telemetry.cache_miss(query_name, key, current_rev)
-          compute(db, query_name, key, query_key, current_rev, query_fun, nil)
+          compute(db, query_name, key, query_key, current_rev, query_fun, :new)
       end
 
     # Propagate child's durability to parent context when nested.
@@ -340,7 +339,9 @@ defmodule Roux.Runtime do
 
   # -- Private: computation --
 
-  defp compute(db, query_name, key, query_key, current_rev, query_fun, old_entry) do
+  # `mode` is `:replace` when a stored entry went stale and `:new` when
+  # there was none.
+  defp compute(db, query_name, key, query_key, current_rev, query_fun, mode) do
     parent_ctx = get_context()
     parent_stack = if parent_ctx, do: parent_ctx.query_stack, else: []
 
@@ -355,7 +356,7 @@ defmodule Roux.Runtime do
       query_key: query_key,
       current_rev: current_rev,
       query_fun: query_fun,
-      old_entry: old_entry,
+      mode: mode,
       parent_stack: parent_stack
     }
 
@@ -384,9 +385,20 @@ defmodule Roux.Runtime do
       query_key: query_key,
       current_rev: current_rev,
       query_fun: query_fun,
-      old_entry: old_entry,
+      mode: mode,
       parent_stack: parent_stack
     } = job
+
+    # What the entry being replaced says, read under the claim: no other
+    # computation of this key can replace it until the claim is released,
+    # so it is still the stored entry when the new one is written. Its
+    # value is not read here — only an equal hash needs it (see
+    # `unchanged?/5`), and a restored value would be decoded for nothing.
+    prior =
+      case mode do
+        :replace -> prior_state(db, query_key)
+        :new -> nil
+      end
 
     # Fresh context for this query's execution.
     exec_ctx = %Context{
@@ -411,14 +423,14 @@ defmodule Roux.Runtime do
       hash = :erlang.phash2(value)
 
       # Early cutoff: if value unchanged, keep the old changed_at.
-      changed_at =
-        case old_entry do
-          %Entry{hash: ^hash, value: ^value} ->
-            Telemetry.early_cutoff(query_name, key, current_rev, old_entry.changed_at)
-            old_entry.changed_at
+      unchanged? = unchanged?(db, query_key, prior, hash, value)
 
-          _ ->
-            current_rev
+      changed_at =
+        if unchanged? do
+          Telemetry.early_cutoff(query_name, key, current_rev, prior.changed_at)
+          prior.changed_at
+        else
+          current_rev
         end
 
       entry = %Entry{
@@ -431,11 +443,17 @@ defmodule Roux.Runtime do
         output_entities: final_ctx.created_entities
       }
 
-      Memo.put(db, query_key, entry)
+      # An unchanged value stays as it is stored: copying the equal new
+      # one in would cost a copy of it, and would throw away a restored
+      # value's encoding, which the next manifest would then encode again.
+      if unchanged?,
+        do: Memo.put_unchanged(db, query_key, entry),
+        else: Memo.put(db, query_key, entry)
+
       cache_value(db, query_key, changed_at, value)
 
       # Update entity refcounts for the output entity diff (D15).
-      old_entities = if old_entry, do: old_entry.output_entities, else: []
+      old_entities = if prior, do: prior.output_entities, else: []
       GC.sweep_query(db, query_key, old: old_entities, new: entry.output_entities)
 
       Telemetry.query_stop(query_name, key, current_rev, duration, hash)
@@ -450,6 +468,26 @@ defmodule Roux.Runtime do
       restore_context(old_ctx)
     end
   end
+
+  defp prior_state(db, query_key) do
+    case Memo.prior_state(db, query_key) do
+      {:ok, hash, changed_at, output_entities} ->
+        %{hash: hash, changed_at: changed_at, output_entities: output_entities}
+
+      :miss ->
+        nil
+    end
+  end
+
+  # Whether `value` is the value the replaced entry holds. The hashes
+  # decide most cases; only equal ones read the stored value to compare.
+  # A stored entry that went away meanwhile (a GC sweep) counts as a
+  # change, which recomputes dependents rather than serving them stale.
+  defp unchanged?(db, query_key, %{hash: hash}, hash, value) do
+    match?({:ok, %Entry{value: ^value}}, Memo.get(db, query_key))
+  end
+
+  defp unchanged?(_db, _query_key, _prior, _hash, _value), do: false
 
   # -- Private: dedup --
 

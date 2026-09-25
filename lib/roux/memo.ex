@@ -55,8 +55,8 @@ defmodule Roux.Memo do
   # the external term format when the entry was restored and has not been
   # replaced since; `value` is then nil and means nothing. Only `put/3`
   # (nil) and `restore_persisted/2` (a binary) write position 9, each
-  # together with position 2 in one insert, and `update_verified` leaves
-  # both alone. So the two never disagree.
+  # together with position 2 in one insert; `put_unchanged/3` and
+  # `update_verified` leave both alone. So the two never disagree.
 
   # Level 1 is a fifth of the default level's encode time for a fifth
   # more bytes. Against no compression, it takes twice as long to encode
@@ -140,6 +140,30 @@ defmodule Roux.Memo do
     end
   end
 
+  @doc """
+  Reads what re-executing an entry needs from the entry it replaces — its
+  hash, `changed_at` and output entities — without its value.
+
+  The three fields are read one at a time, so a `put/3` racing the read
+  can mix two entries' fields: read it where no other put of the key can
+  happen (`Roux.Runtime` reads it while it holds the key's computation
+  claim).
+
+  Returns `{:ok, hash, changed_at, output_entities}` or `:miss`.
+  """
+  @spec prior_state(Database.t(), query_key()) ::
+          {:ok, integer(), Revision.revision(), [{module(), term()}]} | :miss
+  def prior_state(%Database{memo_table: table}, key) do
+    # hash is position 3, changed_at position 4, output_entities position 8.
+    with hash when hash != :missing <- :ets.lookup_element(table, key, 3, :missing),
+         changed_at when changed_at != :missing <- :ets.lookup_element(table, key, 4, :missing),
+         outputs when outputs != :missing <- :ets.lookup_element(table, key, 8, :missing) do
+      {:ok, hash, changed_at, outputs}
+    else
+      :missing -> :miss
+    end
+  end
+
   @doc "Reads an entry's `changed_at` without its value."
   @spec changed_at(Database.t(), query_key()) :: {:ok, Roux.Revision.revision()} | :miss
   def changed_at(%Database{memo_table: table}, key) do
@@ -182,6 +206,34 @@ defmodule Roux.Memo do
   def put(%Database{memo_table: table}, key, %Entry{} = entry) do
     :ets.insert(table, to_tuple(key, entry))
     :ok
+  end
+
+  @doc """
+  Stores `entry` over an entry whose value is equal to (`===`)
+  `entry.value`, keeping the stored value.
+
+  Re-execution that comes back to the value it had (early cutoff)
+  rewrites everything about the entry but its value. Keeping the stored
+  value saves copying the equal new one into the table and, for a value
+  restored from a manifest and not yet replaced, keeps its encoding, so
+  the next manifest does not encode it again. The caller vouches for the
+  equality; nothing here compares the values.
+
+  Behaves as `put/3` when there is no stored entry.
+  """
+  @spec put_unchanged(Database.t(), query_key(), Entry.t()) :: :ok
+  def put_unchanged(%Database{memo_table: table} = db, key, %Entry{} = e) do
+    # Positions 3 to 8; the value (2) and its encoding (9) stay.
+    fields = [
+      {3, e.hash},
+      {4, e.changed_at},
+      {5, e.verified_at},
+      {6, e.dependencies},
+      {7, e.durability},
+      {8, e.output_entities}
+    ]
+
+    if :ets.update_element(table, key, fields), do: :ok, else: put(db, key, e)
   end
 
   @doc """
