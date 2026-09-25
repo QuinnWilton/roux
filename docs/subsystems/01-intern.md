@@ -51,7 +51,31 @@ end
 
 @spec destroy(t()) :: :ok
 # Delete both ETS tables. Called during database shutdown.
+
+@spec snapshot(t()) :: snapshot()
+# The forward rows and the counter: %{version: 2, forward: rows, counter: n}.
+
+@spec encode_snapshot(t()) :: encoded_snapshot()
+# The forward rows encoded, and the counter: %{version: 3, forward: binary, counter: n}.
+# What a manifest persists.
+
+@spec restore(t(), snapshot() | encoded_snapshot()) :: :ok
+# Restores a fresh table. Version 2 fills both tables now; version 3 leaves the rows
+# pending until the table is first used.
 ```
+
+## Persistence
+
+A snapshot stores the forward table only — every value would otherwise be stored twice — and the reverse table is rebuilt from it. The forward table is the one kept because it is authoritative: an ID becomes live only when its `{value, id}` row wins `insert_new`, while the reverse table can briefly hold a losing process's orphaned ID.
+
+A manifest persists the encoded form (`encode_snapshot/1`), and restoring it leaves the rows encoded under the reverse-table key `0` (no ID is 0) as `{:pending, encoded, counter}`. The first operation that misses — `intern/2`, `lookup/2`, `resolve/2`, or `size/1` and `snapshot/1`, which always load — decodes the rows into both tables, then looks again; a warm run that never touches the table never pays for it. The ordering that makes this safe:
+
+1. A process that misses makes sure no rows are pending (loading them itself if they are) and only then looks again. The second lookup's answer is final; the first one's is not, because another process's load can insert the row between the first lookup and the pending check. (Concuerror found exactly that interleaving: a `resolve/2` that missed, then saw the rows loaded, returned `:error` for a restored ID.)
+2. A loader inserts every row before it marks the rows loaded, so "not pending" always means "fully loaded".
+3. A new value is interned only after a miss has been confirmed against a fully loaded table, so it never duplicates a restored value, and its ID (past the restored counter) never collides with a restored row.
+4. Processes that miss at the same time each load the rows. The rows are identical and never rewritten afterwards, so a duplicate load changes nothing.
+
+After the load the key holds `{:loaded, encoded, counter}`. `encode_snapshot/1` hands back the restored encoding as long as the counter still equals the restored one — every new value allocates an ID before its row appears, so an unmoved counter means the rows are exactly the restored ones — and drops it once the counter moves.
 
 ## Implementation notes
 
@@ -98,3 +122,4 @@ See decision [D11](../decisions.md).
 - 2–3 processes intern different values simultaneously → all get distinct IDs
 - Intern racing with resolve → resolve never returns stale or partial data
 - Intern racing with lookup → lookup returns consistent results
+- On a table restored from an encoded snapshot: interning a restored value, interning a new one, resolving a restored ID, looking up and snapshotting, all racing the first load → restored IDs kept, new IDs past the restored counter, snapshots consistent

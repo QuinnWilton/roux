@@ -126,3 +126,105 @@ defmodule Roux.Concurrency.InternLookupRaceTest do
     Roux.Intern.destroy(table)
   end
 end
+
+defmodule Roux.Concurrency.InternRestoredLoadRaceTest do
+  @moduledoc """
+  A table restored from an encoded snapshot loads its rows on the first
+  miss. Three processes miss at once: one interns a restored value, one
+  interns a new value, one resolves a restored ID. Every interleaving of
+  their loads must keep the restored ID, give the new value an ID past
+  the restored counter, and resolve both.
+  """
+
+  def test do
+    table = Roux.Intern.new(:test)
+
+    :ok =
+      Roux.Intern.restore(table, %{
+        version: 3,
+        forward: :erlang.term_to_binary([{"a", 1}]),
+        counter: 1
+      })
+
+    parent = self()
+
+    spawn(fn -> send(parent, {:restored, Roux.Intern.intern(table, "a")}) end)
+    spawn(fn -> send(parent, {:new, Roux.Intern.intern(table, "b")}) end)
+    spawn(fn -> send(parent, {:resolved, Roux.Intern.resolve(table, 1)}) end)
+
+    1 = receive(do: ({:restored, id} -> id))
+    new_id = receive(do: ({:new, id} -> id))
+    {:ok, "a"} = receive(do: ({:resolved, result} -> result))
+
+    true = new_id > 1
+    {:ok, "b"} = Roux.Intern.resolve(table, new_id)
+    {:ok, ^new_id} = Roux.Intern.lookup(table, "b")
+    2 = Roux.Intern.size(table)
+
+    Roux.Intern.destroy(table)
+  end
+end
+
+defmodule Roux.Concurrency.InternRestoredSnapshotRaceTest do
+  @moduledoc """
+  A restored table is looked up and snapshotted while another process
+  interns a new value into it. The lookup must find the restored value
+  whichever load it races, and the snapshot must hold every restored row
+  under a counter at least as high as every ID it holds, whether it hands
+  back the restored encoding or encodes the loaded table.
+  """
+
+  def test do
+    table = Roux.Intern.new(:test)
+
+    :ok =
+      Roux.Intern.restore(table, %{
+        version: 3,
+        forward: :erlang.term_to_binary([{"a", 1}]),
+        counter: 1
+      })
+
+    parent = self()
+
+    spawn(fn -> send(parent, {:lookup, Roux.Intern.lookup(table, "a")}) end)
+    spawn(fn -> send(parent, {:new, Roux.Intern.intern(table, "b")}) end)
+    spawn(fn -> send(parent, {:snapshot, Roux.Intern.encode_snapshot(table)}) end)
+
+    {:ok, 1} = receive(do: ({:lookup, result} -> result))
+    new_id = receive(do: ({:new, id} -> id))
+    %{version: 3, forward: forward, counter: counter} = receive(do: ({:snapshot, s} -> s))
+
+    rows = :erlang.binary_to_term(forward)
+    true = {"a", 1} in rows
+    true = Enum.all?(rows, fn {_value, id} -> id <= counter end)
+    true = Enum.all?(rows, fn row -> row in [{"a", 1}, {"b", new_id}] end)
+
+    Roux.Intern.destroy(table)
+  end
+end
+
+defmodule Roux.Concurrency.InternSnapshotCounterRaceTest do
+  @moduledoc """
+  Two processes intern new values while a third encodes a snapshot. The
+  snapshot's counter must be at least every ID its rows hold: a table
+  restored from it takes new IDs from that counter, and one at or below a
+  row's ID would give two values the same ID.
+  """
+
+  def test do
+    table = Roux.Intern.new(:test)
+    parent = self()
+
+    spawn(fn -> send(parent, {:a, Roux.Intern.intern(table, "a")}) end)
+    spawn(fn -> send(parent, {:b, Roux.Intern.intern(table, "b")}) end)
+    spawn(fn -> send(parent, {:snapshot, Roux.Intern.encode_snapshot(table)}) end)
+
+    %{forward: forward, counter: counter} = receive(do: ({:snapshot, s} -> s))
+    receive(do: ({:a, _} -> :ok))
+    receive(do: ({:b, _} -> :ok))
+
+    true = Enum.all?(:erlang.binary_to_term(forward), fn {_value, id} -> id <= counter end)
+
+    Roux.Intern.destroy(table)
+  end
+end

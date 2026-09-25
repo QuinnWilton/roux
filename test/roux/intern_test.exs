@@ -239,6 +239,148 @@ defmodule Roux.InternTest do
     end
   end
 
+  # -- encode_snapshot/1 and restore/2 (encoded) --
+
+  describe "encode_snapshot/1 and restore/2" do
+    # An encoded snapshot restores without loading anything: the rows stay
+    # encoded until an operation misses, then load, and the operation
+    # looks again.
+
+    defp restored_from(values) do
+      source = Intern.new(:enc_src)
+      ids = Map.new(values, &{&1, Intern.intern(source, &1)})
+      snapshot = Intern.encode_snapshot(source)
+      Intern.destroy(source)
+
+      table = Intern.new(:enc_dst)
+      :ok = Intern.restore(table, snapshot)
+      {table, ids, snapshot}
+    end
+
+    test "leaves the rows encoded until the table is used" do
+      {table, ids, _snapshot} = restored_from(~w(alpha beta))
+
+      assert :ets.info(table.forward, :size) == 0
+      assert Intern.resolve(table, ids["beta"]) == {:ok, "beta"}
+      assert :ets.info(table.forward, :size) == 2
+
+      assert :ets.select(table.reverse, [{{:"$1", :"$2"}, [{:>, :"$1", 0}], [{{:"$1", :"$2"}}]}])
+             |> Enum.sort() == [{1, "alpha"}, {2, "beta"}]
+
+      Intern.destroy(table)
+    end
+
+    test "every operation that misses loads the rows and looks again" do
+      for operation <- [
+            fn t, ids -> assert Intern.intern(t, "alpha") == ids["alpha"] end,
+            fn t, ids -> assert Intern.lookup(t, "alpha") == {:ok, ids["alpha"]} end,
+            fn t, ids -> assert Intern.resolve(t, ids["alpha"]) == {:ok, "alpha"} end,
+            fn t, _ids -> assert Intern.size(t) == 2 end,
+            fn t, ids -> assert {"alpha", ids["alpha"]} in Intern.snapshot(t).forward end
+          ] do
+        {table, ids, _snapshot} = restored_from(~w(alpha beta))
+        operation.(table, ids)
+        assert Intern.lookup(table, "beta") == {:ok, ids["beta"]}
+        Intern.destroy(table)
+      end
+    end
+
+    test "a new value takes an ID past every restored one" do
+      {table, ids, _snapshot} = restored_from(~w(alpha beta))
+
+      new_id = Intern.intern(table, "gamma")
+
+      assert new_id > Enum.max(Map.values(ids))
+      assert Intern.resolve(table, new_id) == {:ok, "gamma"}
+      assert Intern.lookup(table, "alpha") == {:ok, ids["alpha"]}
+      assert Intern.resolve(table, new_id + 1) == :error
+
+      Intern.destroy(table)
+    end
+
+    test "an unknown ID or value is still unknown after the load" do
+      {table, _ids, _snapshot} = restored_from(~w(alpha))
+
+      assert Intern.resolve(table, 99) == :error
+      assert Intern.lookup(table, "zeta") == :error
+      assert Intern.size(table) == 1
+
+      Intern.destroy(table)
+    end
+
+    test "an unused restored table hands back the encoding it came from" do
+      # Compressed, which `encode_snapshot/1` never produces itself: a
+      # table that encoded its rows again would hand back other bytes.
+      forward = :erlang.term_to_binary([{"alpha", 1}], compressed: 9)
+      table = Intern.new(:enc_reuse)
+      :ok = Intern.restore(table, %{version: 3, forward: forward, counter: 1})
+
+      assert Intern.encode_snapshot(table) == %{version: 3, forward: forward, counter: 1}
+
+      # Read, it holds the same rows: the same encoding.
+      assert Intern.resolve(table, 1) == {:ok, "alpha"}
+      assert Intern.intern(table, "alpha") == 1
+      assert Intern.encode_snapshot(table) == %{version: 3, forward: forward, counter: 1}
+
+      # Interned into, it encodes what it holds now.
+      id = Intern.intern(table, "beta")
+      snapshot = Intern.encode_snapshot(table)
+      assert snapshot.counter == id
+
+      assert Enum.sort(:erlang.binary_to_term(snapshot.forward)) ==
+               [{"alpha", 1}, {"beta", id}]
+
+      # The restored encoding is let go once it cannot be reused.
+      assert :ets.lookup(table.reverse, 0) == []
+
+      Intern.destroy(table)
+    end
+
+    test "refuses an encoded snapshot whose rows are not a binary" do
+      table = Intern.new(:enc_bad)
+
+      assert_raise ArgumentError, ~r/unsupported Roux.Intern snapshot/, fn ->
+        Intern.restore(table, %{version: 3, forward: [{"a", 1}], counter: 1})
+      end
+
+      assert Intern.size(table) == 0
+      Intern.destroy(table)
+    end
+
+    property "restores what snapshot/1 would, and interns on from the same counter" do
+      check all(
+              values <- uniq_list_of(term(), max_length: 30),
+              later <- list_of(term(), max_length: 10)
+            ) do
+        source = Intern.new(:prop_enc_src)
+        Enum.each(values, &Intern.intern(source, &1))
+
+        eager = Intern.new(:prop_enc_eager)
+        :ok = Intern.restore(eager, Intern.snapshot(source))
+        lazy = Intern.new(:prop_enc_lazy)
+        :ok = Intern.restore(lazy, Intern.encode_snapshot(source))
+
+        # The same answers, in an order that makes the lazy table load
+        # on whichever operation comes first.
+        for value <- Enum.reverse(values) ++ later do
+          assert Intern.lookup(lazy, value) == Intern.lookup(eager, value)
+          assert Intern.intern(lazy, value) == Intern.intern(eager, value)
+        end
+
+        for {_value, id} <- :ets.tab2list(eager.forward) do
+          assert Intern.resolve(lazy, id) == Intern.resolve(eager, id)
+        end
+
+        assert Intern.size(lazy) == Intern.size(eager)
+
+        assert Intern.snapshot(lazy) |> Map.update!(:forward, &Enum.sort/1) ==
+                 Intern.snapshot(eager) |> Map.update!(:forward, &Enum.sort/1)
+
+        Enum.each([source, eager, lazy], &Intern.destroy/1)
+      end
+    end
+  end
+
   # -- Property tests --
 
   describe "properties" do
