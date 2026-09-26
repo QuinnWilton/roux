@@ -230,6 +230,15 @@ defmodule Roux.BoundaryTest do
     end
   end
 
+  describe "Tier 5: Sources" do
+    test "Roux.Sources depends only on Database, Input, and GC", %{boundary: boundary} do
+      assert_boundary(boundary,
+        modules: [Roux.Sources],
+        allow: [under(Roux.Database), under(Roux.Input), under(Roux.GC)]
+      )
+    end
+  end
+
   describe "Tier 5: Manifest" do
     test "Roux.Lang.Manifest depends only on Database, Memo, Entity, Intern, Revision, and Blob",
          %{boundary: boundary} do
