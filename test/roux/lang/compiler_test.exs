@@ -197,7 +197,7 @@ defmodule Roux.Lang.CompilerTest do
   # -- touch without content change --
 
   describe "touch without content change" do
-    test "mtime changes but content unchanged does not advance revision", %{tmp_dir: tmp_dir} do
+    test "mtime changes but content unchanged compiles nothing", %{tmp_dir: tmp_dir} do
       path = Path.join(tmp_dir, "stable.mini")
       File.write!(path, "unchanged content")
 
@@ -208,9 +208,15 @@ defmodule Roux.Lang.CompilerTest do
       Process.sleep(1100)
       File.touch!(path)
 
-      # Second compile — Input.set early cutoff means no revision advance
-      # for the unchanged content. Compilation still succeeds.
-      assert {:ok, []} = compile([Roux.Test.MiniLang], tmp_dir)
+      # Second compile — the file is read (its stamp moved), and
+      # Input.set's equality check finds the same content: nothing to
+      # compile.
+      assert {:noop, []} = compile([Roux.Test.MiniLang], tmp_dir)
+
+      # The moved stamp was kept: a third run need not read the file.
+      [manifest] = Compiler.manifests()
+      {:ok, data} = Roux.Lang.Manifest.load(manifest)
+      assert data.sources[path].mtime == File.stat!(path, time: :posix).mtime
     end
   end
 

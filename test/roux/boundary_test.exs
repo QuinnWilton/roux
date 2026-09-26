@@ -187,12 +187,12 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 5: Compiler" do
-    test "Roux.Lang.Compiler depends only on Lang, Database, Input, and GC", %{
+    test "Roux.Lang.Compiler depends only on Lang, Database, Session, and Sources", %{
       boundary: boundary
     } do
       assert_boundary(boundary,
         modules: [Roux.Lang.Compiler],
-        allow: [under(Roux.Lang), under(Roux.Database), under(Roux.Input), under(Roux.GC)]
+        allow: [under(Roux.Lang), under(Roux.Database), under(Roux.Session), under(Roux.Sources)]
       )
     end
   end

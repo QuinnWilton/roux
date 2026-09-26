@@ -5,7 +5,10 @@ defmodule Roux.Lang.Compiler do
   Discovers source files, updates inputs, dispatches compile queries, and
   persists state across VM restarts via a manifest. The incrementality
   logic lives in Roux's validation pipeline — this module orchestrates
-  the top-level compile flow.
+  the top-level compile flow, on a `Roux.Session`: the files are synced
+  into the `:source_text` input by `Roux.Sources` (a file whose stamp
+  held is not read; one rewritten with the same content changes
+  nothing), and a run that changed nothing writes nothing.
 
   ## Configuration
 
@@ -26,8 +29,7 @@ defmodule Roux.Lang.Compiler do
 
   use Mix.Task.Compiler
 
-  alias Roux.{Database, GC, Input, Lang}
-  alias Roux.Lang.Manifest
+  alias Roux.{Database, Lang, Session, Sources}
 
   @doc """
   Runs the Roux compiler.
@@ -66,41 +68,45 @@ defmodule Roux.Lang.Compiler do
       # Mix compilers run before app.start, so telemetry isn't started yet.
       {:ok, _} = Application.ensure_all_started(:telemetry)
 
-      db = Database.new()
+      session = Session.open(languages: languages, manifest: manifest_path())
 
       try do
-        Enum.each(languages, &Lang.register(db, &1))
-        source_paths = find_sources(languages, source_dirs)
-
-        manifest_data = Manifest.load(manifest_path())
-        change_status = handle_manifest(db, manifest_data, source_paths)
-
-        prepare_languages(db, languages, source_paths)
-
-        case change_status do
-          :noop ->
-            if Keyword.get(roux_config, :verbose, false) do
-              Mix.shell().info("All roux files are up to date")
-            end
-
-            {:noop, []}
-
-          {:changed, stale_paths} ->
-            print_compiling(stale_paths)
-            diagnostics = compile_all(db, languages, source_paths)
-            Enum.each(diagnostics, &print_diagnostic/1)
-
-            if Enum.any?(diagnostics, &(&1.severity == :error)) do
-              {:error, diagnostics}
-            else
-              source_meta = Manifest.source_metadata(source_paths)
-              Manifest.write(db, source_meta, manifest_path())
-
-              {:ok, diagnostics}
-            end
-        end
+        compile_session(session, languages, source_dirs, roux_config)
       after
-        Database.shutdown(db)
+        Session.close(session)
+      end
+    end
+  end
+
+  defp compile_session(%Session{db: db} = session, languages, source_dirs, roux_config) do
+    source_paths = find_sources(languages, source_dirs)
+
+    %{meta: meta, changed: changed, removed: removed} =
+      Sources.sync(db, :source_text, Map.new(source_paths, &{&1, &1}), session.sources,
+        value: fn %{content: content} -> content end
+      )
+
+    prepare_languages(db, languages, source_paths)
+
+    if session.restored? and changed == [] and removed == [] do
+      if Keyword.get(roux_config, :verbose, false) do
+        Mix.shell().info("All roux files are up to date")
+      end
+
+      # Nothing to compile; stamps a touch moved are kept, so the next
+      # run does not read those files again.
+      _ = Session.commit(session, meta)
+      {:noop, []}
+    else
+      print_compiling(changed)
+      diagnostics = compile_all(db, languages, source_paths)
+      Enum.each(diagnostics, &print_diagnostic/1)
+
+      if Enum.any?(diagnostics, &(&1.severity == :error)) do
+        {:error, diagnostics}
+      else
+        _ = Session.commit(session, meta)
+        {:ok, diagnostics}
       end
     end
   end
@@ -141,59 +147,6 @@ defmodule Roux.Lang.Compiler do
     |> Enum.flat_map(&Lang.walk_directory/1)
     |> Enum.filter(fn path -> MapSet.member?(extensions, Path.extname(path)) end)
     |> Enum.sort()
-  end
-
-  # -- Private: manifest handling --
-
-  defp handle_manifest(db, {:ok, manifest_data}, current_paths) do
-    Manifest.restore(db, manifest_data)
-    saved_sources = manifest_data.sources
-    current_set = MapSet.new(current_paths)
-
-    # Deleted: in manifest but no longer on disk.
-    deleted =
-      saved_sources
-      |> Map.keys()
-      |> Enum.reject(&MapSet.member?(current_set, &1))
-
-    Enum.each(deleted, &GC.mark_input_removed(db, :source_text, &1))
-
-    # Stale: mtime changed or new file — must re-read from disk.
-    # Fresh files are skipped entirely: their :source_text input entries
-    # were restored from the manifest by Manifest.restore/2.
-    stale =
-      Enum.filter(current_paths, fn path ->
-        case Map.fetch(saved_sources, path) do
-          {:ok, %{mtime: saved_mtime}} ->
-            %File.Stat{mtime: mtime} = File.stat!(path)
-            mtime != saved_mtime
-
-          :error ->
-            true
-        end
-      end)
-
-    populate_inputs(db, stale)
-
-    if stale == [] and deleted == [] do
-      :noop
-    else
-      {:changed, stale}
-    end
-  end
-
-  defp handle_manifest(db, :error, source_paths) do
-    # Cold build — set all inputs.
-    populate_inputs(db, source_paths)
-    {:changed, source_paths}
-  end
-
-  # Reads file contents and sets the :source_text input for each path.
-  defp populate_inputs(db, paths) do
-    Enum.each(paths, fn path ->
-      content = File.read!(path)
-      Input.set(db, :source_text, path, content)
-    end)
   end
 
   # Calls prepare/2 on languages that implement it, passing their source paths.
