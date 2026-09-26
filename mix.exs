@@ -1,7 +1,7 @@
 defmodule Roux.MixProject do
   use Mix.Project
 
-  @version "0.1.4"
+  @version "0.2.0-dev"
   @source_url "https://github.com/QuinnWilton/roux"
 
   def project do

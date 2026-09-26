@@ -1,12 +1,137 @@
 # Changelog
 
-## Unreleased
+## 0.2.0-dev (unreleased)
+
+0.2 makes roux the whole incremental backend of a tool like argus: code
+versions, a content-addressed blob store, persistence policies, fan-out
+groups, and a session that ties them to a manifest.
+
+### Added
+
+- **Code versions** (`Roux.Code`, `Roux.Query`). `use Roux.Query, code:
+  opts` versions every query of a module by the code its module reaches:
+  the import-closure digest of its beams (`Roux.Code.digest/2`), stopping
+  at OTP, Elixir and consolidated protocols, whose versions it carries
+  instead. `defquery ..., code: roots | {m, f, a}` adds roots reached by
+  dynamic dispatch; `version: term` mixes in a hand-bumped term. Each memo
+  entry stores its query's code version; validation treats another
+  version as stale (before the durability skip), and early cutoff still
+  keeps `changed_at` when the value comes back the same.
+  `Roux.Runtime.code_version/0` hands a body its own version.
+- `Roux.Code`: `closure/2` (with `exclude:` and `follow_excluded:`),
+  `digest/2` (memoized per VM; with `store:`, kept across VMs as a
+  verifying trace over the beams' stat stamps), `beam_digest/2` (the
+  chunks with the build root replaced, so two worktrees of one commit
+  digest the same), `build_root/1`, `canonical_beam/1` (a beam without
+  `ExCk` and `Docs`), `runtime_version/0`, `forget/0`, and
+  `Roux.Code.Verify.executed/2` (the modules a computation called into,
+  for a closure test). Object code is read with
+  `:code.get_object_code/1`, which works inside escripts.
+- **`use Roux.Query, around: {m, f}`** runs every body of a module inside
+  `m.f(%{db:, query:, key:}, body)`, within the query's execution: what
+  the hook reads becomes the query's dependency.
+- **Persistence policy**: `defquery ..., store: :inline | :blob | :none`
+  and `transient: predicate`. A `:blob` value is kept in a `Roux.Blob`
+  store by digest; a `:none` entry is never kept; a transient value — and
+  every entry that read it, transitively — is not kept, so the next run
+  asks again (a reader restored without it would pass its durability
+  check forever). `Roux.Memo.Entry` gains `code_version`, `persist` and
+  `blobs`.
+- **Optional inputs**: `Roux.Runtime.input(db, name, key, default: v)`
+  reads `v` for an unset key and records `{:input_absent, name, key}`:
+  the reader stays fresh while the key is unset and goes stale when it is
+  set.
+- **`Roux.Runtime.parallel/3`** (`max_concurrency:`, `timeout:
+  :infinity`): a fan-out is one dependency, `{:parallel, max, keys}`, and
+  validation brings the members up to date concurrently. Members run in
+  workers linked to the caller that carry its query stack; what one
+  raises is raised again in the caller; a caller that traps exits gets no
+  `:EXIT` messages.
+- **`Roux.Blob`**, a content-addressed store safe across OS processes:
+  `open/1`, `open!/1`, `temporary/0`, `destroy/1`; CAS `put/2`,
+  `put_term/2`, `encode_term/1`, `put_encoded_term/3`, `adopt/2` (a file
+  moved in by rename), `get/2`, `get_term/2` (decoded `:safe`), `fetch!/2`,
+  `member?/2`, `link/3` (a hard link, never a symbolic one), `path/2`; the
+  action cache `recall/2`, `remember/3`, `cached/3` (errors never kept);
+  `Roux.Blob.Trace` (`put/4`, `fetch/2`, `find/3`: verifying traces);
+  `scratch/2`; `retain/3` and `release/2` (roots); `gc/2` and
+  `maybe_gc/2` (mark from the live roots and recently used pointers,
+  sweep the rest after a grace period, renaming aside first). Entries are
+  immutable and installed by rename; a vanished or corrupt entry is a
+  miss. `Roux.Blob.MissingError`, `Roux.Blob.FormatError`.
+- **`Roux.Session`**: `open/1` (`modules:`, `languages:`, `manifest:`,
+  `blob:`, `force:`), `commit/3` (writes the manifest iff the run changed
+  something it holds; `extra:` keeps a small term beside it), `read_extra/1`,
+  `files/1`, `close/1`.
+- **`Roux.Sources.sync/5`**: an input keyed by file brought up to date
+  with the disk — the stat prefilter, a guard for files written within
+  `recent:` seconds, hashing, and removal of vanished keys.
+- **`Roux.Stamp.memo/4`**: a value kept while its files' stat stamps
+  hold, per VM and in a blob store's action cache.
+- **`Roux.QueryLog`**: a telemetry collector of one database's (or every
+  database's) executions, hits and cutoffs: `start/1`, `executions/2`,
+  `hits/2`, `cutoffs/2`, `by_query/2`, `reset/1`, `stop/1`.
+- `Roux.Runtime.hold/1`: the blob digests a body's value names, kept
+  alive by the manifest that keeps the entry.
+- `Roux.Database.new/1` takes `blob:`; `Roux.Database.id/1`,
+  `writes/1`, `input_durability/2`, `code_version/2`, `query_definition/2`,
+  `query_registered?/2`.
+- `Roux.Memo.fetch_value/2`, `held_digest/2`, `code_version/2`,
+  `reduce_dependencies/3`, `keys_persisted_as/2`, `persisted?/1`.
+- `Roux.Lang.Manifest.write/4` (`blob:`) and `memo_entries/2`.
+- `[:roux, :blob, :missing]` telemetry: a value held by digest was gone,
+  and is recomputed.
+- `mix concuerror`: a module's `concuerror_options/0` may set
+  `depth_bound:`, `dpor:` and `scheduling_bound:`.
+
+### Changed (breaking)
+
+- **`gen_lsp` is an optional dependency.** `Roux.Lang.LSP` compiles only
+  where it is installed; a project serving LSP through roux adds
+  `{:gen_lsp, "~> 0.11.3"}` itself. `mix roux.lsp` without it raises
+  naming the dependency.
+- **Telemetry events carry `database:`** (`Roux.Database.id/1`), every
+  event but `[:roux, :intern, :new]`; the `Roux.Telemetry` event helpers
+  take the database as a new first argument.
+- **Manifest format 5**: each entry carries its code version and the
+  blob digests it holds, and a `store: :blob` value may be held by
+  digest. Manifests of any other format — including the unreleased
+  format 4 — are discarded and rebuilt once. `Roux.Memo.persisted()`
+  tuples have ten elements.
+- **`Roux.Lang.Manifest.restore/2` leaves out the entries of queries that
+  are not registered**: register a database's queries before restoring
+  (`Roux.Session.open/1` does). A restored entry of another code version
+  is kept, stale, and the revision advances once at `:high`.
+- **The memo table's ETS rows have twelve elements** (0.1.4 had eight):
+  the encoding (or `{:blob, digest}`), the code version, the persistence
+  policy and the held blobs. `Roux.Input.keys/2` matches them; code that
+  matches the table directly must too.
+- **`Roux.Runtime.parallel/2` records one group dependency** where it
+  recorded one per member, has no 5-second timeout, and re-raises a
+  member's exception in the caller (a member used to crash its caller
+  through the link).
+- `Roux.Memo.get/2` misses an entry whose value's blob is gone.
+- `Roux.Input.set/5` of a key set for the first time advances the
+  revision at the more durable of the key's level and its input's, so a
+  reader of the key's absence sees it.
+- `Roux.Database.register_query/3` advances the revision at `:high` when
+  a query is registered again under another code version.
+- `Roux.Database.new/1` validates its options (it ignored them).
+- The Roux Mix compiler (`Roux.Lang.Compiler`) runs on a `Roux.Session`
+  and `Roux.Sources`: a file touched without an edit is read and
+  compiles nothing — the run is `{:noop, []}`, where it recompiled every
+  file — and the manifest's `sources` hold `Roux.Sources` metadata.
+- `Roux.Memo.persisted/2` also takes a three-argument filter, which sees
+  the entry's persistence policy, and a third `hold` argument.
 
 ### Changed (performance)
 
+- GC's orphan sweep and cancellation's dependency walk read dependency
+  lists without copying values out of ETS.
+
 - **Manifests restore lazily and write only what changed** (manifest
-  format 4; manifests of any earlier format are discarded and rebuilt
-  once — no release carried format 3 below). Restoring a manifest decoded
+  format 4, since superseded by 5; manifests of any earlier format are
+  discarded and rebuilt once — no release carried format 3 below). Restoring a manifest decoded
   every memoized value and copied it into ETS, and rebuilt every intern
   table, though a warm run validates entries by their metadata and reads
   the values of a handful. Each value is now its own binary inside the
@@ -44,7 +169,7 @@
   against the entry it actually replaces, where it used to compare against
   the one it saw before claiming.
 
-### Added
+### Added (lazy manifests)
 
 - `Roux.Memo.persisted/2`, `restore_persisted/2` and `decode_persisted/1`:
   entries in the form a manifest carries them, with each value in the
@@ -56,12 +181,11 @@
   n}`), which `Roux.Intern.restore/2` now also accepts, leaving the rows
   pending until the table is first used.
 
-### Changed
+### Changed (lazy manifests)
 
-- The memo table's ETS rows have a ninth element: the value's encoding
+- The memo table's ETS rows gained a ninth element: the value's encoding
   for an entry restored from a manifest, `nil` otherwise (the value
-  position is then `nil`). Code that matches the table directly must
-  match nine elements; `Roux.Input.keys/2` does.
+  position is then `nil`); now twelve, see above.
 - `Roux.Lang.Manifest.manifest_data`'s `memo_entries` are
   `Roux.Memo.persisted()` tuples and its `intern_data` holds encoded
   snapshots; `Roux.Lang.Manifest.memo_entries/1` still decodes them.

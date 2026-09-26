@@ -109,7 +109,7 @@ The only case where the framework must be involved is fan-out within a query bod
 **Three contexts**:
 - Top-level: caller spawns, framework deduplicates
 - Nested `query/3`: always inline, same process
-- Fan-out `parallel/2`: framework spawns, merges deps
+- Fan-out `parallel/3`: framework spawns, records the group as one dependency (D20)
 
 ## D16: Boundary enforcement via assert_boundary
 
@@ -164,3 +164,61 @@ The only case where the framework must be involved is fan-out within a query bod
 - Concuerror: "this ETS interaction is correct under ALL interleavings" (exhaustive, small scope)
 - StreamData concurrent: "this system converges under RANDOM interleavings" (probabilistic, large scope)
 - ExUnit: "this behavior is correct under SERIAL execution" (deterministic, full scope)
+
+## D18: Code versions are inferred from the code, and checked before the durability skip
+
+**Decision**: Each memo entry stores the code version of the query that computed it. `use Roux.Query, code: opts` derives a module's versions from the import-closure digest of its beams (`Roux.Code`); `defquery`'s `code:` adds roots reached by dynamic dispatch and `version:` a hand-bumped term. Validation treats an entry of another version as stale, and checks it *before* the durability skip. A restore that finds any restored entry of another version advances the revision once at `:high`.
+
+**Rationale**: A memoized value is a function of its reads and of the code that computed it; without the code, a tool upgraded in place serves results its old code computed. Declared versions rot, so the version is read off the beams: an edit to a module moves exactly the versions whose closure reaches it. The check precedes the durability skip because no input moved — the skip would pass the entry. Restoring advances at `:high` because a dependent of a changed query would otherwise skip its dependency walk and never see its dependency re-executed. Early cutoff is unchanged, so an edit that changes no result recomputes nothing downstream.
+
+**Trade-off**: A closure covers what the import table and the literal table's external funs show; `apply/3` and calls through a module in a variable must be declared as roots, and `Roux.Code.Verify.executed/2` exists so a consumer can test that nothing it runs lies outside. Closures stop at OTP and Elixir (their versions are in the digest) and at consolidated protocols.
+
+## D19: Persistence is a query's policy; a transient value takes its readers with it
+
+**Decision**: `defquery`'s `store: :inline | :blob | :none` says how a manifest keeps a query's entries, and `transient: predicate` marks values that are never kept — nor is any entry that read one, transitively, computed at manifest write.
+
+**Rationale**: A consumer needs to keep a failure out of the manifest so the next run retries it. Dropping the failing entry alone is not enough: its readers, restored, pass their durability check (no input moved) and serve what the failure led to forever. The cascade is the only sound form.
+
+## D20: A fan-out is one dependency, validated concurrently, by lean workers
+
+**Decision**: `Runtime.parallel/3` records one dependency `{:parallel, max_concurrency, keys}`. Validation hands it to `ensure_fn`, which brings every member up to date concurrently, then checks each member's `changed_at`. Workers are `spawn_opt`'d with a link and a monitor; each unlinks itself before exiting normally; exceptions are caught and re-raised in the caller.
+
+**Rationale**: With one dependency per member, a warm validation brings members up to date one by one — a program merging hundreds of modules re-executes its stale ones in turn. Grouping lets validation fan out as execution did. `Task.async_stream` was the first choice, but its monitor process and bookkeeping put hundreds of scheduling points into each fan-out, beyond what Concuerror can explore; and linked tasks send `:EXIT` messages to a caller that traps exits (an LSP server). Unlinking before a normal exit avoids both; the monitor still reports a worker killed from outside.
+
+**Trade-off**: GC, cancellation and the manifest's transient cascade must read a group as its members. Two of the three Concuerror scenarios are bounded (four and two preemptions): the unbounded state spaces are beyond a CI job.
+
+## D21: A content-addressed blob store with immutable entries and a grace-period collector
+
+**Decision**: `Roux.Blob` keeps entries under the SHA-256 of their bytes, installed by rename from a staging name and read-only on disk; an action cache and verifying traces keep terms under keys. A lookup touches without creating; a collection marks from the live roots (every owner's retained digests, and the digests named by recently used pointers) and sweeps the rest once older than a grace period, renaming each aside first and putting it back if it was touched meanwhile.
+
+**Rationale**: Large values (fact files, solver outputs, findings) are shared across processes and worktrees and must survive a concurrent collector. Rename is the one atomic step a file system offers, so a reader finds an entry whole or not at all; immutability makes two writers of one entry both right; a vanished or corrupt entry is a miss, never an error. Hard links, never symbolic ones, so a collected entry cannot dangle in a scratch directory. The grace period is what protects a run's entries between writing them and retaining them.
+
+## D22: Values held by digest: digest cutoff, transparent recompute
+
+**Decision**: With a blob store, a manifest keeps a `store: :blob` value in the store and holds its digest. The value is loaded by the first read that needs it. Early cutoff over such an entry compares the new value's digest with the held one, reading nothing (and putting the bytes back). A valid entry whose blob is gone is recomputed transparently and keeps its `changed_at`.
+
+**Rationale**: A warm run reads few values; carrying them in the manifest costs load time and bytes. The digest is a complete stand-in for equality (deterministic encoding), and a missing blob only costs a recomputation. Each manifest retains what it names, so a collection keeps a live manifest's blobs.
+
+## D23: An optional input depends on its absence
+
+**Decision**: `Runtime.input(db, name, key, default: v)` records `{:input_absent, name, key}` when the key is unset. Validation keeps it clean while the key is unset and stale once it has a value. A key set for the first time advances the revision at the more durable of its own level and its input's.
+
+**Rationale**: Guarding a read with `Input.exists?/3` either records no edge (the reader never learns the key was set) or an edge to a missing entry (stale on every validation). The absence edge is exact. The reader recorded the input's registered durability, having no key's; advancing at the lower per-key level alone would leave its durability check skipping the change.
+
+## D24: A session writes its manifest only when the run changed it
+
+**Decision**: `Roux.Session` registers queries, then restores (so restore can drop unregistered queries' entries), and `commit/3` writes only when the revision moved, an entry was written, or the sources' metadata changed. A small `extra` term is kept beside the manifest.
+
+**Rationale**: A warm no-op run's budget is a fraction of a second; rewriting a multi-megabyte manifest it did not change is most of it. The `extra` sidecar lets a Mix compiler's `diagnostics/0` answer without loading the manifest.
+
+## D25: Telemetry events name their database
+
+**Decision**: Every event about a database carries `database:` (`Roux.Database.id/1`, its memo table's tid), and `Roux.QueryLog` filters on it.
+
+**Rationale**: Concurrent tests, or a compiler beside an LSP session, run several databases in one VM; a handler that cannot tell them apart counts others' work as its own. The memo table's tid is unique, stable across a table owner restart, and needs no new field.
+
+## D26: gen_lsp is optional
+
+**Decision**: `gen_lsp` is an optional dependency; `Roux.Lang.LSP` compiles only where it is installed.
+
+**Rationale**: A tool that never serves LSP — an escript above all — should not bundle a JSON-RPC stack and its four dependencies. A project serving LSP through roux declares the dependency it uses.

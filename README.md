@@ -11,7 +11,7 @@ A framework for building incremental mix compilers.
 ```elixir
 def deps do
   [
-    {:roux, "~> 0.1.0"}
+    {:roux, "~> 0.2.0"}
   ]
 end
 ```
@@ -61,9 +61,17 @@ Roux.Runtime.query(db, :declared_modules, "lib/a.ex")
 `Roux.Lang` is the convention layer for compilers built this way: a
 behaviour naming the compile and diagnostics queries, a Mix compiler shim
 with a persisted manifest for cross-run incrementality (`Roux.Lang.Manifest`),
-and a generic LSP adapter over `gen_lsp`. See
+and a generic LSP adapter over `gen_lsp` (an optional dependency: add
+`{:gen_lsp, "~> 0.11.3"}` to serve LSP). See
 [`docs/architecture.md`](docs/architecture.md) for the design and
 [`docs/subsystems/`](docs/subsystems/) for each layer.
+
+For a tool that runs as a batch process, `Roux.Session` carries a
+database across runs (register, restore, commit iff changed), with
+`Roux.Sources` syncing files into inputs, `Roux.Blob` keeping large
+values and derived files by content, and per-query code versions
+(`use Roux.Query, code: ...`) invalidating what the tool's own code
+computed when that code changes.
 
 ## Background & prior art
 

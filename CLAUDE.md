@@ -31,8 +31,21 @@ Roux.Cancellation    — process-based cancellation via Task
 Roux.GC              — garbage collection of stale entries
 Roux.Lang            — language behaviour
 Roux.Lang.Compiler   — Mix compiler integration
-Roux.Lang.LSP        — generic LSP adapter (gen_lsp)
+Roux.Lang.LSP        — generic LSP adapter (gen_lsp, optional)
+Roux.Lang.Manifest   — manifest read/write (format 5)
+Roux.Code            — code closures and digests; per-query code versions
+Roux.Code.Verify     — call tracing for closure tests
+Roux.Blob            — content-addressed store: CAS, action cache, scratch, GC
+Roux.Blob.Trace      — verifying traces
+Roux.Session         — a database across runs (open, commit, close)
+Roux.Sources         — files as inputs (stat prefilter, hashing)
+Roux.Stamp           — values kept while files' stat stamps hold
+Roux.QueryLog        — one database's recompute set, from telemetry
 ```
+
+Design decisions D18–D26 (code versions, persistence policy, fan-out
+groups, the blob store, values held by digest, optional inputs, sessions,
+telemetry's database, optional gen_lsp) are in docs/decisions.md.
 
 ### Subsystem docs
 
@@ -81,7 +94,11 @@ mix dialyzer                  # static analysis
 Optional longer explanation.
 ```
 
-Component names match subsystem names: `intern`, `revision`, `telemetry`, `database`, `memo`, `input`, `query`, `runtime`, `validation`, `entity`, `cycle`, `cancellation`, `gc`, `lang`, `mix-compiler`, `lsp`.
+Component names match subsystem names: `intern`, `revision`, `telemetry`, `database`, `memo`, `input`, `query`, `runtime`, `validation`, `entity`, `cycle`, `cancellation`, `gc`, `lang`, `mix-compiler`, `lsp`, `manifest`, `code`, `blob`, `session`, `sources`, `stamp`, `query-log`.
+
+## Concurrency tests
+
+`mix concuerror --all` runs every `Roux.Concurrency.*` module's `test/0` (CI's Concuerror job). A scenario too large to explore whole sets `dpor: :source` and `scheduling_bound:` in `concuerror_options/0`; one longer than 500 events sets `depth_bound:`. Fixtures shared by scenarios live in `test/support`, outside the namespace.
 
 ## Testing conventions
 
