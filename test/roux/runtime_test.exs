@@ -996,6 +996,14 @@ defmodule Roux.RuntimeTest do
       assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
     end
 
+    test "a concurrency that is not a positive integer is refused", %{db: db} do
+      for bad <- [0, -1, :all] do
+        assert_raise ArgumentError, ~r/:max_concurrency/, fn ->
+          Runtime.parallel(db, [{:fan_member, "a"}], max_concurrency: bad)
+        end
+      end
+    end
+
     test "a GC sweep keeps a group whose members are there, and not one missing one",
          %{db: db} do
       FanOutQueries.fan_parent(db, ~w(a b))

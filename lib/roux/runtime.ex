@@ -18,7 +18,8 @@ defmodule Roux.Runtime do
   `execute/4` is synchronous and concurrent-safe. The dedup table
   prevents duplicate computation when multiple processes request the
   same query. Callers own their concurrency (e.g. `Task.async_stream`).
-  `query/3` executes inline. `parallel/2` fans out and merges deps.
+  `query/3` executes inline. `parallel/3` fans out, recording the fan-out
+  as one dependency.
 
   See D3, D13, D14 for design rationale.
   """
@@ -293,10 +294,11 @@ defmodule Roux.Runtime do
   ONE dependency, `{:parallel, max_concurrency, keys}`, and validation
   brings its members up to date concurrently too, then checks each for
   a change — where a dependency per member would validate them one by
-  one, re-executing stale ones in turn. The members run in tasks linked
-  to the caller, so cancelling the caller (`Roux.Cancellation`) takes
-  them down with it; they carry the caller's query stack, so a cycle
-  through them is detected. What a member raises is raised again here.
+  one, re-executing stale ones in turn. The members run in processes
+  linked to the caller, so cancelling the caller (`Roux.Cancellation`)
+  takes them down with it; they carry the caller's query stack, so a
+  cycle through them is detected. What a member raises is raised again
+  here.
 
   ## Options
 
@@ -310,6 +312,12 @@ defmodule Roux.Runtime do
     opts = Keyword.validate!(opts, [:max_concurrency, timeout: :infinity])
 
     max_concurrency = Keyword.get_lazy(opts, :max_concurrency, &System.schedulers_online/0)
+
+    unless is_integer(max_concurrency) and max_concurrency > 0 do
+      raise ArgumentError,
+            ":max_concurrency must be a positive integer, got: #{inspect(max_concurrency)}"
+    end
+
     parent_ctx = get_context()
     parent_stack = if parent_ctx, do: parent_ctx.query_stack, else: []
 
