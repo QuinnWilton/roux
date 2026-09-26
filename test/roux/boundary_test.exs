@@ -42,10 +42,10 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 1: Memo" do
-    test "Roux.Memo depends only on Database", %{boundary: boundary} do
+    test "Roux.Memo depends only on Database and Blob", %{boundary: boundary} do
       assert_boundary(boundary,
         modules: under(Roux.Memo),
-        allow: [under(Roux.Database)]
+        allow: [under(Roux.Database), under(Roux.Blob)]
       )
     end
   end
@@ -128,7 +128,8 @@ defmodule Roux.BoundaryTest do
           under(Roux.Revision),
           under(Roux.Cancellation),
           under(Roux.GC),
-          under(Roux.Entity)
+          under(Roux.Entity),
+          under(Roux.Blob)
         ]
       )
     end
@@ -213,9 +214,8 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 5: Manifest" do
-    test "Roux.Lang.Manifest depends only on Database, Memo, Entity, Intern, and Revision", %{
-      boundary: boundary
-    } do
+    test "Roux.Lang.Manifest depends only on Database, Memo, Entity, Intern, Revision, and Blob",
+         %{boundary: boundary} do
       assert_boundary(boundary,
         modules: [Roux.Lang.Manifest],
         allow: [
@@ -223,7 +223,8 @@ defmodule Roux.BoundaryTest do
           under(Roux.Memo),
           under(Roux.Entity),
           under(Roux.Intern),
-          under(Roux.Revision)
+          under(Roux.Revision),
+          under(Roux.Blob)
         ]
       )
     end

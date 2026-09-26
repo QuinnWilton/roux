@@ -308,7 +308,7 @@ defmodule Roux.Lang.ManifestTest do
     end
   end
 
-  # -- format 4 --
+  # -- format 5 --
 
   # A database with every kind of state a manifest carries: inputs,
   # derived entries with structured values, an intern table, entity rows
@@ -356,7 +356,7 @@ defmodule Roux.Lang.ManifestTest do
     :ets.tab2list(tid)
   end
 
-  describe "format 4" do
+  describe "format 5" do
     test "a restored database holds what the written one held", %{db: db, tmp_dir: tmp_dir} do
       path = Path.join(tmp_dir, "compile.roux")
       Manifest.write(populate(db), %{}, path)
@@ -627,6 +627,207 @@ defmodule Roux.Lang.ManifestTest do
     end
   end
 
+  # -- values held by digest --
+
+  describe "values held by digest" do
+    alias Roux.Blob
+    alias Roux.Test.PersistQueries
+
+    setup %{tmp_dir: tmp_dir} do
+      store = Blob.open!(Path.join(tmp_dir, "store"))
+      db = Database.new(blob: store)
+      :ok = Roux.Lang.register_module(db, PersistQueries)
+      Input.set(db, :psrc, "a", %{rows: Enum.to_list(1..100)})
+      Input.set(db, :psrc, "b", %{rows: [1]})
+      PersistQueries.p_blob(db, "a")
+      PersistQueries.p_blob(db, "b")
+      PersistQueries.p_top(db, "a")
+      path = Path.join(tmp_dir, "compile.roux")
+      :ok = Manifest.write(db, %{}, path)
+      on_exit(fn -> quietly(fn -> Database.shutdown(db) end) end)
+      %{store: store, path: path, written: db}
+    end
+
+    defp quietly(fun) do
+      fun.()
+    catch
+      :exit, _ -> :ok
+    end
+
+    defp restored_with(store, path) do
+      {:ok, data} = Manifest.load(path)
+      db = Database.new(blob: store)
+      :ok = Roux.Lang.register_module(db, PersistQueries)
+      :ok = Manifest.restore(db, data)
+      db
+    end
+
+    defp held(path) do
+      {:ok, data} = Manifest.load(path)
+
+      for {{:p_blob, key}, _, _, _, _, _, _, {:blob, digest}, _, _} <- data.memo_entries,
+          into: %{},
+          do: {key, digest}
+    end
+
+    test "a :blob query's value is in the store, and the manifest holds its digest",
+         %{store: store, path: path} do
+      held = held(path)
+      assert Map.keys(held) == ["a", "b"]
+      assert {:ok, %{rows: rows}} = Blob.get_term(store, held["a"])
+      assert rows == Enum.to_list(1..100)
+
+      {:ok, data} = Manifest.load(path)
+      entries = Manifest.memo_entries(data, store)
+
+      assert {{:p_blob, "a"}, %Entry{value: %{rows: ^rows}, persist: :blob}} =
+               List.keyfind(entries, {:p_blob, "a"}, 0)
+
+      # Inline entries stay inline.
+      assert Enum.any?(
+               data.memo_entries,
+               &match?({{:p_top, "a"}, _, _, _, _, _, _, bin, _, _} when is_binary(bin), &1)
+             )
+    end
+
+    test "restored, a held value is read from the store when first read", %{
+      store: store,
+      path: path
+    } do
+      db = restored_with(store, path)
+
+      try do
+        assert {:ok, digest} = Memo.held_digest(db, {:p_blob, "a"})
+        assert digest == held(path)["a"]
+        assert %{rows: rows} = PersistQueries.p_blob(db, "a")
+        assert length(rows) == 100
+      after
+        Database.shutdown(db)
+      end
+    end
+
+    test "a missing blob is recomputed transparently, and keeps its changed_at", %{
+      store: store,
+      path: path
+    } do
+      digest = held(path)["a"]
+      File.rm!(Blob.path(store, digest))
+      db = restored_with(store, path)
+      handler = {__MODULE__, make_ref()}
+      me = self()
+
+      :telemetry.attach(
+        handler,
+        [:roux, :blob, :missing],
+        fn _event, _m, meta, _ -> send(me, {:missing, meta.query_name, meta.key}) end,
+        nil
+      )
+
+      try do
+        {:ok, before} = Memo.changed_at(db, {:p_blob, "a"})
+        log = Roux.QueryLog.start(db)
+        assert %{rows: _} = PersistQueries.p_blob(db, "a")
+        assert_received {:missing, :p_blob, "a"}
+        assert Roux.QueryLog.executions(log, :p_blob) == ["a"]
+        assert {:ok, ^before} = Memo.changed_at(db, {:p_blob, "a"})
+        Roux.QueryLog.stop(log)
+
+        # Served from memory now, and written back to the store next time.
+        :ok = Manifest.write(db, %{}, path)
+        assert Blob.member?(store, digest)
+      after
+        :telemetry.detach(handler)
+        Database.shutdown(db)
+      end
+    end
+
+    test "early cutoff compares digests, putting a missing blob back", %{
+      store: store,
+      path: path
+    } do
+      digest = held(path)["b"]
+      db = restored_with(store, path)
+
+      try do
+        File.rm!(Blob.path(store, digest))
+        # Another key moves the revision; "b" is set to what it was.
+        Input.set(db, :psrc, "b", %{rows: [2]})
+        Input.set(db, :psrc, "b", %{rows: [1]})
+        log = Roux.QueryLog.start(db)
+
+        assert %{rows: [1]} = PersistQueries.p_blob(db, "b")
+        assert Roux.QueryLog.cutoffs(log, :p_blob) == ["b"]
+        assert {:ok, ^digest} = Memo.held_digest(db, {:p_blob, "b"})
+        assert Blob.member?(store, digest)
+        Roux.QueryLog.stop(log)
+      after
+        Database.shutdown(db)
+      end
+    end
+
+    test "the manifest retains what it names, and a collection keeps it", %{
+      store: store,
+      path: path
+    } do
+      digests = path |> held() |> Map.values()
+      old = System.os_time(:second) - 3 * 24 * 60 * 60
+      for digest <- digests, do: File.touch!(Blob.path(store, digest), old)
+
+      Blob.gc(store)
+      assert Enum.all?(digests, &Blob.member?(store, &1))
+
+      File.rm!(path)
+      Blob.gc(store)
+      refute Enum.any?(digests, &Blob.member?(store, &1))
+    end
+
+    test "without a store, values are written inline", %{written: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "inline.roux")
+      :ok = Manifest.write(%{db | blob: nil}, %{}, path)
+      assert held(path) == %{}
+    end
+  end
+
+  describe "held blobs and code versions" do
+    alias Roux.Blob
+
+    test "an entry's held digests are kept alive, and its code version with it",
+         %{db: _db, tmp_dir: tmp_dir} do
+      store = Blob.open!(Path.join(tmp_dir, "store"))
+      db = Database.new(blob: store)
+      {:ok, digest} = Blob.put(store, "a file the body wrote")
+      register_closure(db, :holder, "v1")
+
+      Runtime.execute(db, :holder, :k, fn _db, _key ->
+        :ok = Runtime.hold(digest)
+        {:file, digest}
+      end)
+
+      path = Path.join(tmp_dir, "compile.roux")
+      :ok = Manifest.write(db, %{}, path)
+      {:ok, data} = Manifest.load(path)
+      [{{:holder, :k}, entry}] = Manifest.memo_entries(data)
+      assert entry.blobs == [digest]
+      assert entry.code_version == "v1"
+
+      File.touch!(Blob.path(store, digest), System.os_time(:second) - 3 * 24 * 60 * 60)
+      Blob.gc(store)
+      assert Blob.member?(store, digest)
+
+      # Restored under the same version, the entry is served as it was.
+      db2 = Database.new(blob: store)
+      register_closure(db2, :holder, "v1")
+      :ok = Manifest.restore(db2, data)
+
+      assert Runtime.execute(db2, :holder, :k, fn _, _ -> flunk("recomputed") end) ==
+               {:file, digest}
+
+      assert_raise ArgumentError, fn -> Runtime.hold(digest) end
+      Database.shutdown(db)
+      Database.shutdown(db2)
+    end
+  end
+
   describe "write/3 encodes in a process of its own" do
     test "leaves nothing in the mailbox of a caller that traps exits", %{
       db: db,
@@ -670,7 +871,7 @@ defmodule Roux.Lang.ManifestTest do
     @header_size 16
 
     test "the manifest it writes loads", %{path: path} do
-      assert {:ok, %{vsn: 4}} = Manifest.load(path)
+      assert {:ok, %{vsn: 5}} = Manifest.load(path)
     end
 
     test "refuses a manifest with any payload byte changed", %{path: path, bytes: bytes} do
@@ -699,14 +900,14 @@ defmodule Roux.Lang.ManifestTest do
     end
 
     test "refuses another format, even with a good checksum", %{path: path, bytes: bytes} do
-      <<magic::binary-size(8), 4::32, rest::binary>> = bytes
+      <<magic::binary-size(8), 5::32, rest::binary>> = bytes
 
-      for format <- [3, 5] do
+      for format <- [3, 4, 6] do
         File.write!(path, [magic, <<format::32>>, rest])
         assert Manifest.load(path) == :error
       end
 
-      File.write!(path, ["ROUXMNFX", <<4::32>>, rest])
+      File.write!(path, ["ROUXMNFX", <<5::32>>, rest])
       assert Manifest.load(path) == :error
     end
 
@@ -719,12 +920,15 @@ defmodule Roux.Lang.ManifestTest do
             :not_a_manifest,
             Map.delete(good, :memo_entries),
             %{good | memo_entries: [put_elem(entry, 7, :not_encoded) | entries]},
+            %{good | memo_entries: [put_elem(entry, 7, {:blob, :not_a_digest}) | entries]},
+            %{good | memo_entries: [put_elem(entry, 8, :not_a_version) | entries]},
+            %{good | memo_entries: [Tuple.delete_at(entry, 9) | entries]},
             %{good | memo_entries: [{:not, :an, :entry} | entries]},
             %{good | intern_data: [{:names, %{version: 2, forward: [], counter: 0}}]},
             %{good | revision: %{counter: -1, high: 0, medium: 0, low: 0}}
           ] do
         payload = :erlang.term_to_binary(payload)
-        File.write!(path, ["ROUXMNFT", <<4::32, :erlang.crc32(payload)::32>>, payload])
+        File.write!(path, ["ROUXMNFT", <<5::32, :erlang.crc32(payload)::32>>, payload])
         assert Manifest.load(path) == :error, "read #{inspect(payload, limit: 3)}"
       end
     end

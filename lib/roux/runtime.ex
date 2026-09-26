@@ -23,7 +23,19 @@ defmodule Roux.Runtime do
   See D3, D13, D14 for design rationale.
   """
 
-  alias Roux.{Cancellation, Cycle, Database, Entity, GC, Memo, Revision, Telemetry, Validation}
+  alias Roux.{
+    Blob,
+    Cancellation,
+    Cycle,
+    Database,
+    Entity,
+    GC,
+    Memo,
+    Revision,
+    Telemetry,
+    Validation
+  }
+
   alias Roux.Memo.Entry
   alias Roux.Runtime.Context
 
@@ -68,34 +80,12 @@ defmodule Roux.Runtime do
     result =
       case Memo.verification_state(db, query_key) do
         {:ok, ^current_rev, _durability} ->
-          {changed_at, value} = served_value(db, query_key)
-
-          Telemetry.cache_hit(
-            Database.id(db),
-            query_name,
-            key,
-            current_rev,
-            changed_at,
-            current_rev
-          )
-
-          value
+          serve(db, query_name, key, query_key, current_rev, query_fun)
 
         {:ok, _verified_at, _durability} ->
           case Validation.validate(db, query_key, &ensure_up_to_date/2) do
             :valid ->
-              {changed_at, value} = served_value(db, query_key)
-
-              Telemetry.cache_hit(
-                Database.id(db),
-                query_name,
-                key,
-                current_rev,
-                changed_at,
-                current_rev
-              )
-
-              value
+              serve(db, query_name, key, query_key, current_rev, query_fun)
 
             :stale ->
               compute(db, query_name, key, query_key, current_rev, query_fun, :replace)
@@ -110,6 +100,30 @@ defmodule Roux.Runtime do
     propagate_durability(db, query_key)
 
     result
+  end
+
+  # A valid entry's value, or — when its value was held by a blob that is
+  # gone — the value computed again, transparently: the entry is up to
+  # date, only its value is missing, so it keeps its `changed_at` when the
+  # value comes back the same.
+  defp serve(db, query_name, key, query_key, current_rev, query_fun) do
+    case served_value(db, query_key) do
+      {:ok, changed_at, value} ->
+        Telemetry.cache_hit(
+          Database.id(db),
+          query_name,
+          key,
+          current_rev,
+          changed_at,
+          current_rev
+        )
+
+        value
+
+      :missing ->
+        Telemetry.blob_missing(Database.id(db), query_name, key, current_rev)
+        compute(db, query_name, key, query_key, current_rev, query_fun, :reload)
+    end
   end
 
   @doc """
@@ -443,6 +457,30 @@ defmodule Roux.Runtime do
   end
 
   @doc """
+  Records that the value the running query returns names `digests` in
+  the database's `Roux.Blob` store (files its body put there, say):
+  while a manifest keeps the entry, it keeps them alive
+  (`Roux.Blob.retain/3`). A value that only passes on digests an entry
+  it read already holds need not hold them again — unless that entry is
+  not kept (`store: :none`, `transient:`).
+
+  Raises `ArgumentError` outside a query body.
+  """
+  @spec hold(Blob.digest() | [Blob.digest()]) :: :ok
+  def hold(digests) do
+    digests = List.wrap(digests)
+
+    case get_context() do
+      %Context{active_query: {_name, _key}} = ctx ->
+        put_context(%{ctx | blobs: digests ++ ctx.blobs})
+        :ok
+
+      _outside ->
+        raise ArgumentError, "Roux.Runtime.hold/1 called outside a query body"
+    end
+  end
+
+  @doc """
   The code version of the query whose body is running (`Roux.Query`),
   or nil for a query without one: for a body that keys something of its
   own — an action-cache entry, a file it keeps — on the code computing
@@ -520,8 +558,8 @@ defmodule Roux.Runtime do
 
   # -- Private: computation --
 
-  # `mode` is `:replace` when a stored entry went stale and `:new` when
-  # there was none.
+  # `mode` is `:replace` when a stored entry went stale, `:new` when there
+  # was none, and `:reload` when a valid entry's blob-held value was gone.
   defp compute(db, query_name, key, query_key, current_rev, query_fun, mode) do
     parent_ctx = get_context()
     parent_stack = if parent_ctx, do: parent_ctx.query_stack, else: []
@@ -577,8 +615,8 @@ defmodule Roux.Runtime do
     # `unchanged?/5`), and a restored value would be decoded for nothing.
     prior =
       case mode do
-        :replace -> prior_state(db, query_key)
         :new -> nil
+        _replace_or_reload -> prior_state(db, query_key)
       end
 
     # What the query is registered with: its code version, and how a
@@ -628,15 +666,19 @@ defmodule Roux.Runtime do
         durability: final_ctx.min_durability,
         output_entities: final_ctx.created_entities,
         code_version: exec_ctx.code_version,
-        persist: persist(definition, value)
+        persist: persist(definition, value),
+        blobs: Enum.uniq(final_ctx.blobs)
       }
 
       # An unchanged value stays as it is stored: copying the equal new
       # one in would cost a copy of it, and would throw away a restored
       # value's encoding, which the next manifest would then encode again.
-      if unchanged?,
+      # Unless the stored value is what was missing.
+      if unchanged? and mode != :reload,
         do: Memo.put_unchanged(db, query_key, entry),
         else: Memo.put(db, query_key, entry)
+
+      Database.note_write(db)
 
       cache_value(db, query_key, changed_at, value)
 
@@ -686,7 +728,12 @@ defmodule Roux.Runtime do
   defp prior_state(db, query_key) do
     case Memo.prior_state(db, query_key) do
       {:ok, hash, changed_at, output_entities} ->
-        %{hash: hash, changed_at: changed_at, output_entities: output_entities}
+        %{
+          hash: hash,
+          changed_at: changed_at,
+          output_entities: output_entities,
+          held: Memo.held_digest(db, query_key)
+        }
 
       :miss ->
         nil
@@ -694,14 +741,29 @@ defmodule Roux.Runtime do
   end
 
   # Whether `value` is the value the replaced entry holds. The hashes
-  # decide most cases; only equal ones read the stored value to compare.
-  # A stored entry that went away meanwhile (a GC sweep) counts as a
-  # change, which recomputes dependents rather than serving them stale.
-  defp unchanged?(db, query_key, %{hash: hash}, hash, value) do
-    match?({:ok, %Entry{value: ^value}}, Memo.get(db, query_key))
+  # decide most cases; only equal ones read the stored value to compare —
+  # or, for a value held by a blob, compare the new value's digest with
+  # its own, reading nothing (and putting the bytes back, in case the
+  # blob is what went missing). A stored entry that went away meanwhile
+  # (a GC sweep) counts as a change, which recomputes dependents rather
+  # than serving them stale.
+  defp unchanged?(db, query_key, %{hash: hash, held: held}, hash, value) do
+    case held do
+      {:ok, digest} ->
+        {new_digest, encoded} = Blob.encode_term(value)
+        new_digest == digest and held_again?(db, digest, encoded)
+
+      :none ->
+        match?({:ok, ^value}, Memo.fetch_value(db, query_key))
+    end
   end
 
   defp unchanged?(_db, _query_key, _prior, _hash, _value), do: false
+
+  defp held_again?(%Database{blob: %Blob{} = store}, digest, encoded),
+    do: match?({:ok, _}, Blob.put_encoded_term(store, digest, encoded))
+
+  defp held_again?(_db_without_store, _digest, _encoded), do: false
 
   # -- Private: dedup --
 
@@ -880,12 +942,17 @@ defmodule Roux.Runtime do
 
     case Process.get({@values_key, table, query_key}) do
       {^changed_at, value} ->
-        {changed_at, value}
+        {:ok, changed_at, value}
 
       _ ->
-        {:ok, %Entry{value: value}} = Memo.get(db, query_key)
-        cache_value(db, query_key, changed_at, value)
-        {changed_at, value}
+        case Memo.fetch_value(db, query_key) do
+          {:ok, value} ->
+            cache_value(db, query_key, changed_at, value)
+            {:ok, changed_at, value}
+
+          _missing ->
+            :missing
+        end
     end
   end
 

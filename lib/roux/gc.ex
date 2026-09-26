@@ -157,18 +157,20 @@ defmodule Roux.GC do
     sweep_orphaned_memo_entries(db, 0)
   end
 
+  # Reads keys and dependencies only: no value is copied out of ETS, or
+  # decoded, to find what points at nothing.
   defp sweep_orphaned_memo_entries(db, acc) do
     orphaned =
-      db
-      |> Memo.entries()
-      |> Enum.filter(fn {_key, entry} ->
-        entry.dependencies != [] and Enum.any?(entry.dependencies, &orphaned_dep?(db, &1))
+      Memo.reduce_dependencies(db, [], fn key, deps, orphaned ->
+        if deps != [] and Enum.any?(deps, &orphaned_dep?(db, &1)),
+          do: [key | orphaned],
+          else: orphaned
       end)
 
     if orphaned == [] do
       acc
     else
-      Enum.each(orphaned, fn {key, _entry} -> Memo.delete(db, key) end)
+      Enum.each(orphaned, &Memo.delete(db, &1))
       # Cascade: deleting these may orphan others.
       sweep_orphaned_memo_entries(db, acc + length(orphaned))
     end
@@ -215,5 +217,5 @@ defmodule Roux.GC do
   defp orphaned_dep?(db, {:parallel, _max, members}),
     do: Enum.any?(members, &orphaned_dep?(db, &1))
 
-  defp orphaned_dep?(db, dep), do: Memo.get(db, dep) == :miss
+  defp orphaned_dep?(db, dep), do: Memo.changed_at(db, dep) == :miss
 end

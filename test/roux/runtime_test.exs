@@ -230,7 +230,7 @@ defmodule Roux.RuntimeTest do
 
       :ok =
         Memo.restore_persisted(db, [
-          {{:rows, "a"}, hash, 1, 1, [{:input, :source, "a"}], :low, [], encoded}
+          {{:rows, "a"}, hash, 1, 1, [{:input, :source, "a"}], :low, [], encoded, nil, []}
         ])
 
       Input.set(db, :source, "a", "world")
@@ -255,7 +255,7 @@ defmodule Roux.RuntimeTest do
       assert {:ok, %Memo.Entry{value: ^value, changed_at: 1, verified_at: ^rev}} =
                Memo.get(db, {:rows, "a"})
 
-      assert [{{:rows, "a"}, _, 1, ^rev, _, :low, [], ^encoded}] =
+      assert [{{:rows, "a"}, _, 1, ^rev, _, :low, [], ^encoded, nil, []}] =
                Memo.persisted(db, fn key, _ -> key == {:rows, "a"} end)
     end
 

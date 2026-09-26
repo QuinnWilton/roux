@@ -22,6 +22,9 @@ defmodule Roux.Memo.Entry do
     store, the manifest holding its digest), `:none` (never kept), or
     `:transient` (never kept, nor is any entry that read it). See
     `Roux.Query`'s `store:` and `transient:`.
+  - `blobs` — the `Roux.Blob` digests the value names
+    (`Roux.Runtime.hold/1`): a manifest keeping the entry keeps them
+    alive.
   """
 
   @typedoc "How a manifest keeps an entry; see the moduledoc."
@@ -36,7 +39,8 @@ defmodule Roux.Memo.Entry do
           durability: Roux.Revision.durability(),
           output_entities: [{module(), term()}],
           code_version: binary() | nil,
-          persist: persist()
+          persist: persist(),
+          blobs: [String.t()]
         }
 
   @enforce_keys [
@@ -57,6 +61,7 @@ defmodule Roux.Memo.Entry do
     :durability,
     :output_entities,
     code_version: nil,
-    persist: :inline
+    persist: :inline,
+    blobs: []
   ]
 end

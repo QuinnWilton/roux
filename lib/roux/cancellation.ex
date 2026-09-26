@@ -188,8 +188,9 @@ defmodule Roux.Cancellation do
     else
       visited = Map.put(visited, query_key, true)
 
-      case Memo.get(db, query_key) do
-        {:ok, %Entry{dependencies: deps}} ->
+      # The dependency list alone: walking the graph copies no value.
+      case Memo.dependencies(db, query_key) do
+        {:ok, deps} ->
           Enum.any?(deps, fn dep ->
             depends_on?(db, dep, target_key, visited)
           end)

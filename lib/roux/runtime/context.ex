@@ -26,6 +26,8 @@ defmodule Roux.Runtime.Context do
     optimization. Starts at `:high` (identity for min).
   - `code_version` — the code version of the active query (`Roux.Query`),
     stored with its entry.
+  - `blobs` — the `Roux.Blob` digests the active query's value names
+    (`Roux.Runtime.hold/1`).
   """
 
   @type t :: %__MODULE__{
@@ -35,7 +37,8 @@ defmodule Roux.Runtime.Context do
           recorded_deps: [Roux.Memo.dependency()],
           created_entities: [{module(), Roux.Entity.entity_id()}],
           min_durability: Roux.Revision.durability(),
-          code_version: binary() | nil
+          code_version: binary() | nil,
+          blobs: [String.t()]
         }
 
   @enforce_keys [:db]
@@ -46,7 +49,8 @@ defmodule Roux.Runtime.Context do
     recorded_deps: [],
     created_entities: [],
     min_durability: :high,
-    code_version: nil
+    code_version: nil,
+    blobs: []
   ]
 
   @doc """

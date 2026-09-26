@@ -27,9 +27,19 @@ defmodule Roux.Memo do
   entry for the same key, and a lost race would pair the newer entry's
   metadata with the older value. A process that reads a restored value
   more than once caches it itself (`Roux.Runtime` does, per revision).
+
+  ## Values held by digest
+
+  An entry of a `store: :blob` query (`Roux.Query`) restored from a
+  manifest holds `{:blob, digest}` instead of an encoding: its value is
+  in the database's `Roux.Blob` store (`Roux.Database.new/1`'s `blob:`),
+  read from there by the first read that needs it. A value whose blob is
+  gone — collected, or no store to read it from — reads as absent:
+  `get/2` misses it, and `fetch_value/2` says so, for a caller that
+  recomputes it (`Roux.Runtime` does, transparently).
   """
 
-  alias Roux.Database
+  alias Roux.{Blob, Database}
   alias Roux.Memo.Entry
   alias Roux.Revision
 
@@ -49,27 +59,37 @@ defmodule Roux.Memo do
           | {:parallel, pos_integer(), [query_key()]}
 
   @typedoc """
-  An entry as a manifest persists it: every field of `Roux.Memo.Entry`,
-  with the value in the external term format. See `persisted/2`.
+  A value as a manifest holds it: in the external term format, or by the
+  digest of its blob (`{:blob, digest}`, a `store: :blob` query's).
+  """
+  @type encoded :: binary() | {:blob, Blob.digest()}
+
+  @typedoc """
+  An entry as a manifest persists it: every field of `Roux.Memo.Entry`
+  but `persist` (implied by the encoding), with the value encoded. See
+  `persisted/3`.
   """
   @type persisted ::
           {query_key(), hash :: integer(), changed_at :: Revision.revision(),
            verified_at :: Revision.revision(), [dependency()], Revision.durability(),
-           output_entities :: [{module(), term()}], encoded_value :: binary()}
+           output_entities :: [{module(), term()}], encoded(), code_version :: binary() | nil,
+           blobs :: [Blob.digest()]}
 
   # -- ETS tuple layout --
   #
   # {query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities, encoded,
   #  pos 1      pos 2  pos 3 pos 4       pos 5        pos 6         pos 7       pos 8            pos 9
-  #  code_version, persist}
-  #  pos 10        pos 11
+  #  code_version, persist, blobs}
+  #  pos 10        pos 11   pos 12
   #
-  # `encoded` is nil when `value` holds the entry's value, and the value in
-  # the external term format when the entry was restored and has not been
-  # replaced since; `value` is then nil and means nothing. Only `put/3`
-  # (nil) and `restore_persisted/2` (a binary) write position 9, each
-  # together with position 2 in one insert; `put_unchanged/3` and
-  # `update_verified` leave both alone. So the two never disagree.
+  # `encoded` is nil when `value` holds the entry's value, and — when the
+  # entry was restored and has not been replaced since — the value in the
+  # external term format, or `{:blob, digest}`; `value` is then nil and
+  # means nothing. Only `put/3` (nil) and `restore_persisted/2` (an
+  # encoding) write position 9, each together with position 2 in one
+  # insert; `put_unchanged/3` and `update_verified` leave both alone. So
+  # the two never disagree. `blobs` are the digests the entry's value
+  # names (`Roux.Runtime.hold/1`), which a manifest keeps alive.
 
   # Level 1 is a fifth of the default level's encode time for a fifth
   # more bytes. Against no compression, it takes twice as long to encode
@@ -78,13 +98,45 @@ defmodule Roux.Memo do
   @value_opts [{:compressed, 1}]
 
   @doc """
-  Looks up a memo entry. Returns `{:ok, entry}` or `:miss`.
+  Looks up a memo entry. Returns `{:ok, entry}`, or `:miss` — also for
+  an entry whose value's blob is gone (see "Values held by digest").
   """
   @spec get(Database.t(), query_key()) :: {:ok, Entry.t()} | :miss
-  def get(%Database{memo_table: table}, key) do
+  def get(%Database{memo_table: table} = db, key) do
     case :ets.lookup(table, key) do
-      [tuple] -> {:ok, to_entry(tuple)}
+      [tuple] ->
+        case to_entry(db, tuple) do
+          {:ok, entry} -> {:ok, entry}
+          :missing -> :miss
+        end
+
+      [] ->
+        :miss
+    end
+  end
+
+  @doc """
+  An entry's value: `{:ok, value}`, `:miss` when there is no entry, or
+  `:missing` for an entry whose value's blob is gone.
+  """
+  @spec fetch_value(Database.t(), query_key()) :: {:ok, term()} | :miss | :missing
+  def fetch_value(%Database{memo_table: table} = db, key) do
+    case :ets.lookup(table, key) do
+      [tuple] -> value_of(db, tuple)
       [] -> :miss
+    end
+  end
+
+  @doc """
+  The digest an entry's value is held by, when it is held by one (a
+  restored `store: :blob` entry not replaced since): `{:ok, digest}`, or
+  `:none`. Read without the value.
+  """
+  @spec held_digest(Database.t(), query_key()) :: {:ok, Blob.digest()} | :none
+  def held_digest(%Database{memo_table: table}, key) do
+    case :ets.lookup_element(table, key, 9, :missing) do
+      {:blob, digest} -> {:ok, digest}
+      _other -> :none
     end
   end
 
@@ -204,14 +256,16 @@ defmodule Roux.Memo do
         when acc: term()
   def reduce_dependencies(%Database{memo_table: table}, acc, fun) when is_function(fun, 3) do
     table
-    |> :ets.select([{{:"$1", :_, :_, :_, :_, :"$2", :_, :_, :_, :_, :_}, [], [{{:"$1", :"$2"}}]}])
+    |> :ets.select([
+      {{:"$1", :_, :_, :_, :_, :"$2", :_, :_, :_, :_, :_, :_}, [], [{{:"$1", :"$2"}}]}
+    ])
     |> Enum.reduce(acc, fn {key, deps}, acc -> fun.(key, deps, acc) end)
   end
 
   @doc "The keys of the entries whose `persist` is `persist`."
   @spec keys_persisted_as(Database.t(), Entry.persist()) :: [query_key()]
   def keys_persisted_as(%Database{memo_table: table}, persist) do
-    :ets.select(table, [{{:"$1", :_, :_, :_, :_, :_, :_, :_, :_, :_, persist}, [], [:"$1"]}])
+    :ets.select(table, [{{:"$1", :_, :_, :_, :_, :_, :_, :_, :_, :_, persist, :_}, [], [:"$1"]}])
   end
 
   @doc "Reads an entry's `durability` without its value."
@@ -273,7 +327,8 @@ defmodule Roux.Memo do
       {7, e.durability},
       {8, e.output_entities},
       {10, e.code_version},
-      {11, e.persist}
+      {11, e.persist},
+      {12, e.blobs}
     ]
 
     if :ets.update_element(table, key, fields), do: :ok, else: put(db, key, e)
@@ -341,22 +396,31 @@ defmodule Roux.Memo do
   value is materialized, restored ones decoded.
   """
   @spec entries(Database.t()) :: [{query_key(), Entry.t()}]
-  def entries(%Database{memo_table: table}) do
+  def entries(%Database{memo_table: table} = db) do
     table
     |> :ets.tab2list()
-    |> Enum.map(&to_entry_pair/1)
+    |> Enum.flat_map(&entry_pairs(db, &1))
   end
 
   @doc """
   Folds over every entry as `{query_key, entry}` without materializing
   the table as a list: each entry is copied out of ETS on its own turn
   (a restored value decoded) and is garbage once the reducer is done
-  with it.
+  with it. An entry whose value's blob is gone is passed over.
   """
   @spec reduce_entries(Database.t(), acc, ({query_key(), Entry.t()}, acc -> acc)) :: acc
         when acc: term()
-  def reduce_entries(%Database{memo_table: table}, acc, fun) when is_function(fun, 2) do
-    :ets.foldl(fn tuple, acc -> fun.(to_entry_pair(tuple), acc) end, acc, table)
+  def reduce_entries(%Database{memo_table: table} = db, acc, fun) when is_function(fun, 2) do
+    :ets.foldl(
+      fn tuple, acc ->
+        case entry_pairs(db, tuple) do
+          [pair] -> fun.(pair, acc)
+          [] -> acc
+        end
+      end,
+      acc,
+      table
+    )
   end
 
   @doc """
@@ -365,25 +429,38 @@ defmodule Roux.Memo do
   `keep?` receives each entry's key and durability — and, when it takes
   three arguments, its `persist` (`Roux.Memo.Entry`) — before its value
   is touched. A restored value that was never replaced goes out in the
-  encoding it came in with; any other value is encoded here, one entry
-  at a time.
+  encoding it came in with, or by the digest it was held by; any other
+  value is encoded here, one entry at a time — by `hold`, when given, for
+  a `:blob` entry: it stores the value and returns `{:blob, digest}`.
   """
   @spec persisted(
           Database.t(),
           (query_key(), Revision.durability() -> boolean())
-          | (query_key(), Revision.durability(), Entry.persist() -> boolean())
+          | (query_key(), Revision.durability(), Entry.persist() -> boolean()),
+          (term() -> {:blob, Blob.digest()}) | nil
         ) :: [persisted()]
-  def persisted(%Database{} = db, keep?) when is_function(keep?, 2),
-    do: persisted(db, fn key, durability, _persist -> keep?.(key, durability) end)
+  def persisted(db, keep?, hold \\ nil)
 
-  def persisted(%Database{memo_table: table}, keep?) when is_function(keep?, 3) do
+  def persisted(%Database{} = db, keep?, hold) when is_function(keep?, 2),
+    do: persisted(db, fn key, durability, _persist -> keep?.(key, durability) end, hold)
+
+  def persisted(%Database{memo_table: table}, keep?, hold) when is_function(keep?, 3) do
     :ets.foldl(
-      fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded, _code,
-          persist},
+      fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded, code,
+          persist, blobs},
          acc ->
         if keep?.(key, durability, persist) do
-          encoded = if is_binary(encoded), do: encoded, else: encode_value(value)
-          [{key, hash, changed_at, verified_at, deps, durability, outputs, encoded} | acc]
+          encoded =
+            cond do
+              encoded != nil -> encoded
+              persist == :blob and hold != nil -> hold.(value)
+              true -> encode_value(value)
+            end
+
+          [
+            {key, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, blobs}
+            | acc
+          ]
         else
           acc
         end
@@ -404,10 +481,16 @@ defmodule Roux.Memo do
   def restore_persisted(%Database{memo_table: table}, entries) when is_list(entries) do
     rows =
       Enum.map(entries, fn
-        {key, hash, changed_at, verified_at, deps, durability, outputs, encoded}
-        when is_binary(encoded) ->
-          {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, nil,
-           :inline}
+        {key, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, blobs} =
+            entry ->
+          unless persisted?(entry) do
+            raise ArgumentError, "not a persisted memo entry: #{inspect(entry, limit: 5)}"
+          end
+
+          persist = if is_binary(encoded), do: :inline, else: :blob
+
+          {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, code,
+           persist, blobs}
 
         other ->
           raise ArgumentError, "not a persisted memo entry: #{inspect(other, limit: 5)}"
@@ -417,43 +500,96 @@ defmodule Roux.Memo do
     :ok
   end
 
+  @doc "Whether `entry` has the shape of a persisted entry (`persisted/3`)."
+  @spec persisted?(term()) :: boolean()
+  def persisted?(
+        {_key, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, blobs}
+      )
+      when is_integer(hash) and is_integer(changed_at) and is_integer(verified_at) and
+             is_list(deps) and is_atom(durability) and is_list(outputs) and
+             (is_binary(code) or is_nil(code)) and is_list(blobs) do
+    case encoded do
+      encoded when is_binary(encoded) -> true
+      {:blob, digest} when is_binary(digest) -> true
+      _ -> false
+    end
+  end
+
+  def persisted?(_entry), do: false
+
   @doc """
   Decodes a persisted entry (`persisted/2`) into `{query_key, entry}`,
   for inspecting a manifest without restoring it.
   """
-  @spec decode_persisted(persisted()) :: {query_key(), Entry.t()}
-  def decode_persisted({key, hash, changed_at, verified_at, deps, durability, outputs, encoded})
-      when is_binary(encoded) do
-    to_entry_pair(
-      {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, nil, :inline}
-    )
+  @spec decode_persisted(persisted(), Blob.t() | nil) :: {query_key(), Entry.t() | :missing}
+  def decode_persisted(
+        {key, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, blobs},
+        store \\ nil
+      ) do
+    persist = if is_binary(encoded), do: :inline, else: :blob
+
+    tuple =
+      {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, persist,
+       blobs}
+
+    case to_entry(%{blob: store}, tuple) do
+      {:ok, entry} -> {key, entry}
+      :missing -> {key, :missing}
+    end
   end
 
   # -- Private helpers --
 
   defp to_tuple(key, %Entry{} = e) do
     {key, e.value, e.hash, e.changed_at, e.verified_at, e.dependencies, e.durability,
-     e.output_entities, nil, e.code_version, e.persist}
+     e.output_entities, nil, e.code_version, e.persist, e.blobs}
   end
 
-  defp to_entry_pair(tuple), do: {elem(tuple, 0), to_entry(tuple)}
+  defp entry_pairs(db, tuple) do
+    case to_entry(db, tuple) do
+      {:ok, entry} -> [{elem(tuple, 0), entry}]
+      :missing -> []
+    end
+  end
 
   defp to_entry(
-         {_key, value, hash, changed_at, verified_at, deps, durability, output_entities, encoded,
-          code_version, persist}
+         db,
+         {_key, _value, hash, changed_at, verified_at, deps, durability, output_entities,
+          _encoded, code_version, persist, blobs} = tuple
        ) do
-    %Entry{
-      value: if(is_binary(encoded), do: decode_value(encoded), else: value),
-      hash: hash,
-      changed_at: changed_at,
-      verified_at: verified_at,
-      dependencies: deps,
-      durability: durability,
-      output_entities: output_entities,
-      code_version: code_version,
-      persist: persist
-    }
+    with {:ok, value} <- value_of(db, tuple) do
+      {:ok,
+       %Entry{
+         value: value,
+         hash: hash,
+         changed_at: changed_at,
+         verified_at: verified_at,
+         dependencies: deps,
+         durability: durability,
+         output_entities: output_entities,
+         code_version: code_version,
+         persist: persist,
+         blobs: blobs
+       }}
+    end
   end
+
+  defp value_of(db, tuple) do
+    case elem(tuple, 8) do
+      nil -> {:ok, elem(tuple, 1)}
+      encoded when is_binary(encoded) -> {:ok, decode_value(encoded)}
+      {:blob, digest} -> load(db, digest)
+    end
+  end
+
+  defp load(%{blob: %Blob{} = store}, digest) do
+    case Blob.get_term(store, digest) do
+      {:ok, value} -> {:ok, value}
+      :miss -> :missing
+    end
+  end
+
+  defp load(_db_without_store, _digest), do: :missing
 
   defp encode_value(value), do: :erlang.term_to_binary(value, @value_opts)
 

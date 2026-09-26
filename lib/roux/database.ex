@@ -20,7 +20,7 @@ defmodule Roux.Database do
   """
 
   alias Roux.Database.{Supervisor, TableOwner}
-  alias Roux.{Intern, Revision}
+  alias Roux.{Blob, Intern, Revision}
 
   @type t :: %__MODULE__{
           memo_table: :ets.tid(),
@@ -33,7 +33,9 @@ defmodule Roux.Database do
           intern_registry: :ets.tid(),
           entity_registry: :ets.tid(),
           table_owner: pid(),
-          supervisor: pid()
+          supervisor: pid(),
+          blob: Blob.t() | nil,
+          writes: :atomics.atomics_ref() | nil
         }
 
   @enforce_keys [
@@ -61,7 +63,9 @@ defmodule Roux.Database do
     :intern_registry,
     :entity_registry,
     :table_owner,
-    :supervisor
+    :supervisor,
+    blob: nil,
+    writes: nil
   ]
 
   @doc """
@@ -69,9 +73,17 @@ defmodule Roux.Database do
 
   Starts a supervisor that owns all ETS tables via the Heir/TableOwner
   protocol. The returned struct holds stable references to those tables.
+
+  ## Options
+
+    * `:blob` — a `Roux.Blob` store: where a manifest keeps the values of
+      `store: :blob` queries and the database reads them back, and where
+      code versions are kept across VMs (`Roux.Query`).
   """
   @spec new(keyword()) :: t()
-  def new(_opts \\ []) do
+  def new(opts \\ []) do
+    opts = Keyword.validate!(opts, blob: nil)
+
     {:ok, sup_pid} = Supervisor.start_link()
     table_owner_pid = find_table_owner(sup_pid)
     tables = TableOwner.get_tables(table_owner_pid)
@@ -87,9 +99,26 @@ defmodule Roux.Database do
       intern_registry: Map.fetch!(tables, :intern_registry),
       entity_registry: Map.fetch!(tables, :entity_registry),
       table_owner: table_owner_pid,
-      supervisor: sup_pid
+      supervisor: sup_pid,
+      blob: Keyword.fetch!(opts, :blob),
+      writes: :atomics.new(1, signed: false)
     }
   end
+
+  @doc """
+  How many entries this database's queries have written so far
+  (`note_write/1`): a session compares it to tell whether a run
+  computed anything its manifest does not hold.
+  """
+  @spec writes(t()) :: non_neg_integer()
+  def writes(%__MODULE__{writes: nil}), do: 0
+  def writes(%__MODULE__{writes: writes}), do: :atomics.get(writes, 1)
+
+  @doc false
+  # Counts an entry a query wrote (`Roux.Runtime`).
+  @spec note_write(t()) :: :ok
+  def note_write(%__MODULE__{writes: nil}), do: :ok
+  def note_write(%__MODULE__{writes: writes}), do: :atomics.add(writes, 1, 1)
 
   @typedoc "What tells a database apart from the others in the VM; see `id/1`."
   @type id :: :ets.tid()

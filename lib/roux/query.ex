@@ -252,17 +252,20 @@ defmodule Roux.Query do
   @doc """
   The code version of `definition` (see "Code versions"), given the
   code options of its module (`use Roux.Query, code: ...`): nil for a
-  query with neither code versions nor a `version:`.
+  query with neither code versions nor a `version:`. With a `Roux.Blob`
+  store, the code's digest is kept there across VMs (`Roux.Code`).
   """
-  @spec code_version(Definition.t(), code_options()) :: binary() | nil
-  def code_version(%Definition{code: nil, version: nil}, nil), do: nil
+  @spec code_version(Definition.t(), code_options(), Roux.Blob.t() | nil) :: binary() | nil
+  def code_version(definition, module_code, store \\ nil)
 
-  def code_version(%Definition{} = definition, module_code) do
+  def code_version(%Definition{code: nil, version: nil}, nil, _store), do: nil
+
+  def code_version(%Definition{} = definition, module_code, store) do
     code =
       if module_code != nil or definition.code != nil do
         roots = [definition.module | extra_roots(definition)]
 
-        case Roux.Code.digest(roots, module_code || []) do
+        case Roux.Code.digest(roots, (module_code || []) ++ [store: store]) do
           {:ok, digest} -> digest
           {:error, reason} -> {:unversioned, reason, vm_token()}
         end

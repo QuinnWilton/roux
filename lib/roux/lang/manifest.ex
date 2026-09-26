@@ -21,7 +21,7 @@ defmodule Roux.Lang.Manifest do
   - Revision counter and durability tracking state.
   - Source file metadata (mtime, content hash) for staleness detection.
 
-  ## Layout (format 4)
+  ## Layout (format 5)
 
   A manifest is a header and a payload:
 
@@ -46,6 +46,21 @@ defmodule Roux.Lang.Manifest do
   with, and an intern table nothing used hands back its encoded rows, so
   a run only encodes what it recomputed.
 
+  Each entry also carries its code version (`Roux.Query`) and the blob
+  digests its value names (`Roux.Runtime.hold/1`).
+
+  ## Values held by digest
+
+  With a `Roux.Blob` store (the database's, `Roux.Database.new/1`'s
+  `blob:`, or `write/4`'s), the value of a `store: :blob` query is kept
+  in the store and the manifest holds its digest: a large value the
+  manifest need not carry, read back by the first read that needs it.
+  Its early cutoff compares digests, and a value whose blob is gone is
+  recomputed transparently (`Roux.Runtime`). The manifest is the owner
+  of what it names (`Roux.Blob.retain/3`): every held digest and every
+  one an entry holds, so a collection of the store keeps them for as
+  long as the manifest is there.
+
   ## Integrity
 
   The header's CRC-32 covers the payload. `load/1` checks it before
@@ -60,15 +75,16 @@ defmodule Roux.Lang.Manifest do
 
   The format number in the header changes whenever the layout does; a
   manifest of any other format — including formats 1 to 3, which were a
-  bare `term_to_binary/2` of the data with the version inside — is
-  refused, and the caller rebuilds from scratch.
+  bare `term_to_binary/2` of the data with the version inside, and 4,
+  whose entries had no code version or blobs — is refused, and the
+  caller rebuilds from scratch.
   """
 
-  alias Roux.{Database, Entity, Intern, Memo, Revision}
+  alias Roux.{Blob, Database, Entity, Intern, Memo, Revision}
   alias Roux.Memo.Entry
 
   @magic "ROUXMNFT"
-  @format 4
+  @format 5
 
   @typedoc "Metadata for a single source file."
   @type source_meta :: %{mtime: term(), hash: integer()}
@@ -96,25 +112,52 @@ defmodule Roux.Lang.Manifest do
   An entry whose query says so is left out (`Roux.Query`'s `store:
   :none`), as is a transient entry (`transient:`) and every entry that
   read one, directly or through others.
+
+  ## Options
+
+    * `:blob` — the `Roux.Blob` store to keep `store: :blob` values in
+      (default: the database's). Without one they are written inline.
+      The manifest then retains what it names in the store (see "Values
+      held by digest").
   """
-  @spec write(Database.t(), %{String.t() => source_meta()}, String.t()) :: :ok
-  def write(%Database{} = db, source_metadata, path) when is_binary(path) do
-    {payload, crc} = isolated(fn -> encode(db, source_metadata) end)
+  @spec write(Database.t(), %{String.t() => source_meta()}, String.t(), keyword()) :: :ok
+  def write(%Database{} = db, source_metadata, path, opts \\ []) when is_binary(path) do
+    store = Keyword.get(opts, :blob, db.blob)
+    {payload, crc, digests} = isolated(fn -> encode(db, source_metadata, store) end)
     File.mkdir_p!(Path.dirname(path))
-    write_atomically!(path, [@magic, <<@format::32, crc::32>>, payload])
+    :ok = write_atomically!(path, [@magic, <<@format::32, crc::32>>, payload])
+
+    case store do
+      %Blob{} -> :ok = Blob.retain(store, Path.expand(path), digests)
+      nil -> :ok
+    end
   end
 
-  defp encode(db, source_metadata) do
+  defp encode(db, source_metadata, store) do
+    entries = persisted_entries(db, store)
+
     payload =
       :erlang.term_to_binary(%{
         sources: source_metadata,
-        memo_entries: persisted_entries(db),
+        memo_entries: entries,
         entity_data: dump_entity_data(db),
         intern_data: dump_intern_data(db),
         revision: Revision.snapshot(db.revision)
       })
 
-    {payload, :erlang.crc32(payload)}
+    {payload, :erlang.crc32(payload), named_digests(entries)}
+  end
+
+  # Every digest the entries name: held values and held blobs.
+  defp named_digests(entries) do
+    entries
+    |> Enum.flat_map(fn {_key, _h, _c, _v, _d, _dur, _o, encoded, _code, blobs} ->
+      case encoded do
+        {:blob, digest} -> [digest | blobs]
+        _inline -> blobs
+      end
+    end)
+    |> Enum.uniq()
   end
 
   # Runs `fun` in a process of its own and hands back its result.
@@ -153,13 +196,18 @@ defmodule Roux.Lang.Manifest do
   end
 
   @doc """
-  The memo entries a loaded manifest carries, decoded: `[{query_key, entry}]`.
+  The memo entries a loaded manifest carries, decoded: `[{query_key, entry}]`,
+  values held by digest read from `store` (`:missing` without it, or when
+  their blob is gone).
 
   `restore/2` never decodes the values — each is decoded by the first
   read that needs it — so this is for inspection.
   """
-  @spec memo_entries(manifest_data()) :: [{Memo.query_key(), Entry.t()}]
-  def memo_entries(%{memo_entries: persisted}), do: Enum.map(persisted, &Memo.decode_persisted/1)
+  @spec memo_entries(manifest_data(), Blob.t() | nil) :: [
+          {Memo.query_key(), Entry.t() | :missing}
+        ]
+  def memo_entries(%{memo_entries: persisted}, store \\ nil),
+    do: Enum.map(persisted, &Memo.decode_persisted(&1, store))
 
   @doc """
   Loads a manifest from disk.
@@ -196,6 +244,8 @@ defmodule Roux.Lang.Manifest do
       demanded, keeping its `changed_at` if its value comes back the
       same. The revision advances at `:high` once when there is any,
       since no durability check sees a code change.
+
+  A value held by digest is read from the database's `Roux.Blob` store.
   """
   @spec restore(Database.t(), manifest_data()) :: :ok
   def restore(%Database{} = db, data) do
@@ -213,14 +263,14 @@ defmodule Roux.Lang.Manifest do
   defp registered(db, entries) do
     {kept, {_versions, moved?}} =
       Enum.flat_map_reduce(entries, {%{}, false}, fn
-        {{:input, _, _}, _, _, _, _, _, _, _} = entry, acc ->
+        {{:input, _, _}, _, _, _, _, _, _, _, _, _} = entry, acc ->
           {[entry], acc}
 
-        {{name, _key}, _, _, _, _, _, _, _} = entry, {versions, moved?} ->
+        {{name, _key}, _, _, _, _, _, _, _, stored, _} = entry, {versions, moved?} ->
           {registered, versions} = registration(db, name, versions)
 
           case registered do
-            {:ok, version} -> {[entry], {versions, moved? or version != nil}}
+            {:ok, version} -> {[entry], {versions, moved? or version != stored}}
             :unregistered -> {[], {versions, moved?}}
           end
       end)
@@ -257,13 +307,32 @@ defmodule Roux.Lang.Manifest do
 
   # -- Private: dump helpers --
 
-  defp persisted_entries(db) do
+  defp persisted_entries(db, store) do
     excluded = transient_closure(db)
 
-    Memo.persisted(db, fn key, durability, persist ->
-      persist in [:inline, :blob] and persist?(key, durability) and
-        not MapSet.member?(excluded, key)
-    end)
+    Memo.persisted(
+      db,
+      fn key, durability, persist ->
+        persist in [:inline, :blob] and persist?(key, durability) and
+          not MapSet.member?(excluded, key)
+      end,
+      hold_fun(store)
+    )
+  end
+
+  # Keeps a `store: :blob` value in the store, by its digest. A value
+  # the store cannot take is kept inline.
+  defp hold_fun(nil), do: nil
+
+  defp hold_fun(%Blob{} = store) do
+    fn value ->
+      {digest, encoded} = Blob.encode_term(value)
+
+      case Blob.put_encoded_term(store, digest, encoded) do
+        {:ok, ^digest} -> {:blob, digest}
+        {:error, _} -> :erlang.term_to_binary(value, compressed: 1)
+      end
+    end
   end
 
   # Input entries are always persisted regardless of durability so that
@@ -380,19 +449,12 @@ defmodule Roux.Lang.Manifest do
        when is_map(sources) and is_list(memo_entries) and is_list(entity_data) and
               is_list(intern_data) do
     Enum.all?(Map.values(revision), &(is_integer(&1) and &1 >= 0)) and
-      Enum.all?(memo_entries, &persisted_entry?/1) and
+      Enum.all?(memo_entries, &Memo.persisted?/1) and
       Enum.all?(entity_data, &match?({module, rows} when is_atom(module) and is_list(rows), &1)) and
       Enum.all?(intern_data, &intern_snapshot?/1)
   end
 
   defp valid?(_data), do: false
-
-  defp persisted_entry?({_key, hash, changed_at, verified_at, deps, durability, outputs, encoded})
-       when is_integer(hash) and is_integer(changed_at) and is_integer(verified_at) and
-              is_list(deps) and is_atom(durability) and is_list(outputs) and is_binary(encoded),
-       do: true
-
-  defp persisted_entry?(_entry), do: false
 
   defp intern_snapshot?({name, %{version: 3, forward: forward, counter: counter}})
        when is_atom(name) and is_binary(forward) and is_integer(counter) and counter >= 0,

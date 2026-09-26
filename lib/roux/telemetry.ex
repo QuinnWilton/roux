@@ -46,6 +46,8 @@ defmodule Roux.Telemetry do
   - `[:roux, :cancel, :task]` — query task cancelled
   - `[:roux, :gc, :sweep]` — garbage collection sweep completed
   - `[:roux, :intern, :new]` — new value interned
+  - `[:roux, :blob, :missing]` — a value held by digest was gone, and is
+    recomputed
   """
 
   @typedoc "The database an event happened in: its `Roux.Database.id/1`."
@@ -277,6 +279,17 @@ defmodule Roux.Telemetry do
       },
       %{database: database, revision: revision}
     )
+  end
+
+  @doc "Emits `[:roux, :blob, :missing]`."
+  @spec blob_missing(database(), atom(), term(), non_neg_integer()) :: :ok
+  def blob_missing(database, query_name, key, revision) do
+    event([:blob, :missing], %{}, %{
+      database: database,
+      query_name: query_name,
+      key: key,
+      revision: revision
+    })
   end
 
   @doc "Emits `[:roux, :intern, :new]`."

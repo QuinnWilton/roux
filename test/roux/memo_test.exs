@@ -411,7 +411,7 @@ defmodule Roux.MemoTest do
 
     test "prior_state/2 never decodes a restored value", %{db: db} do
       :ok =
-        Memo.restore_persisted(db, [{{:q, :k}, 7, 2, 3, [], :medium, [], "not a term"}])
+        Memo.restore_persisted(db, [{{:q, :k}, 7, 2, 3, [], :medium, [], "not a term", nil, []}])
 
       assert Memo.prior_state(db, {:q, :k}) == {:ok, 7, 2, []}
     end
@@ -421,7 +421,7 @@ defmodule Roux.MemoTest do
 
       :ok =
         Memo.restore_persisted(db, [
-          {{:q, :k}, :erlang.phash2(:stored), 2, 3, [], :medium, [], encoded}
+          {{:q, :k}, :erlang.phash2(:stored), 2, 3, [], :medium, [], encoded, nil, []}
         ])
 
       Memo.put_unchanged(
@@ -448,7 +448,7 @@ defmodule Roux.MemoTest do
                 output_entities: [{Some.Entity, 2}]
               }} = Memo.get(db, {:q, :k})
 
-      assert [{{:q, :k}, _, 2, 8, _, :high, _, ^encoded}] =
+      assert [{{:q, :k}, _, 2, 8, _, :high, _, ^encoded, _, _}] =
                Memo.persisted(db, fn _, _ -> true end)
     end
 
@@ -468,7 +468,7 @@ defmodule Roux.MemoTest do
       entry = make_entry(attrs)
 
       {key, entry.hash, entry.changed_at, entry.verified_at, entry.dependencies, entry.durability,
-       entry.output_entities, encoded}
+       entry.output_entities, encoded, nil, []}
     end
 
     defp keep_all(_key, _durability), do: true
@@ -520,14 +520,14 @@ defmodule Roux.MemoTest do
       encoded = :erlang.term_to_binary(List.duplicate("row", 100))
       :ok = Memo.restore_persisted(db, [persisted_row({:q, :k}, encoded)])
 
-      assert [{{:q, :k}, _, _, _, _, _, _, ^encoded}] = Memo.persisted(db, &keep_all/2)
+      assert [{{:q, :k}, _, _, _, _, _, _, ^encoded, _, _}] = Memo.persisted(db, &keep_all/2)
       assert {:ok, %Entry{value: value}} = Memo.get(db, {:q, :k})
       assert value == List.duplicate("row", 100)
 
       # Reading it does not replace the encoding, and neither does
       # verifying it again.
       Memo.update_verified(db, {:q, :k}, 9)
-      assert [{{:q, :k}, _, _, 9, _, _, _, ^encoded}] = Memo.persisted(db, &keep_all/2)
+      assert [{{:q, :k}, _, _, 9, _, _, _, ^encoded, _, _}] = Memo.persisted(db, &keep_all/2)
     end
 
     test "put/3 over a restored entry replaces its encoding", %{db: db} do
@@ -535,7 +535,7 @@ defmodule Roux.MemoTest do
       Memo.put(db, {:q, :k}, make_entry(%{value: :new, hash: :erlang.phash2(:new)}))
 
       assert {:ok, %Entry{value: :new}} = Memo.get(db, {:q, :k})
-      assert [{{:q, :k}, _, _, _, _, _, _, encoded}] = Memo.persisted(db, &keep_all/2)
+      assert [{{:q, :k}, _, _, _, _, _, _, encoded, _, _}] = Memo.persisted(db, &keep_all/2)
       assert :erlang.binary_to_term(encoded) == :new
     end
 
