@@ -6,6 +6,9 @@ defmodule Mix.Tasks.Roux.Lsp do
   `Mix.Project.config/0` and registers all languages with a fresh
   database before accepting LSP protocol messages.
 
+  Needs the optional `:gen_lsp` dependency: add `{:gen_lsp, "~> 0.11.3"}`
+  to the project's deps.
+
   ## Usage
 
       mix roux.lsp
@@ -25,56 +28,66 @@ defmodule Mix.Tasks.Roux.Lsp do
 
   use Mix.Task
 
-  @impl true
-  def run(_argv) do
-    # LSP uses stdout for JSON-RPC. Silence Mix shell output so compilation
-    # messages don't corrupt the protocol stream.
-    Mix.shell(Mix.Shell.Quiet)
+  if Code.ensure_loaded?(GenLSP) do
+    @impl true
+    def run(_argv) do
+      # LSP uses stdout for JSON-RPC. Silence Mix shell output so compilation
+      # messages don't corrupt the protocol stream.
+      Mix.shell(Mix.Shell.Quiet)
 
-    Mix.Task.run("app.start")
+      Mix.Task.run("app.start")
 
-    # Redirect all Logger handlers to stderr. Must happen after app.start
-    # because Elixir's Logger app reconfigures the :default handler on boot.
-    # Also set a compact format without the leading newline that Elixir defaults to.
-    redirect_logger_to_stderr()
+      # Redirect all Logger handlers to stderr. Must happen after app.start
+      # because Elixir's Logger app reconfigures the :default handler on boot.
+      # Also set a compact format without the leading newline that Elixir defaults to.
+      redirect_logger_to_stderr()
 
-    :logger.update_handler_config(
-      :default,
-      :formatter,
-      Logger.Formatter.new(format: "$time [$level] $message\n")
-    )
-
-    roux_config = Mix.Project.config()[:roux] || []
-    languages = Keyword.get(roux_config, :languages, [])
-
-    {:ok, buffer} =
-      GenLSP.Buffer.start_link(communication: {GenLSP.Communication.Stdio, []})
-
-    {:ok, assigns} = GenLSP.Assigns.start_link()
-    {:ok, task_supervisor} = Task.Supervisor.start_link()
-
-    {:ok, _pid} =
-      GenLSP.start_link(Roux.Lang.LSP, [languages: languages],
-        buffer: buffer,
-        assigns: assigns,
-        task_supervisor: task_supervisor
+      :logger.update_handler_config(
+        :default,
+        :formatter,
+        Logger.Formatter.new(format: "$time [$level] $message\n")
       )
 
-    Process.sleep(:infinity)
-  end
+      roux_config = Mix.Project.config()[:roux] || []
+      languages = Keyword.get(roux_config, :languages, [])
 
-  defp redirect_logger_to_stderr do
-    for id <- :logger.get_handler_ids() do
-      with {:ok, %{config: %{type: :standard_io}} = handler} <-
-             :logger.get_handler_config(id) do
-        :logger.remove_handler(id)
+      {:ok, buffer} =
+        GenLSP.Buffer.start_link(communication: {GenLSP.Communication.Stdio, []})
 
-        :logger.add_handler(
-          id,
-          handler.module,
-          %{handler | config: %{handler.config | type: :standard_error}}
+      {:ok, assigns} = GenLSP.Assigns.start_link()
+      {:ok, task_supervisor} = Task.Supervisor.start_link()
+
+      {:ok, _pid} =
+        GenLSP.start_link(Roux.Lang.LSP, [languages: languages],
+          buffer: buffer,
+          assigns: assigns,
+          task_supervisor: task_supervisor
         )
+
+      Process.sleep(:infinity)
+    end
+
+    defp redirect_logger_to_stderr do
+      for id <- :logger.get_handler_ids() do
+        with {:ok, %{config: %{type: :standard_io}} = handler} <-
+               :logger.get_handler_config(id) do
+          :logger.remove_handler(id)
+
+          :logger.add_handler(
+            id,
+            handler.module,
+            %{handler | config: %{handler.config | type: :standard_error}}
+          )
+        end
       end
+    end
+  else
+    @impl true
+    def run(_argv) do
+      Mix.raise(
+        "mix roux.lsp needs the optional :gen_lsp dependency; " <>
+          ~s(add {:gen_lsp, "~> 0.11.3"} to your project's deps)
+      )
     end
   end
 end
