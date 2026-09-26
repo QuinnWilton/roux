@@ -239,6 +239,12 @@ defmodule Roux.BoundaryTest do
     end
   end
 
+  describe "Tier 1: Stamp" do
+    test "Roux.Stamp depends only on Blob", %{boundary: boundary} do
+      assert_boundary(boundary, modules: [Roux.Stamp], allow: [under(Roux.Blob)])
+    end
+  end
+
   describe "Tier 5: Manifest" do
     test "Roux.Lang.Manifest depends only on Database, Memo, Entity, Intern, Revision, and Blob",
          %{boundary: boundary} do
