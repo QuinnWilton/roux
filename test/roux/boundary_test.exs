@@ -213,6 +213,23 @@ defmodule Roux.BoundaryTest do
     end
   end
 
+  describe "Tier 5: Session" do
+    test "Roux.Session depends only on Database, Lang, Revision, Runtime, and Blob", %{
+      boundary: boundary
+    } do
+      assert_boundary(boundary,
+        modules: [Roux.Session],
+        allow: [
+          under(Roux.Database),
+          under(Roux.Lang),
+          under(Roux.Revision),
+          under(Roux.Runtime),
+          under(Roux.Blob)
+        ]
+      )
+    end
+  end
+
   describe "Tier 5: Manifest" do
     test "Roux.Lang.Manifest depends only on Database, Memo, Entity, Intern, Revision, and Blob",
          %{boundary: boundary} do
