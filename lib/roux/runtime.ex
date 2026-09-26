@@ -478,6 +478,10 @@ defmodule Roux.Runtime do
         :new -> nil
       end
 
+    # What the query is registered with: its code version, and how a
+    # manifest keeps its entries. Nil for a closure run by name alone.
+    definition = Database.query_definition(db, query_name)
+
     # Fresh context for this query's execution.
     exec_ctx = %Context{
       db: db,
@@ -486,7 +490,7 @@ defmodule Roux.Runtime do
       recorded_deps: [],
       created_entities: [],
       min_durability: :high,
-      code_version: Database.code_version(db, query_name)
+      code_version: definition && Map.get(definition, :code_version)
     }
 
     Telemetry.query_start(Database.id(db), query_name, key, current_rev)
@@ -520,7 +524,8 @@ defmodule Roux.Runtime do
         dependencies: Enum.reverse(final_ctx.recorded_deps),
         durability: final_ctx.min_durability,
         output_entities: final_ctx.created_entities,
-        code_version: exec_ctx.code_version
+        code_version: exec_ctx.code_version,
+        persist: persist(definition, value)
       }
 
       # An unchanged value stays as it is stored: copying the equal new
@@ -556,6 +561,22 @@ defmodule Roux.Runtime do
         reraise error, __STACKTRACE__
     after
       restore_context(old_ctx)
+    end
+  end
+
+  # How a manifest keeps the entry (`Roux.Memo.Entry`): its query's
+  # `store:`, unless its `transient:` predicate accepts the value.
+  defp persist(nil, _value), do: :inline
+
+  defp persist(definition, value) do
+    case Map.get(definition, :transient) do
+      {module, function} ->
+        if apply(module, function, [value]) == true,
+          do: :transient,
+          else: Map.get(definition, :store, :inline)
+
+      nil ->
+        Map.get(definition, :store, :inline)
     end
   end
 

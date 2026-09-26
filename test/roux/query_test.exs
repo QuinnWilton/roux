@@ -268,6 +268,35 @@ defmodule Roux.QueryTest do
     end
   end
 
+  # -- store: and transient: --
+
+  describe "store: and transient:" do
+    test "are recorded in the definition, the predicate as a function of the module" do
+      %{queries: queries} = Roux.Test.PersistQueries.__roux_queries__()
+      by_name = Map.new(queries, &{&1.name, &1})
+
+      assert by_name.p_none.store == :none
+      assert by_name.p_blob.store == :blob
+      assert by_name.p_reader.store == :inline
+      assert {Roux.Test.PersistQueries, fun} = by_name.p_fact.transient
+      assert apply(Roux.Test.PersistQueries, fun, [{:error, :lost}])
+      refute apply(Roux.Test.PersistQueries, fun, [{:ok, 1}])
+    end
+
+    test "an unknown store is a compile error" do
+      assert_raise ArgumentError, ~r/:store must be :inline, :blob or :none/, fn ->
+        Code.compile_string("""
+        defmodule Roux.QueryTest.BadStore do
+          use Roux.Query
+          defquery :q, key: k, store: :disk do
+            k
+          end
+        end
+        """)
+      end
+    end
+  end
+
   # -- around: --
 
   describe "around:" do

@@ -58,8 +58,8 @@ defmodule Roux.Memo do
   #
   # {query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities, encoded,
   #  pos 1      pos 2  pos 3 pos 4       pos 5        pos 6         pos 7       pos 8            pos 9
-  #  code_version}
-  #  pos 10
+  #  code_version, persist}
+  #  pos 10        pos 11
   #
   # `encoded` is nil when `value` holds the entry's value, and the value in
   # the external term format when the entry was restored and has not been
@@ -192,6 +192,25 @@ defmodule Roux.Memo do
     end
   end
 
+  @doc """
+  Every entry's key and dependencies, folded without touching a value:
+  the dependency graph, for a pass over it (a manifest's transient
+  cascade, a GC sweep).
+  """
+  @spec reduce_dependencies(Database.t(), acc, (query_key(), [dependency()], acc -> acc)) :: acc
+        when acc: term()
+  def reduce_dependencies(%Database{memo_table: table}, acc, fun) when is_function(fun, 3) do
+    table
+    |> :ets.select([{{:"$1", :_, :_, :_, :_, :"$2", :_, :_, :_, :_, :_}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.reduce(acc, fn {key, deps}, acc -> fun.(key, deps, acc) end)
+  end
+
+  @doc "The keys of the entries whose `persist` is `persist`."
+  @spec keys_persisted_as(Database.t(), Entry.persist()) :: [query_key()]
+  def keys_persisted_as(%Database{memo_table: table}, persist) do
+    :ets.select(table, [{{:"$1", :_, :_, :_, :_, :_, :_, :_, :_, :_, persist}, [], [:"$1"]}])
+  end
+
   @doc "Reads an entry's `durability` without its value."
   @spec durability(Database.t(), query_key()) :: {:ok, Roux.Revision.durability()} | :miss
   def durability(%Database{memo_table: table}, key) do
@@ -250,7 +269,8 @@ defmodule Roux.Memo do
       {6, e.dependencies},
       {7, e.durability},
       {8, e.output_entities},
-      {10, e.code_version}
+      {10, e.code_version},
+      {11, e.persist}
     ]
 
     if :ets.update_element(table, key, fields), do: :ok, else: put(db, key, e)
@@ -339,18 +359,26 @@ defmodule Roux.Memo do
   @doc """
   The entries `keep?` accepts, in the form a manifest persists them.
 
-  `keep?` receives each entry's key and durability, before its value is
-  touched. A restored value that was never replaced goes out in the
+  `keep?` receives each entry's key and durability — and, when it takes
+  three arguments, its `persist` (`Roux.Memo.Entry`) — before its value
+  is touched. A restored value that was never replaced goes out in the
   encoding it came in with; any other value is encoded here, one entry
   at a time.
   """
-  @spec persisted(Database.t(), (query_key(), Revision.durability() -> boolean())) ::
-          [persisted()]
-  def persisted(%Database{memo_table: table}, keep?) when is_function(keep?, 2) do
+  @spec persisted(
+          Database.t(),
+          (query_key(), Revision.durability() -> boolean())
+          | (query_key(), Revision.durability(), Entry.persist() -> boolean())
+        ) :: [persisted()]
+  def persisted(%Database{} = db, keep?) when is_function(keep?, 2),
+    do: persisted(db, fn key, durability, _persist -> keep?.(key, durability) end)
+
+  def persisted(%Database{memo_table: table}, keep?) when is_function(keep?, 3) do
     :ets.foldl(
-      fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded, _code},
+      fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded, _code,
+          persist},
          acc ->
-        if keep?.(key, durability) do
+        if keep?.(key, durability, persist) do
           encoded = if is_binary(encoded), do: encoded, else: encode_value(value)
           [{key, hash, changed_at, verified_at, deps, durability, outputs, encoded} | acc]
         else
@@ -375,7 +403,8 @@ defmodule Roux.Memo do
       Enum.map(entries, fn
         {key, hash, changed_at, verified_at, deps, durability, outputs, encoded}
         when is_binary(encoded) ->
-          {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, nil}
+          {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, nil,
+           :inline}
 
         other ->
           raise ArgumentError, "not a persisted memo entry: #{inspect(other, limit: 5)}"
@@ -393,7 +422,7 @@ defmodule Roux.Memo do
   def decode_persisted({key, hash, changed_at, verified_at, deps, durability, outputs, encoded})
       when is_binary(encoded) do
     to_entry_pair(
-      {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, nil}
+      {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, nil, :inline}
     )
   end
 
@@ -401,14 +430,14 @@ defmodule Roux.Memo do
 
   defp to_tuple(key, %Entry{} = e) do
     {key, e.value, e.hash, e.changed_at, e.verified_at, e.dependencies, e.durability,
-     e.output_entities, nil, e.code_version}
+     e.output_entities, nil, e.code_version, e.persist}
   end
 
   defp to_entry_pair(tuple), do: {elem(tuple, 0), to_entry(tuple)}
 
   defp to_entry(
          {_key, value, hash, changed_at, verified_at, deps, durability, output_entities, encoded,
-          code_version}
+          code_version, persist}
        ) do
     %Entry{
       value: if(is_binary(encoded), do: decode_value(encoded), else: value),
@@ -418,7 +447,8 @@ defmodule Roux.Memo do
       dependencies: deps,
       durability: durability,
       output_entities: output_entities,
-      code_version: code_version
+      code_version: code_version,
+      persist: persist
     }
   end
 

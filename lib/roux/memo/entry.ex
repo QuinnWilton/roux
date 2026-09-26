@@ -17,7 +17,15 @@ defmodule Roux.Memo.Entry do
     (`Roux.Query`'s `code:` and `version:`), or nil for a query without
     one. An entry whose version is not its query's current one is
     stale (`Roux.Validation`).
+  - `persist` — whether and how a manifest keeps the entry: `:inline`
+    (its value in the manifest), `:blob` (its value in a `Roux.Blob`
+    store, the manifest holding its digest), `:none` (never kept), or
+    `:transient` (never kept, nor is any entry that read it). See
+    `Roux.Query`'s `store:` and `transient:`.
   """
+
+  @typedoc "How a manifest keeps an entry; see the moduledoc."
+  @type persist :: :inline | :blob | :none | :transient
 
   @type t :: %__MODULE__{
           value: term(),
@@ -27,7 +35,8 @@ defmodule Roux.Memo.Entry do
           dependencies: [Roux.Memo.dependency()],
           durability: Roux.Revision.durability(),
           output_entities: [{module(), term()}],
-          code_version: binary() | nil
+          code_version: binary() | nil,
+          persist: persist()
         }
 
   @enforce_keys [
@@ -47,6 +56,7 @@ defmodule Roux.Memo.Entry do
     :dependencies,
     :durability,
     :output_entities,
-    code_version: nil
+    code_version: nil,
+    persist: :inline
   ]
 end

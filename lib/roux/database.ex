@@ -115,7 +115,8 @@ defmodule Roux.Database do
 
   @doc """
   Registers a derived query definition: at least its `:module` and
-  `:function`, and optionally its `:code_version` (`Roux.Query`).
+  `:function`, and optionally its `:code_version`, `:store` and
+  `:transient` (`Roux.Query`).
 
   Idempotent — re-registering the same name overwrites the previous
   definition. Registering a query again under another code version makes
@@ -147,6 +148,15 @@ defmodule Roux.Database do
   def code_version(%__MODULE__{query_registry: reg}, name) when is_atom(name) do
     case :ets.lookup(reg, name) do
       [{^name, %{} = definition}] -> Map.get(definition, :code_version)
+      _ -> nil
+    end
+  end
+
+  @doc "What a query is registered with (`register_query/3`), or nil."
+  @spec query_definition(t(), atom()) :: map() | nil
+  def query_definition(%__MODULE__{query_registry: reg}, name) when is_atom(name) do
+    case :ets.lookup(reg, name) do
+      [{^name, %{} = definition}] -> definition
       _ -> nil
     end
   end

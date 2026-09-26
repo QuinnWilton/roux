@@ -10,6 +10,10 @@ defmodule Roux.Query.Definition do
   `Roux.Query`): the roots its code is read from beyond its own module
   (a list of modules, or `{module, function, args}` returning one), and
   a term a query's author bumps by hand.
+
+  `store` and `transient` are how a manifest keeps the query's entries
+  (see `Roux.Query`): `transient` names the function the `defquery`
+  generated from its `transient:` predicate.
   """
 
   @type code :: [module()] | {module(), atom(), [term()]} | nil
@@ -20,11 +24,22 @@ defmodule Roux.Query.Definition do
           function: atom(),
           opts: keyword(),
           code: code(),
-          version: term()
+          version: term(),
+          store: :inline | :blob | :none,
+          transient: {module(), atom()} | nil
         }
 
   @enforce_keys [:name, :module, :function]
-  defstruct [:name, :module, :function, opts: [], code: nil, version: nil]
+  defstruct [
+    :name,
+    :module,
+    :function,
+    opts: [],
+    code: nil,
+    version: nil,
+    store: :inline,
+    transient: nil
+  ]
 
   @doc """
   Creates a new query definition.

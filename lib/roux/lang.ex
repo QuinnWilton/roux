@@ -193,7 +193,9 @@ defmodule Roux.Lang do
       Database.register_query(db, defn.name, %{
         module: defn.module,
         function: defn.function,
-        code_version: Query.code_version(defn, code)
+        code_version: Query.code_version(defn, code),
+        store: defn.store,
+        transient: defn.transient
       })
     end)
 

@@ -61,6 +61,29 @@ defmodule Roux.Query do
   a version that no other VM shares, so their entries never outlive the
   VM.
 
+  ## Persistence
+
+  A manifest (`Roux.Lang.Manifest`) keeps every entry by default, its
+  value inline. A query can say otherwise:
+
+      defquery :findings, key: analysis, store: :blob do ... end
+
+      defquery :facts, key: module, transient: &match?({:error, :lost}, &1) do
+        ...
+      end
+
+    * `store: :inline` (the default) — the value is in the manifest;
+    * `store: :blob` — the value is kept in the manifest's `Roux.Blob`
+      store by digest, read back lazily, and its early cutoff compares
+      digests: for large values the manifest need not carry;
+    * `store: :none` — never kept: cheap to recompute, or meaningless in
+      another VM;
+    * `transient: predicate` — a value the predicate accepts is not
+      kept, and neither is any entry that read it, directly or not: a
+      reader restored without it would pass its durability check and
+      serve what the transient value led to, never asking again. For a
+      value that stands for a failure worth retrying next run.
+
   ## Wrapping bodies
 
   `use Roux.Query, around: {m, f}` runs every query body of the module
@@ -120,6 +143,8 @@ defmodule Roux.Query do
     * `:code` — (optional) roots of the query's code beyond its module:
       a list of modules or `{module, function, args}` (see "Code versions")
     * `:version` — (optional) a term mixed into the query's code version
+    * `:store` — (optional) `:inline`, `:blob` or `:none` (see "Persistence")
+    * `:transient` — (optional) a predicate over the value (see "Persistence")
     * `:do` — the query body block
 
   ## Example
@@ -145,6 +170,26 @@ defmodule Roux.Query do
     {returns, opts} = Keyword.pop(opts, :returns)
     {code, opts} = Keyword.pop(opts, :code)
     {version, opts} = Keyword.pop(opts, :version)
+    {store, opts} = Keyword.pop(opts, :store, :inline)
+    {transient, opts} = Keyword.pop(opts, :transient)
+
+    unless store in [:inline, :blob, :none] do
+      raise ArgumentError,
+            "defquery #{inspect(name)}: :store must be :inline, :blob or :none, " <>
+              "got: #{Macro.to_string(store)}"
+    end
+
+    # The predicate is code, not data: it becomes a function of the
+    # module's, which the definition names.
+    transient_fun = if transient, do: :"__roux_transient_#{name}__"
+
+    transient_ast =
+      if transient do
+        quote do
+          @doc false
+          def unquote(transient_fun)(value), do: unquote(transient).(value)
+        end
+      end
 
     spec_ast =
       if returns do
@@ -160,8 +205,12 @@ defmodule Roux.Query do
         function: unquote(name),
         opts: unquote(opts),
         code: unquote(code),
-        version: unquote(version)
+        version: unquote(version),
+        store: unquote(store),
+        transient: unquote(if transient_fun, do: quote(do: {__MODULE__, unquote(transient_fun)}))
       }
+
+      unquote(transient_ast)
 
       unquote(spec_ast)
 

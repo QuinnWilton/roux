@@ -534,6 +534,51 @@ defmodule Roux.Lang.ManifestTest do
       end
     end
 
+    test "keeps no entry its query keeps nowhere, no transient one, and none that read one",
+         %{db: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      :ok = Roux.Lang.register_module(db, Roux.Test.PersistQueries)
+      Input.set(db, :psrc, "kept", 1)
+      Input.set(db, :psrc, "gone", :lost)
+
+      for key <- ["kept", "gone"] do
+        Roux.Test.PersistQueries.p_top(db, key)
+        Roux.Test.PersistQueries.p_none(db, key)
+        Roux.Test.PersistQueries.p_blob(db, key)
+      end
+
+      assert {:ok, %Entry{persist: :transient}} = Memo.get(db, {:p_fact, "gone"})
+      assert {:ok, %Entry{persist: :inline}} = Memo.get(db, {:p_fact, "kept"})
+      Manifest.write(db, %{}, path)
+
+      {:ok, data} = Manifest.load(path)
+      kept = data |> Manifest.memo_entries() |> Enum.map(&elem(&1, 0)) |> MapSet.new()
+
+      for query <- [:p_fact, :p_reader, :p_top, :p_blob] do
+        assert {query, "kept"} in kept
+      end
+
+      for key <- ["kept", "gone"], do: refute({:p_none, key} in kept)
+      for query <- [:p_fact, :p_reader, :p_top], do: refute({query, "gone"} in kept)
+      assert {:input, :psrc, "gone"} in kept
+
+      # The next run asks again, from the fact up.
+      db2 = Database.new()
+
+      try do
+        :ok = Roux.Lang.register_module(db2, Roux.Test.PersistQueries)
+        :ok = Manifest.restore(db2, data)
+        log = Roux.QueryLog.start(db2)
+        Roux.Test.PersistQueries.p_top(db2, "gone")
+        Roux.Test.PersistQueries.p_top(db2, "kept")
+        assert Roux.QueryLog.executions(log, :p_fact) == ["gone"]
+        assert Roux.QueryLog.executions(log, :p_top) == ["gone"]
+        Roux.QueryLog.stop(log)
+      after
+        Database.shutdown(db2)
+      end
+    end
+
     property "write, load and restore reproduce any database" do
       check all(
               inputs <- map_of(string(:alphanumeric), term(), max_length: 15),

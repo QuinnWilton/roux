@@ -92,6 +92,10 @@ defmodule Roux.Lang.Manifest do
 
   Values and intern rows restored from the last manifest and not
   replaced since are written in the encoding they came in with.
+
+  An entry whose query says so is left out (`Roux.Query`'s `store:
+  :none`), as is a transient entry (`transient:`) and every entry that
+  read one, directly or through others.
   """
   @spec write(Database.t(), %{String.t() => source_meta()}, String.t()) :: :ok
   def write(%Database{} = db, source_metadata, path) when is_binary(path) do
@@ -104,7 +108,7 @@ defmodule Roux.Lang.Manifest do
     payload =
       :erlang.term_to_binary(%{
         sources: source_metadata,
-        memo_entries: Memo.persisted(db, &persist?/2),
+        memo_entries: persisted_entries(db),
         entity_data: dump_entity_data(db),
         intern_data: dump_intern_data(db),
         revision: Revision.snapshot(db.revision)
@@ -253,6 +257,15 @@ defmodule Roux.Lang.Manifest do
 
   # -- Private: dump helpers --
 
+  defp persisted_entries(db) do
+    excluded = transient_closure(db)
+
+    Memo.persisted(db, fn key, durability, persist ->
+      persist in [:inline, :blob] and persist?(key, durability) and
+        not MapSet.member?(excluded, key)
+    end)
+  end
+
   # Input entries are always persisted regardless of durability so that
   # unchanged files can be skipped entirely on warm start (the spec's
   # "Why not just use Roux's content comparison?" section); derived
@@ -260,6 +273,44 @@ defmodule Roux.Lang.Manifest do
   defp persist?({:input, _, _}, _durability), do: true
   defp persist?(_key, :low), do: false
   defp persist?(_key, _durability), do: true
+
+  # The transient entries and everything that read one, transitively.
+  # Kept, a reader would restore beside the transient value's absence,
+  # pass its durability check on the next run, and serve what that value
+  # led to without ever asking again.
+  defp transient_closure(db) do
+    case Memo.keys_persisted_as(db, :transient) do
+      [] ->
+        MapSet.new()
+
+      roots ->
+        readers =
+          Memo.reduce_dependencies(db, %{}, fn key, deps, acc ->
+            Enum.reduce(deps, acc, fn dep, acc ->
+              Enum.reduce(
+                read_keys(dep),
+                acc,
+                &Map.update(&2, &1, [key], fn ks -> [key | ks] end)
+              )
+            end)
+          end)
+
+        spread(roots, readers, MapSet.new())
+    end
+  end
+
+  # The entries a dependency names.
+  defp read_keys({:entity_field, _module, _id, _field}), do: []
+  defp read_keys({:input_absent, _input, _key}), do: []
+  defp read_keys(key), do: [key]
+
+  defp spread([], _readers, seen), do: seen
+
+  defp spread([key | rest], readers, seen) do
+    if MapSet.member?(seen, key),
+      do: spread(rest, readers, seen),
+      else: spread(Map.get(readers, key, []) ++ rest, readers, MapSet.put(seen, key))
+  end
 
   # Dumps entity table data as `[{module, rows}]`.
   defp dump_entity_data(%Database{} = db) do
