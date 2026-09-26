@@ -302,6 +302,7 @@ defmodule Roux.Lang.Manifest do
   # The entries a dependency names.
   defp read_keys({:entity_field, _module, _id, _field}), do: []
   defp read_keys({:input_absent, _input, _key}), do: []
+  defp read_keys({:parallel, _max, members}), do: members
   defp read_keys(key), do: [key]
 
   defp spread([], _readers, seen), do: seen

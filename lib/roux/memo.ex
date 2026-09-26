@@ -36,14 +36,17 @@ defmodule Roux.Memo do
   @type query_key :: {query_name :: atom(), key :: term()} | {:input, atom(), term()}
 
   @typedoc """
-  What an entry read: a query or input, an entity field, or the absence
+  What an entry read: a query or input, an entity field, the absence
   of an input (`{:input_absent, input_name, key}`, recorded by
-  `Roux.Runtime.input/4` with a default).
+  `Roux.Runtime.input/4` with a default), or a fan-out's queries
+  (`{:parallel, max_concurrency, keys}`, recorded by
+  `Roux.Runtime.parallel/3`).
   """
   @type dependency ::
           query_key()
           | {:entity_field, module(), term(), atom()}
           | {:input_absent, atom(), term()}
+          | {:parallel, pos_integer(), [query_key()]}
 
   @typedoc """
   An entry as a manifest persists it: every field of `Roux.Memo.Entry`,

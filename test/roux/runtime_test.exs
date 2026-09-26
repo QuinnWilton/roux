@@ -812,9 +812,9 @@ defmodule Roux.RuntimeTest do
     end
   end
 
-  # -- parallel/2 --
+  # -- parallel/3 --
 
-  describe "parallel/2" do
+  describe "parallel/3" do
     setup %{db: db} do
       register_input(db, :source, durability: :low)
       mod = Roux.Test.RuntimeTestQueries
@@ -825,21 +825,19 @@ defmodule Roux.RuntimeTest do
       :ok
     end
 
-    test "fan-out merges deps into parent context", %{db: db} do
+    test "fan-out records one dependency on the whole group", %{db: db} do
       Input.set(db, :source, "a", "hello")
       Input.set(db, :source, "b", "world")
 
       parent_fun = fn db, _key ->
-        Runtime.parallel(db, [{:upper, "a"}, {:length_query, "b"}])
+        Runtime.parallel(db, [{:upper, "a"}, {:length_query, "b"}], max_concurrency: 2)
       end
 
       assert Runtime.execute(db, :fan_out, "keys", parent_fun) == ["HELLO", 5]
 
       {:ok, entry} = Memo.get(db, {:fan_out, "keys"})
-
-      # Parent's deps should include the sub-queries.
-      assert {:upper, "a"} in entry.dependencies
-      assert {:length_query, "b"} in entry.dependencies
+      assert entry.dependencies == [{:parallel, 2, [{:upper, "a"}, {:length_query, "b"}]}]
+      assert entry.durability == :low
     end
 
     test "sub-query cache hit avoids recomputation", %{db: db} do
@@ -867,6 +865,146 @@ defmodule Roux.RuntimeTest do
       # We verify by checking the memo is still the original one.
       {:ok, entry} = Memo.get(db, {:upper, "a"})
       assert entry.value == "HELLO"
+    end
+  end
+
+  # -- parallel/3: the group --
+
+  describe "parallel/3 group dependency" do
+    alias Roux.Test.FanOutQueries
+
+    setup %{db: db} do
+      :ok = Roux.Lang.register_module(db, FanOutQueries)
+      for key <- ~w(a b c), do: Input.set(db, :fan_src, key, 1)
+      :ok
+    end
+
+    defp hold_members(db) do
+      Input.set(db, :fan_probe, :pid, self())
+      Input.set(db, :fan_probe, :hold, true)
+    end
+
+    # Every member of `keys` started, before any is let go: they run side
+    # by side.
+    defp release_when_all_started(keys) do
+      pids =
+        for _ <- keys do
+          assert_receive {:member_started, key, pid}, 5_000
+          {key, pid}
+        end
+
+      assert Enum.sort(Enum.map(pids, &elem(&1, 0))) == Enum.sort(keys)
+      Enum.each(pids, fn {_key, pid} -> send(pid, :go) end)
+    end
+
+    test "members execute side by side", %{db: db} do
+      hold_members(db)
+      task = Task.async(fn -> FanOutQueries.fan_parent(db, ~w(a b c)) end)
+      release_when_all_started(~w(a b c))
+
+      assert Task.await(task) == {:parent, [member: 1, member: 1, member: 1]}
+    end
+
+    test "validation re-executes stale members side by side", %{db: db} do
+      assert {:parent, _} = FanOutQueries.fan_parent(db, ~w(a b c))
+      for key <- ~w(a b), do: Input.set(db, :fan_src, key, 2)
+      hold_members(db)
+      log = Roux.QueryLog.start(db)
+
+      task = Task.async(fn -> FanOutQueries.fan_parent(db, ~w(a b c)) end)
+      # "c" did not change: only the stale two run, and both at once.
+      release_when_all_started(~w(a b))
+
+      assert Task.await(task) == {:parent, [member: 2, member: 2, member: 1]}
+      assert Roux.QueryLog.executions(log, :fan_member) == ~w(a b)
+      assert Roux.QueryLog.executions(log, :fan_parent) == [~w(a b c)]
+      Roux.QueryLog.stop(log)
+    end
+
+    test "a member that comes back the same leaves the parent valid", %{db: db} do
+      assert FanOutQueries.fan_parity(db, "a") == 1
+      log = Roux.QueryLog.start(db)
+
+      # Another key moves the revision; "a" is set to what it was.
+      Input.set(db, :fan_src, "b", 5)
+      Input.set(db, :fan_src, "a", 3)
+      Input.set(db, :fan_src, "a", 1)
+      assert FanOutQueries.fan_parity(db, "a") == 1
+
+      assert Roux.QueryLog.executions(log, :fan_member) == ["a"]
+      assert Roux.QueryLog.cutoffs(log, :fan_member) == ["a"]
+      assert Roux.QueryLog.executions(log, :fan_parity) == []
+      Roux.QueryLog.stop(log)
+    end
+
+    test "a member's exception is raised in the caller", %{db: db} do
+      Input.set(db, :fan_src, "b", {:raise, "member failed"})
+
+      assert_raise RuntimeError, "member failed", fn ->
+        FanOutQueries.fan_parent(db, ~w(a b))
+      end
+
+      assert Memo.get(db, {:fan_parent, ~w(a b)}) == :miss
+    end
+
+    test "a cycle through a member is detected", %{db: db} do
+      Input.set(db, :fan_src, "b", {:cycle, ~w(a b)})
+
+      assert_raise Roux.Cycle.Error, fn -> FanOutQueries.fan_parent(db, ~w(a b)) end
+    end
+
+    test "killing the caller takes its members down", %{db: db} do
+      hold_members(db)
+      caller = spawn(fn -> FanOutQueries.fan_parent(db, ~w(a b)) end)
+
+      members =
+        for _ <- 1..2 do
+          assert_receive {:member_started, _key, pid}, 5_000
+          Process.monitor(pid)
+          pid
+        end
+
+      Process.exit(caller, :kill)
+
+      for pid <- members do
+        assert_receive {:DOWN, _, :process, ^pid, _reason}, 5_000
+      end
+    end
+
+    test "a caller trapping exits gets no exit message from its members", %{db: db} do
+      parent = self()
+
+      spawn(fn ->
+        Process.flag(:trap_exit, true)
+        result = FanOutQueries.fan_parent(db, ~w(a b c))
+
+        receive do
+          {:EXIT, _pid, _reason} = exit -> send(parent, {:exit_message, exit})
+        after
+          100 -> send(parent, {:done, result})
+        end
+      end)
+
+      assert_receive {:done, {:parent, [member: 1, member: 1, member: 1]}}, 5_000
+    end
+
+    test "a member killed from outside takes its caller down", %{db: db} do
+      hold_members(db)
+      {caller, monitor} = spawn_monitor(fn -> FanOutQueries.fan_parent(db, ~w(a)) end)
+      assert_receive {:member_started, "a", member}, 5_000
+      Process.exit(member, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
+    end
+
+    test "a GC sweep keeps a group whose members are there, and not one missing one",
+         %{db: db} do
+      FanOutQueries.fan_parent(db, ~w(a b))
+      Roux.GC.sweep(db)
+      assert {:ok, _} = Memo.get(db, {:fan_parent, ~w(a b)})
+
+      Memo.delete(db, {:fan_member, "b"})
+      Roux.GC.sweep(db)
+      assert Memo.get(db, {:fan_parent, ~w(a b)}) == :miss
     end
   end
 

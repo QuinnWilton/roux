@@ -177,6 +177,23 @@ defmodule Roux.Validation do
     end
   end
 
+  # A fan-out (`Roux.Runtime.parallel/3`): `ensure_fn` brings every
+  # member up to date at once, then each is checked for a change.
+  defp check_deps(
+         db,
+         [{:parallel, _max, members} = group | rest],
+         verified_at,
+         ensure_fn,
+         durability
+       ) do
+    ensure_fn.(db, group)
+
+    case members_state(db, members, verified_at, durability) do
+      {:clean, durability} -> check_deps(db, rest, verified_at, ensure_fn, durability)
+      :stale -> :stale
+    end
+  end
+
   defp check_deps(db, [dep | rest], verified_at, ensure_fn, durability) do
     ensure_fn.(db, dep)
 
@@ -193,6 +210,21 @@ defmodule Roux.Validation do
         check_deps(db, rest, verified_at, ensure_fn, min_durability(durability, dep_durability))
 
       # Dependency removed after ensure_fn — treat as stale.
+      :miss ->
+        :stale
+    end
+  end
+
+  defp members_state(_db, [], _verified_at, durability), do: {:clean, durability}
+
+  defp members_state(db, [member | rest], verified_at, durability) do
+    case Memo.dep_state(db, member) do
+      {:ok, changed_at, _durability} when changed_at > verified_at ->
+        :stale
+
+      {:ok, _changed_at, member_durability} ->
+        members_state(db, rest, verified_at, min_durability(durability, member_durability))
+
       :miss ->
         :stale
     end

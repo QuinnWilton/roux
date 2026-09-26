@@ -20,7 +20,12 @@ defmodule Mix.Tasks.Concuerror do
     * `--interleaving-bound` — bound on interleavings explored (default: unbounded)
     * `--treat-as-normal` — exit reasons to treat as normal (can be repeated)
 
-  Each test module must export a 0-arity `test/0` function.
+  Each test module must export a 0-arity `test/0` function, and may
+  export `concuerror_options/0` returning `treat_as_normal:` (exit
+  reasons), `depth_bound:` (events per interleaving, when a scenario
+  needs more than Concuerror's default of 500), and `scheduling_bound:`
+  with `dpor: :source` (at most that many preemptions per interleaving,
+  for a scenario too large to explore whole).
   """
 
   use Mix.Task
@@ -77,8 +82,10 @@ defmodule Mix.Tasks.Concuerror do
         {:verbosity, 1}
       ] ++
         Enum.map(pa_paths, &{:pa, to_charlist(&1)}) ++
-        dpor_opts(opts) ++
+        dpor_opts(opts, module_opts) ++
         bound_opts(opts) ++
+        depth_bound_opts(module_opts) ++
+        scheduling_bound_opts(module_opts) ++
         treat_as_normal_opts(opts, module_opts)
 
     # :concuerror.run/1 returns :ok | :error | :fail.
@@ -99,9 +106,9 @@ defmodule Mix.Tasks.Concuerror do
     end
   end
 
-  defp dpor_opts(opts) do
-    case opts[:dpor] do
-      "source" -> [{:dpor, :source}]
+  defp dpor_opts(opts, module_opts) do
+    case opts[:dpor] || Keyword.get(module_opts, :dpor) do
+      source when source in ["source", :source] -> [{:dpor, :source}]
       _ -> [{:dpor, :optimal}]
     end
   end
@@ -110,6 +117,30 @@ defmodule Mix.Tasks.Concuerror do
     case opts[:interleaving_bound] do
       nil -> []
       n -> [{:interleaving_bound, n}]
+    end
+  end
+
+  # A scenario longer than Concuerror's default 500 events names its own
+  # bound (`concuerror_options/0`).
+  defp depth_bound_opts(module_opts) do
+    case Keyword.get(module_opts, :depth_bound) do
+      nil -> []
+      n when is_integer(n) and n > 0 -> [{:depth_bound, n}]
+    end
+  end
+
+  # A scenario whose unbounded exploration is beyond a CI job explores
+  # every interleaving with at most `scheduling_bound:` preemptions
+  # (`scheduling_bound_type: :delay`, which needs `dpor: :source`): most
+  # races need only one or two.
+  defp scheduling_bound_opts(module_opts) do
+    case Keyword.get(module_opts, :scheduling_bound) do
+      nil ->
+        []
+
+      n when is_integer(n) and n >= 0 ->
+        type = Keyword.get(module_opts, :scheduling_bound_type, :delay)
+        [{:scheduling_bound_type, type}, {:scheduling_bound, n}]
     end
   end
 

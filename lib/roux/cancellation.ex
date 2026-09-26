@@ -179,6 +179,9 @@ defmodule Roux.Cancellation do
   defp depends_on?(_db, {:input_absent, name, key}, {:input, name, key}, _visited), do: true
   defp depends_on?(_db, {:input_absent, _name, _key}, _target_key, _visited), do: false
 
+  defp depends_on?(db, {:parallel, _max, members}, target_key, visited),
+    do: Enum.any?(members, &depends_on?(db, &1, target_key, visited))
+
   defp depends_on?(db, query_key, target_key, visited) do
     if is_map_key(visited, query_key) do
       false

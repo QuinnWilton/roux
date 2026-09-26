@@ -272,32 +272,117 @@ defmodule Roux.Runtime do
   end
 
   @doc """
-  Executes multiple independent queries concurrently.
+  Demands independent queries concurrently, and returns their values in
+  the order given.
 
-  Spawns a task per query, collects results, and merges all recorded
-  dependencies, created entities, and durability levels back into the
-  parent context. Returns results in the same order as the input list.
+  Inside a query body, the enclosing query records the whole fan-out as
+  ONE dependency, `{:parallel, max_concurrency, keys}`, and validation
+  brings its members up to date concurrently too, then checks each for
+  a change — where a dependency per member would validate them one by
+  one, re-executing stale ones in turn. The members run in tasks linked
+  to the caller, so cancelling the caller (`Roux.Cancellation`) takes
+  them down with it; they carry the caller's query stack, so a cycle
+  through them is detected. What a member raises is raised again here.
+
+  ## Options
+
+    * `:max_concurrency` — how many members run at once (default
+      `System.schedulers_online/0`), for execution and validation alike;
+    * `:timeout` — how long to wait for each member, `:infinity` by
+      default: a member's own work bounds itself.
   """
-  @spec parallel(Database.t(), [{atom(), term()}]) :: [term()]
-  def parallel(%Database{} = db, queries) when is_list(queries) do
+  @spec parallel(Database.t(), [{atom(), term()}], keyword()) :: [term()]
+  def parallel(%Database{} = db, queries, opts \\ []) when is_list(queries) do
+    opts = Keyword.validate!(opts, [:max_concurrency, timeout: :infinity])
+
+    max_concurrency = Keyword.get_lazy(opts, :max_concurrency, &System.schedulers_online/0)
     parent_ctx = get_context()
     parent_stack = if parent_ctx, do: parent_ctx.query_stack, else: []
 
-    tasks =
-      Enum.map(queries, fn {query_name, key} ->
-        Task.async(fn ->
-          ctx = %Context{db: db, query_stack: parent_stack}
-          put_context(ctx)
-
-          value = query(db, query_name, key)
-          final_ctx = get_context()
-
-          {value, final_ctx.recorded_deps, final_ctx.created_entities, final_ctx.min_durability}
-        end)
+    results =
+      fan_out(queries, max_concurrency, Keyword.fetch!(opts, :timeout), fn {query_name, key} ->
+        put_context(%Context{db: db, query_stack: parent_stack})
+        value = query(db, query_name, key)
+        final_ctx = get_context()
+        {value, final_ctx.created_entities, final_ctx.min_durability}
       end)
 
-    results = Task.await_many(tasks)
-    merge_parallel_results(results, parent_ctx)
+    merge_parallel_results(results, parent_ctx, {:parallel, max_concurrency, queries})
+  end
+
+  # Runs `fun` over `items` in processes linked to the caller, at most
+  # `max_concurrency` at a time, and returns the results in order. What a
+  # worker raises is caught there and raised again here, so a failure is
+  # the caller's to rescue, as it would be run inline.
+  #
+  # Not `Task.async_stream/3`: its monitor process and per-task
+  # bookkeeping put hundreds of scheduling points into every fan-out,
+  # beyond what Concuerror can explore of a group validation. And a
+  # worker here unlinks itself before it exits normally, so a caller that
+  # traps exits (an LSP server) gets no `:EXIT` message per member. A
+  # worker killed from outside (`Roux.Cancellation`) takes the caller
+  # down, as the link would: its monitor says so.
+  defp fan_out(items, max_concurrency, timeout, fun) do
+    caller = self()
+    ref = make_ref()
+    {now, later} = items |> Enum.with_index() |> Enum.split(max_concurrency)
+    running = Map.new(now, &start_worker(&1, caller, ref, fun))
+    results = await_workers(running, later, %{}, {caller, ref, fun, timeout})
+
+    for index <- 0..(length(items) - 1)//1 do
+      case Map.fetch!(results, index) do
+        {:ok, result} -> result
+        {:raised, kind, reason, stacktrace} -> :erlang.raise(kind, reason, stacktrace)
+      end
+    end
+  end
+
+  defp start_worker({item, index}, caller, ref, fun) do
+    {_pid, monitor} =
+      :erlang.spawn_opt(
+        fn ->
+          result =
+            try do
+              {:ok, fun.(item)}
+            catch
+              kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+            end
+
+          Process.unlink(caller)
+          send(caller, {ref, index, result})
+        end,
+        [:link, :monitor]
+      )
+
+    {monitor, index}
+  end
+
+  defp await_workers(running, [], results, _job) when map_size(running) == 0, do: results
+
+  defp await_workers(running, later, results, {caller, ref, fun, timeout} = job) do
+    receive do
+      {^ref, index, result} ->
+        {monitor, _} = Enum.find(running, fn {_monitor, i} -> i == index end)
+        Process.demonitor(monitor, [:flush])
+        running = Map.delete(running, monitor)
+
+        {running, later} =
+          case later do
+            [next | rest] ->
+              {worker, i} = start_worker(next, caller, ref, fun)
+              {Map.put(running, worker, i), rest}
+
+            [] ->
+              {running, []}
+          end
+
+        await_workers(running, later, Map.put(results, index, result), job)
+
+      {:DOWN, monitor, :process, _pid, reason} when is_map_key(running, monitor) ->
+        exit(reason)
+    after
+      timeout -> exit(:timeout)
+    end
   end
 
   @doc """
@@ -388,6 +473,24 @@ defmodule Roux.Runtime do
   end
 
   # -- Private: ensure_up_to_date callback for Validation (D13) --
+
+  # A fan-out's members are brought up to date as they were demanded:
+  # concurrently, with the stack of whoever is validating.
+  defp ensure_up_to_date(db, {:parallel, max_concurrency, members}) do
+    stack =
+      case get_context() do
+        nil -> []
+        ctx -> ctx.query_stack
+      end
+
+    _ =
+      fan_out(members, max_concurrency, :infinity, fn member ->
+        put_context(%Context{db: db, query_stack: stack})
+        ensure_up_to_date(db, member)
+      end)
+
+    :ok
+  end
 
   defp ensure_up_to_date(db, query_key) do
     case Validation.validate(db, query_key, &ensure_up_to_date/2) do
@@ -834,22 +937,27 @@ defmodule Roux.Runtime do
 
   # -- Private: parallel merging --
 
-  defp merge_parallel_results(results, nil) do
-    Enum.map(results, fn {value, _deps, _entities, _dur} -> value end)
+  defp merge_parallel_results(results, nil, _group) do
+    Enum.map(results, fn {value, _entities, _dur} -> value end)
   end
 
-  defp merge_parallel_results(results, parent_ctx) do
+  defp merge_parallel_results(results, parent_ctx, {:parallel, _, members} = group) do
     {values, merged_ctx} =
-      Enum.reduce(results, {[], parent_ctx}, fn {value, deps, entities, dur}, {vals, ctx} ->
+      Enum.reduce(results, {[], parent_ctx}, fn {value, entities, dur}, {vals, ctx} ->
         ctx = %{
           ctx
-          | recorded_deps: Enum.reverse(deps) ++ ctx.recorded_deps,
-            created_entities: entities ++ ctx.created_entities,
+          | created_entities: entities ++ ctx.created_entities,
             min_durability: min_durability(ctx.min_durability, dur)
         }
 
         {[value | vals], ctx}
       end)
+
+    # One edge for the whole fan-out. What the members' tasks recorded
+    # besides their own keys (dependencies their validation walked) is
+    # theirs, and their entries hold it.
+    merged_ctx =
+      if members == [], do: merged_ctx, else: record_dependency(merged_ctx, group)
 
     put_context(merged_ctx)
     Enum.reverse(values)
