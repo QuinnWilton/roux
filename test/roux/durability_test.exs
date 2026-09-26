@@ -27,7 +27,7 @@ defmodule Roux.DurabilityTest do
     %{db: db}
   end
 
-  defp register_input(db, name, opts \\ []) do
+  defp register_input(db, name, opts) do
     Input.register(db, Input.define(name, opts))
   end
 

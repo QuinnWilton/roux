@@ -505,7 +505,7 @@ defmodule Roux.Runtime do
   Pure function that returns an updated context. Called internally
   by `query/3` and `input/3` via the process-dictionary helper.
   """
-  @spec record_dependency(Context.t(), Memo.query_key()) :: Context.t()
+  @spec record_dependency(Context.t(), Memo.dependency()) :: Context.t()
   def record_dependency(%Context{} = ctx, query_key) do
     %{ctx | recorded_deps: [query_key | ctx.recorded_deps]}
   end

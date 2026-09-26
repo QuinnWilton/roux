@@ -3,8 +3,7 @@ defmodule Roux.QueryTest do
 
   alias Roux.Database
   alias Roux.Query.Definition
-  alias Roux.Test.EmptyQueries
-  alias Roux.Test.SampleQueries
+  alias Roux.Test.{AroundQueries, EmptyQueries, PersistQueries, SampleQueries, VersionedQueries}
 
   # Ensure fixture modules are loaded before function_exported? checks.
   Code.ensure_loaded!(Roux.Test.SampleQueries)
@@ -203,7 +202,7 @@ defmodule Roux.QueryTest do
 
     test "a module's code versions its queries; `code:` and `version:` tell them apart",
          %{db: db} do
-      :ok = Roux.Lang.register_module(db, Roux.Test.VersionedQueries)
+      :ok = Roux.Lang.register_module(db, VersionedQueries)
       len = version(db, :versioned_len)
       rooted = version(db, :versioned_rooted)
       bumped = version(db, :versioned_bumped)
@@ -213,7 +212,7 @@ defmodule Roux.QueryTest do
 
       # Registered again, the same: computed once per VM, and stable.
       other = Database.new()
-      :ok = Roux.Lang.register_module(other, Roux.Test.VersionedQueries)
+      :ok = Roux.Lang.register_module(other, VersionedQueries)
       assert version(other, :versioned_len) == len
       Database.shutdown(other)
     end
@@ -225,11 +224,11 @@ defmodule Roux.QueryTest do
     end
 
     test "the version is the module's code, excluded modules walked through" do
-      %{code: code, queries: queries} = Roux.Test.VersionedQueries.__roux_queries__()
+      %{code: code, queries: queries} = VersionedQueries.__roux_queries__()
       assert code == [exclude: [Roux.Test.VersionedHelper]]
       len = Enum.find(queries, &(&1.name == :versioned_len))
 
-      {:ok, digest} = Roux.Code.digest([Roux.Test.VersionedQueries], code)
+      {:ok, digest} = Roux.Code.digest([VersionedQueries], code)
 
       assert Roux.Query.code_version(len, code) ==
                :crypto.hash(:sha256, :erlang.term_to_binary({digest, nil}, [:deterministic]))
@@ -239,10 +238,10 @@ defmodule Roux.QueryTest do
     end
 
     test "a body reads its own version, stored with its entry", %{db: db} do
-      :ok = Roux.Lang.register_module(db, Roux.Test.VersionedQueries)
+      :ok = Roux.Lang.register_module(db, VersionedQueries)
       Roux.Input.set(db, :vsrc, "a", "abc")
 
-      assert {3, version} = Roux.Test.VersionedQueries.versioned_len(db, "a")
+      assert {3, version} = VersionedQueries.versioned_len(db, "a")
       assert version == version(db, :versioned_len)
       assert {:ok, %{code_version: ^version}} = Roux.Memo.get(db, {:versioned_len, "a"})
 
@@ -251,18 +250,18 @@ defmodule Roux.QueryTest do
 
     test "registering a query again under another version makes its entries stale",
          %{db: db} do
-      :ok = Roux.Lang.register_module(db, Roux.Test.VersionedQueries)
+      :ok = Roux.Lang.register_module(db, VersionedQueries)
       Roux.Input.set(db, :vsrc, "a", "abc")
-      {3, _} = Roux.Test.VersionedQueries.versioned_len(db, "a")
+      {3, _} = VersionedQueries.versioned_len(db, "a")
       log = Roux.QueryLog.start(db)
 
       Database.register_query(db, :versioned_len, %{
-        module: Roux.Test.VersionedQueries,
+        module: VersionedQueries,
         function: :versioned_len,
         code_version: "another"
       })
 
-      assert {3, "another"} = Roux.Test.VersionedQueries.versioned_len(db, "a")
+      assert {3, "another"} = VersionedQueries.versioned_len(db, "a")
       assert Roux.QueryLog.executions(log, :versioned_len) == ["a"]
       Roux.QueryLog.stop(log)
     end
@@ -272,15 +271,15 @@ defmodule Roux.QueryTest do
 
   describe "store: and transient:" do
     test "are recorded in the definition, the predicate as a function of the module" do
-      %{queries: queries} = Roux.Test.PersistQueries.__roux_queries__()
+      %{queries: queries} = PersistQueries.__roux_queries__()
       by_name = Map.new(queries, &{&1.name, &1})
 
       assert by_name.p_none.store == :none
       assert by_name.p_blob.store == :blob
       assert by_name.p_reader.store == :inline
-      assert {Roux.Test.PersistQueries, fun} = by_name.p_fact.transient
-      assert apply(Roux.Test.PersistQueries, fun, [{:error, :lost}])
-      refute apply(Roux.Test.PersistQueries, fun, [{:ok, 1}])
+      assert {PersistQueries, fun} = by_name.p_fact.transient
+      assert apply(PersistQueries, fun, [{:error, :lost}])
+      refute apply(PersistQueries, fun, [{:ok, 1}])
     end
 
     test "an unknown store is a compile error" do
@@ -302,26 +301,26 @@ defmodule Roux.QueryTest do
   describe "around:" do
     setup do
       db = Database.new()
-      :ok = Roux.Lang.register_module(db, Roux.Test.AroundQueries)
+      :ok = Roux.Lang.register_module(db, AroundQueries)
       on_exit(fn -> quietly(fn -> Database.shutdown(db) end) end)
       %{db: db}
     end
 
     test "wraps every body, and what the hook reads is the query's dependency", %{db: db} do
       Roux.Input.set(db, :around_src, "a", 1)
-      assert Roux.Test.AroundQueries.wrapped(db, "a") == {:wrapped, 0, {:body, 1}}
+      assert AroundQueries.wrapped(db, "a") == {:wrapped, 0, {:body, 1}}
 
       {:ok, entry} = Roux.Memo.get(db, {:wrapped, "a"})
       assert {:input_absent, :around_extra, "a"} in entry.dependencies
       assert {:input, :around_src, "a"} in entry.dependencies
 
       Roux.Input.set(db, :around_extra, "a", 5)
-      assert Roux.Test.AroundQueries.wrapped(db, "a") == {:wrapped, 5, {:body, 1}}
+      assert AroundQueries.wrapped(db, "a") == {:wrapped, 5, {:body, 1}}
     end
 
     test "sees the body's short-circuited error as its value", %{db: db} do
       assert {:wrapped, 0, {:error, {:input_not_set, :around_src, "b"}}} =
-               Roux.Test.AroundQueries.wrapped(db, "b")
+               AroundQueries.wrapped(db, "b")
     end
   end
 

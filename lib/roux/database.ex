@@ -19,8 +19,8 @@ defmodule Roux.Database do
 
   """
 
-  alias Roux.Database.{Supervisor, TableOwner}
   alias Roux.{Blob, Intern, Revision}
+  alias Roux.Database.{Supervisor, TableOwner}
 
   @type t :: %__MODULE__{
           memo_table: :ets.tid(),

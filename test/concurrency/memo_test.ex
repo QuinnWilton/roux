@@ -59,7 +59,7 @@ defmodule Roux.Concurrency.MemoPutUpdateVerifiedRaceTest do
     receive(do: (:put_done -> :ok))
     receive(do: (:update_done -> :ok))
 
-    {:ok, final} = Memo.get(db, key)
+    {:ok, %Entry{} = final} = Memo.get(db, key)
 
     # The entry must be one of these well-formed states:
     # 1. old entry with verified_at bumped to 10 (update_verified, then put lost)
@@ -283,7 +283,7 @@ defmodule Roux.Concurrency.MemoDoubleValidateTest do
     receive(do: (:v1_done -> :ok))
     receive(do: (:v2_done -> :ok))
 
-    {:ok, final} = Memo.get(db, key)
+    {:ok, %Entry{} = final} = Memo.get(db, key)
 
     # verified_at must be one of the two update values.
     true = final.verified_at in [10, 20]

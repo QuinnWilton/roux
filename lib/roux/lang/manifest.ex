@@ -314,7 +314,7 @@ defmodule Roux.Lang.Manifest do
       db,
       fn key, durability, persist ->
         persist in [:inline, :blob] and persist?(key, durability) and
-          not MapSet.member?(excluded, key)
+          not Map.has_key?(excluded, key)
       end,
       hold_fun(store)
     )
@@ -350,7 +350,7 @@ defmodule Roux.Lang.Manifest do
   defp transient_closure(db) do
     case Memo.keys_persisted_as(db, :transient) do
       [] ->
-        MapSet.new()
+        %{}
 
       roots ->
         readers =
@@ -364,7 +364,7 @@ defmodule Roux.Lang.Manifest do
             end)
           end)
 
-        spread(roots, readers, MapSet.new())
+        spread(roots, readers, %{})
     end
   end
 
@@ -377,9 +377,9 @@ defmodule Roux.Lang.Manifest do
   defp spread([], _readers, seen), do: seen
 
   defp spread([key | rest], readers, seen) do
-    if MapSet.member?(seen, key),
+    if Map.has_key?(seen, key),
       do: spread(rest, readers, seen),
-      else: spread(Map.get(readers, key, []) ++ rest, readers, MapSet.put(seen, key))
+      else: spread(Map.get(readers, key, []) ++ rest, readers, Map.put(seen, key, true))
   end
 
   # Dumps entity table data as `[{module, rows}]`.

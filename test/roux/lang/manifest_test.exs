@@ -3,9 +3,10 @@ defmodule Roux.Lang.ManifestTest do
 
   use ExUnitProperties
 
-  alias Roux.{Database, Input, Intern, Memo, Revision, Runtime}
+  alias Roux.{Blob, Database, Input, Intern, Memo, Revision, Runtime}
   alias Roux.Lang.Manifest
   alias Roux.Memo.Entry
+  alias Roux.Test.PersistQueries
 
   @moduletag :tmp_dir
 
@@ -537,14 +538,14 @@ defmodule Roux.Lang.ManifestTest do
     test "keeps no entry its query keeps nowhere, no transient one, and none that read one",
          %{db: db, tmp_dir: tmp_dir} do
       path = Path.join(tmp_dir, "compile.roux")
-      :ok = Roux.Lang.register_module(db, Roux.Test.PersistQueries)
+      :ok = Roux.Lang.register_module(db, PersistQueries)
       Input.set(db, :psrc, "kept", 1)
       Input.set(db, :psrc, "gone", :lost)
 
       for key <- ["kept", "gone"] do
-        Roux.Test.PersistQueries.p_top(db, key)
-        Roux.Test.PersistQueries.p_none(db, key)
-        Roux.Test.PersistQueries.p_blob(db, key)
+        PersistQueries.p_top(db, key)
+        PersistQueries.p_none(db, key)
+        PersistQueries.p_blob(db, key)
       end
 
       assert {:ok, %Entry{persist: :transient}} = Memo.get(db, {:p_fact, "gone"})
@@ -569,8 +570,8 @@ defmodule Roux.Lang.ManifestTest do
         :ok = Roux.Lang.register_module(db2, Roux.Test.PersistQueries)
         :ok = Manifest.restore(db2, data)
         log = Roux.QueryLog.start(db2)
-        Roux.Test.PersistQueries.p_top(db2, "gone")
-        Roux.Test.PersistQueries.p_top(db2, "kept")
+        PersistQueries.p_top(db2, "gone")
+        PersistQueries.p_top(db2, "kept")
         assert Roux.QueryLog.executions(log, :p_fact) == ["gone"]
         assert Roux.QueryLog.executions(log, :p_top) == ["gone"]
         Roux.QueryLog.stop(log)
@@ -630,9 +631,6 @@ defmodule Roux.Lang.ManifestTest do
   # -- values held by digest --
 
   describe "values held by digest" do
-    alias Roux.Blob
-    alias Roux.Test.PersistQueries
-
     setup %{tmp_dir: tmp_dir} do
       store = Blob.open!(Path.join(tmp_dir, "store"))
       db = Database.new(blob: store)
@@ -789,8 +787,6 @@ defmodule Roux.Lang.ManifestTest do
   end
 
   describe "held blobs and code versions" do
-    alias Roux.Blob
-
     test "an entry's held digests are kept alive, and its code version with it",
          %{db: _db, tmp_dir: tmp_dir} do
       store = Blob.open!(Path.join(tmp_dir, "store"))
