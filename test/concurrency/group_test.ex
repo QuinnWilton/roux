@@ -12,8 +12,8 @@ defmodule Roux.Concurrency.GroupValidationTest do
   stale member must hold it, and no claim may be left behind.
   """
 
-  alias Roux.Test.GroupFixture
   alias Roux.{Memo, Runtime}
+  alias Roux.Test.GroupFixture
 
   def concuerror_options do
     [treat_as_normal: [:shutdown], depth_bound: 5_000]
@@ -49,9 +49,8 @@ defmodule Roux.Concurrency.GroupMemberRaceTest do
   are more interleavings than a CI job can explore.)
   """
 
-  alias Roux.Test.GroupFixture
   alias Roux.{Memo, Runtime}
-  alias Roux.Test.RuntimeTestQueries
+  alias Roux.Test.{GroupFixture, RuntimeTestQueries}
 
   # Four processes touching one key: explored with up to four
   # preemptions each, the whole state space being too large for a CI job.
@@ -90,8 +89,8 @@ defmodule Roux.Concurrency.GroupValidatorsTest do
   claim may be left behind.
   """
 
-  alias Roux.Test.GroupFixture
   alias Roux.{Memo, Runtime}
+  alias Roux.Test.GroupFixture
 
   # Six processes: explored with up to two preemptions each.
   def concuerror_options do
