@@ -58,20 +58,27 @@ defmodule Roux.TelemetryTest do
 
   # -- Query lifecycle --
 
-  describe "query_start/3" do
+  describe "query_start/4" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :query, :start], ctx.test_pid)
-      Telemetry.query_start(:parse, "foo.ex", 5)
-      assert_event([:roux, :query, :start], [:system_time], [:query_name, :key, :revision])
+      Telemetry.query_start(:db, :parse, "foo.ex", 5)
+
+      assert_event([:roux, :query, :start], [:system_time], [
+        :database,
+        :query_name,
+        :key,
+        :revision
+      ])
     end
   end
 
-  describe "query_stop/5" do
+  describe "query_stop/6" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :query, :stop], ctx.test_pid)
-      Telemetry.query_stop(:parse, "foo.ex", 5, 1234, <<1, 2, 3>>)
+      Telemetry.query_stop(:db, :parse, "foo.ex", 5, 1234, <<1, 2, 3>>)
 
       assert_event([:roux, :query, :stop], [:duration], [
+        :database,
         :query_name,
         :key,
         :revision,
@@ -80,12 +87,13 @@ defmodule Roux.TelemetryTest do
     end
   end
 
-  describe "query_exception/6" do
+  describe "query_exception/7" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :query, :exception], ctx.test_pid)
-      Telemetry.query_exception(:parse, "foo.ex", 5, 1234, :error, :badarg)
+      Telemetry.query_exception(:db, :parse, "foo.ex", 5, 1234, :error, :badarg)
 
       assert_event([:roux, :query, :exception], [:duration], [
+        :database,
         :query_name,
         :key,
         :revision,
@@ -97,13 +105,14 @@ defmodule Roux.TelemetryTest do
 
   # -- Cache operations --
 
-  describe "cache_hit/5" do
+  describe "cache_hit/6" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :cache, :hit], ctx.test_pid)
-      Telemetry.cache_hit(:parse, "foo.ex", 5, 3, 4)
+      Telemetry.cache_hit(:db, :parse, "foo.ex", 5, 3, 4)
 
       {_measurements, metadata} =
         assert_event([:roux, :cache, :hit], [], [
+          :database,
           :query_name,
           :key,
           :revision,
@@ -116,40 +125,53 @@ defmodule Roux.TelemetryTest do
     end
   end
 
-  describe "cache_miss/3" do
+  describe "cache_miss/4" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :cache, :miss], ctx.test_pid)
-      Telemetry.cache_miss(:parse, "foo.ex", 5)
-      assert_event([:roux, :cache, :miss], [], [:query_name, :key, :revision])
+      Telemetry.cache_miss(:db, :parse, "foo.ex", 5)
+      assert_event([:roux, :cache, :miss], [], [:database, :query_name, :key, :revision])
     end
   end
 
-  describe "early_cutoff/4" do
+  describe "early_cutoff/5" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :cache, :early_cutoff], ctx.test_pid)
-      Telemetry.early_cutoff(:parse, "foo.ex", 5, 3)
+      Telemetry.early_cutoff(:db, :parse, "foo.ex", 5, 3)
 
-      assert_event([:roux, :cache, :early_cutoff], [], [:query_name, :key, :revision, :changed_at])
+      assert_event([:roux, :cache, :early_cutoff], [], [
+        :database,
+        :query_name,
+        :key,
+        :revision,
+        :changed_at
+      ])
     end
   end
 
   # -- Validation --
 
-  describe "validation_start/3" do
+  describe "validation_start/4" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :validation, :start], ctx.test_pid)
-      Telemetry.validation_start(:parse, "foo.ex", 5)
-      assert_event([:roux, :validation, :start], [:system_time], [:query_name, :key, :revision])
+      Telemetry.validation_start(:db, :parse, "foo.ex", 5)
+
+      assert_event([:roux, :validation, :start], [:system_time], [
+        :database,
+        :query_name,
+        :key,
+        :revision
+      ])
     end
   end
 
-  describe "validation_stop/5" do
+  describe "validation_stop/6" do
     test "emits with correct shape for :valid", ctx do
       attach(ctx.handler_id, [:roux, :validation, :stop], ctx.test_pid)
-      Telemetry.validation_stop(:parse, "foo.ex", 5, 1234, :valid)
+      Telemetry.validation_stop(:db, :parse, "foo.ex", 5, 1234, :valid)
 
       {_measurements, metadata} =
         assert_event([:roux, :validation, :stop], [:duration], [
+          :database,
           :query_name,
           :key,
           :revision,
@@ -161,10 +183,11 @@ defmodule Roux.TelemetryTest do
 
     test "emits with correct shape for :stale", ctx do
       attach(ctx.handler_id, [:roux, :validation, :stop], ctx.test_pid)
-      Telemetry.validation_stop(:parse, "foo.ex", 5, 1234, :stale)
+      Telemetry.validation_stop(:db, :parse, "foo.ex", 5, 1234, :stale)
 
       {_measurements, metadata} =
         assert_event([:roux, :validation, :stop], [:duration], [
+          :database,
           :query_name,
           :key,
           :revision,
@@ -175,12 +198,13 @@ defmodule Roux.TelemetryTest do
     end
   end
 
-  describe "durability_skip/4" do
+  describe "durability_skip/5" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :validation, :durability_skip], ctx.test_pid)
-      Telemetry.durability_skip(:parse, "foo.ex", :high, 5)
+      Telemetry.durability_skip(:db, :parse, "foo.ex", :high, 5)
 
       assert_event([:roux, :validation, :durability_skip], [], [
+        :database,
         :query_name,
         :key,
         :durability,
@@ -191,40 +215,47 @@ defmodule Roux.TelemetryTest do
 
   # -- Other operations --
 
-  describe "input_set/4" do
+  describe "input_set/5" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :input, :set], ctx.test_pid)
-      Telemetry.input_set(:source_text, "foo.ex", 5, :low)
-      assert_event([:roux, :input, :set], [], [:input_name, :key, :revision, :durability])
+      Telemetry.input_set(:db, :source_text, "foo.ex", 5, :low)
+
+      assert_event([:roux, :input, :set], [], [
+        :database,
+        :input_name,
+        :key,
+        :revision,
+        :durability
+      ])
     end
   end
 
-  describe "cycle_detected/3" do
+  describe "cycle_detected/4" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :cycle, :detected], ctx.test_pid)
-      Telemetry.cycle_detected(:parse, "foo.ex", [{:parse, "foo.ex"}, {:resolve, "foo.ex"}])
-      assert_event([:roux, :cycle, :detected], [], [:query_name, :key, :stack])
+      Telemetry.cycle_detected(:db, :parse, "foo.ex", [{:parse, "foo.ex"}, {:resolve, "foo.ex"}])
+      assert_event([:roux, :cycle, :detected], [], [:database, :query_name, :key, :stack])
     end
   end
 
-  describe "cancel_task/3" do
+  describe "cancel_task/4" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :cancel, :task], ctx.test_pid)
-      Telemetry.cancel_task(:parse, "foo.ex", :input_changed)
-      assert_event([:roux, :cancel, :task], [], [:query_name, :key, :reason])
+      Telemetry.cancel_task(:db, :parse, "foo.ex", :input_changed)
+      assert_event([:roux, :cancel, :task], [], [:database, :query_name, :key, :reason])
     end
   end
 
-  describe "gc_sweep/4" do
+  describe "gc_sweep/5" do
     test "emits with correct shape", ctx do
       attach(ctx.handler_id, [:roux, :gc, :sweep], ctx.test_pid)
-      Telemetry.gc_sweep(5000, 42, 3, 10)
+      Telemetry.gc_sweep(:db, 5000, 42, 3, 10)
 
       {measurements, _metadata} =
         assert_event(
           [:roux, :gc, :sweep],
           [:duration, :memo_entries_removed, :entities_removed],
-          [:revision]
+          [:database, :revision]
         )
 
       assert measurements.duration == 5000
@@ -238,6 +269,31 @@ defmodule Roux.TelemetryTest do
       attach(ctx.handler_id, [:roux, :intern, :new], ctx.test_pid)
       Telemetry.intern_new(:identifiers, 1, 24)
       assert_event([:roux, :intern, :new], [], [:table_name, :id, :value_size])
+    end
+  end
+
+  # -- The database --
+
+  describe "the database" do
+    test "an event names the database it happened in", ctx do
+      attach(ctx.handler_id, [:roux, :query, :start], ctx.test_pid)
+      db = Roux.Database.new()
+      other = Roux.Database.new()
+
+      try do
+        # A query name of this test's own: other tests' databases run
+        # queries beside it, and this handler sees theirs too.
+        Roux.Runtime.execute(db, :telemetry_names_database, :k, fn _db, _key -> 1 end)
+
+        assert_received {:telemetry, [:roux, :query, :start], _,
+                         %{query_name: :telemetry_names_database, database: id}}
+
+        assert id == Roux.Database.id(db)
+        assert id != Roux.Database.id(other)
+      after
+        Roux.Database.shutdown(db)
+        Roux.Database.shutdown(other)
+      end
     end
   end
 

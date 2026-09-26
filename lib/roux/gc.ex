@@ -48,7 +48,14 @@ defmodule Roux.GC do
 
     duration_us = System.monotonic_time(:microsecond) - start
     revision = Revision.current(db.revision)
-    Telemetry.gc_sweep(duration_us, memo_entries_removed, entities_removed, revision)
+
+    Telemetry.gc_sweep(
+      Database.id(db),
+      duration_us,
+      memo_entries_removed,
+      entities_removed,
+      revision
+    )
 
     %{
       memo_entries_removed: memo_entries_removed,

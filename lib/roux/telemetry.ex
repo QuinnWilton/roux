@@ -9,6 +9,15 @@ defmodule Roux.Telemetry do
   All events are prefixed with `[:roux, ...]`. Helper functions enforce
   consistent metadata shapes for each event type.
 
+  ## The database
+
+  Every event about a database's queries, inputs or sweeps carries the
+  database it happened in as `database:` metadata (`Roux.Database.id/1`),
+  so a handler can tell apart events of databases running side by side
+  in one VM — concurrent tests, or a compiler and an LSP session.
+  `Roux.QueryLog` filters on it. `[:roux, :intern, :new]` carries none:
+  an intern table belongs to no one database.
+
   ## Event reference
 
   ### Query lifecycle
@@ -39,6 +48,9 @@ defmodule Roux.Telemetry do
   - `[:roux, :intern, :new]` — new value interned
   """
 
+  @typedoc "The database an event happened in: its `Roux.Database.id/1`."
+  @type database :: term()
+
   @doc """
   Wraps `:telemetry.span/3` with the `[:roux | event_prefix]` prefix.
 
@@ -62,9 +74,10 @@ defmodule Roux.Telemetry do
   # -- Query lifecycle --
 
   @doc "Emits `[:roux, :query, :start]`."
-  @spec query_start(atom(), term(), non_neg_integer()) :: :ok
-  def query_start(query_name, key, revision) do
+  @spec query_start(database(), atom(), term(), non_neg_integer()) :: :ok
+  def query_start(database, query_name, key, revision) do
     event([:query, :start], %{system_time: System.system_time()}, %{
+      database: database,
       query_name: query_name,
       key: key,
       revision: revision
@@ -72,9 +85,11 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :query, :stop]`."
-  @spec query_stop(atom(), term(), non_neg_integer(), non_neg_integer(), term()) :: :ok
-  def query_stop(query_name, key, revision, duration, result_hash) do
+  @spec query_stop(database(), atom(), term(), non_neg_integer(), non_neg_integer(), term()) ::
+          :ok
+  def query_stop(database, query_name, key, revision, duration, result_hash) do
     event([:query, :stop], %{duration: duration}, %{
+      database: database,
       query_name: query_name,
       key: key,
       revision: revision,
@@ -83,10 +98,19 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :query, :exception]`."
-  @spec query_exception(atom(), term(), non_neg_integer(), non_neg_integer(), atom(), term()) ::
+  @spec query_exception(
+          database(),
+          atom(),
+          term(),
+          non_neg_integer(),
+          non_neg_integer(),
+          atom(),
+          term()
+        ) ::
           :ok
-  def query_exception(query_name, key, revision, duration, kind, reason) do
+  def query_exception(database, query_name, key, revision, duration, kind, reason) do
     event([:query, :exception], %{duration: duration}, %{
+      database: database,
       query_name: query_name,
       key: key,
       revision: revision,
@@ -98,9 +122,17 @@ defmodule Roux.Telemetry do
   # -- Cache operations --
 
   @doc "Emits `[:roux, :cache, :hit]`."
-  @spec cache_hit(atom(), term(), non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
-  def cache_hit(query_name, key, revision, changed_at, verified_at) do
+  @spec cache_hit(
+          database(),
+          atom(),
+          term(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: :ok
+  def cache_hit(database, query_name, key, revision, changed_at, verified_at) do
     event([:cache, :hit], %{}, %{
+      database: database,
       query_name: query_name,
       key: key,
       revision: revision,
@@ -110,9 +142,10 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :cache, :miss]`."
-  @spec cache_miss(atom(), term(), non_neg_integer()) :: :ok
-  def cache_miss(query_name, key, revision) do
+  @spec cache_miss(database(), atom(), term(), non_neg_integer()) :: :ok
+  def cache_miss(database, query_name, key, revision) do
     event([:cache, :miss], %{}, %{
+      database: database,
       query_name: query_name,
       key: key,
       revision: revision
@@ -120,9 +153,10 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :cache, :early_cutoff]`."
-  @spec early_cutoff(atom(), term(), non_neg_integer(), non_neg_integer()) :: :ok
-  def early_cutoff(query_name, key, revision, changed_at) do
+  @spec early_cutoff(database(), atom(), term(), non_neg_integer(), non_neg_integer()) :: :ok
+  def early_cutoff(database, query_name, key, revision, changed_at) do
     event([:cache, :early_cutoff], %{}, %{
+      database: database,
       query_name: query_name,
       key: key,
       revision: revision,
@@ -133,9 +167,10 @@ defmodule Roux.Telemetry do
   # -- Validation --
 
   @doc "Emits `[:roux, :validation, :start]`."
-  @spec validation_start(atom(), term(), non_neg_integer()) :: :ok
-  def validation_start(query_name, key, revision) do
+  @spec validation_start(database(), atom(), term(), non_neg_integer()) :: :ok
+  def validation_start(database, query_name, key, revision) do
     event([:validation, :start], %{system_time: System.system_time()}, %{
+      database: database,
       query_name: query_name,
       key: key,
       revision: revision
@@ -143,11 +178,19 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :validation, :stop]`."
-  @spec validation_stop(atom(), term(), non_neg_integer(), non_neg_integer(), :valid | :stale) ::
+  @spec validation_stop(
+          database(),
+          atom(),
+          term(),
+          non_neg_integer(),
+          non_neg_integer(),
+          :valid | :stale
+        ) ::
           :ok
-  def validation_stop(query_name, key, revision, duration, result)
+  def validation_stop(database, query_name, key, revision, duration, result)
       when result in [:valid, :stale] do
     event([:validation, :stop], %{duration: duration}, %{
+      database: database,
       query_name: query_name,
       key: key,
       revision: revision,
@@ -156,9 +199,10 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :validation, :durability_skip]`."
-  @spec durability_skip(atom(), term(), atom(), non_neg_integer()) :: :ok
-  def durability_skip(query_name, key, durability, revision) do
+  @spec durability_skip(database(), atom(), term(), atom(), non_neg_integer()) :: :ok
+  def durability_skip(database, query_name, key, durability, revision) do
     event([:validation, :durability_skip], %{}, %{
+      database: database,
       query_name: query_name,
       key: key,
       durability: durability,
@@ -169,9 +213,10 @@ defmodule Roux.Telemetry do
   # -- Other operations --
 
   @doc "Emits `[:roux, :input, :set]`."
-  @spec input_set(atom(), term(), non_neg_integer(), atom()) :: :ok
-  def input_set(input_name, key, revision, durability) do
+  @spec input_set(database(), atom(), term(), non_neg_integer(), atom()) :: :ok
+  def input_set(database, input_name, key, revision, durability) do
     event([:input, :set], %{}, %{
+      database: database,
       input_name: input_name,
       key: key,
       revision: revision,
@@ -180,9 +225,10 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :input, :delete]`."
-  @spec input_delete(atom(), term(), non_neg_integer(), atom()) :: :ok
-  def input_delete(input_name, key, revision, durability) do
+  @spec input_delete(database(), atom(), term(), non_neg_integer(), atom()) :: :ok
+  def input_delete(database, input_name, key, revision, durability) do
     event([:input, :delete], %{}, %{
+      database: database,
       input_name: input_name,
       key: key,
       revision: revision,
@@ -191,9 +237,10 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :cycle, :detected]`."
-  @spec cycle_detected(atom(), term(), [term()]) :: :ok
-  def cycle_detected(query_name, key, stack) do
+  @spec cycle_detected(database(), atom(), term(), [term()]) :: :ok
+  def cycle_detected(database, query_name, key, stack) do
     event([:cycle, :detected], %{}, %{
+      database: database,
       query_name: query_name,
       key: key,
       stack: stack
@@ -201,9 +248,10 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :cancel, :task]`."
-  @spec cancel_task(atom(), term(), term()) :: :ok
-  def cancel_task(query_name, key, reason) do
+  @spec cancel_task(database(), atom(), term(), term()) :: :ok
+  def cancel_task(database, query_name, key, reason) do
     event([:cancel, :task], %{}, %{
+      database: database,
       query_name: query_name,
       key: key,
       reason: reason
@@ -211,9 +259,15 @@ defmodule Roux.Telemetry do
   end
 
   @doc "Emits `[:roux, :gc, :sweep]`."
-  @spec gc_sweep(non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ::
+  @spec gc_sweep(
+          database(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
           :ok
-  def gc_sweep(duration, memo_entries_removed, entities_removed, revision) do
+  def gc_sweep(database, duration, memo_entries_removed, entities_removed, revision) do
     event(
       [:gc, :sweep],
       %{
@@ -221,7 +275,7 @@ defmodule Roux.Telemetry do
         memo_entries_removed: memo_entries_removed,
         entities_removed: entities_removed
       },
-      %{revision: revision}
+      %{database: database, revision: revision}
     )
   end
 

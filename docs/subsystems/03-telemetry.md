@@ -14,6 +14,8 @@ None (uses the `:telemetry` library, which is an OTP dependency).
 
 All events are prefixed with `[:roux, ...]`.
 
+Every event below except `[:roux, :intern, :new]` also carries `database` metadata: the `Roux.Database.id/1` of the database it happened in, so handlers (`Roux.QueryLog`) can tell apart databases running side by side in one VM.
+
 ### Query lifecycle
 
 | Event | Measurements | Metadata |
@@ -62,11 +64,11 @@ All events are prefixed with `[:roux, ...]`.
 Helper functions for each event type to ensure consistent metadata shape:
 
 ```elixir
-@spec query_start(query_name, key, revision) :: :ok
-@spec query_stop(query_name, key, revision, duration, result_hash) :: :ok
-@spec cache_hit(query_name, key, revision, changed_at, verified_at) :: :ok
-@spec cache_miss(query_name, key, revision) :: :ok
-@spec early_cutoff(query_name, key, revision, changed_at) :: :ok
+@spec query_start(database, query_name, key, revision) :: :ok
+@spec query_stop(database, query_name, key, revision, duration, result_hash) :: :ok
+@spec cache_hit(database, query_name, key, revision, changed_at, verified_at) :: :ok
+@spec cache_miss(database, query_name, key, revision) :: :ok
+@spec early_cutoff(database, query_name, key, revision, changed_at) :: :ok
 # ... etc
 ```
 

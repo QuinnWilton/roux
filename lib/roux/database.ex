@@ -91,6 +91,18 @@ defmodule Roux.Database do
     }
   end
 
+  @typedoc "What tells a database apart from the others in the VM; see `id/1`."
+  @type id :: :ets.tid()
+
+  @doc """
+  What tells this database apart from the others in the VM: its memo
+  table, which no other database shares and which a
+  `Roux.Database.TableOwner` restart keeps (see `Roux.Database.Heir`).
+  Telemetry events carry it as `database:` metadata (`Roux.Telemetry`).
+  """
+  @spec id(t()) :: id()
+  def id(%__MODULE__{memo_table: memo}), do: memo
+
   @doc """
   Destroys all ETS tables and stops the supervisor.
 

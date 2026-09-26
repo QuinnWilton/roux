@@ -69,14 +69,32 @@ defmodule Roux.Runtime do
       case Memo.verification_state(db, query_key) do
         {:ok, ^current_rev, _durability} ->
           {changed_at, value} = served_value(db, query_key)
-          Telemetry.cache_hit(query_name, key, current_rev, changed_at, current_rev)
+
+          Telemetry.cache_hit(
+            Database.id(db),
+            query_name,
+            key,
+            current_rev,
+            changed_at,
+            current_rev
+          )
+
           value
 
         {:ok, _verified_at, _durability} ->
           case Validation.validate(db, query_key, &ensure_up_to_date/2) do
             :valid ->
               {changed_at, value} = served_value(db, query_key)
-              Telemetry.cache_hit(query_name, key, current_rev, changed_at, current_rev)
+
+              Telemetry.cache_hit(
+                Database.id(db),
+                query_name,
+                key,
+                current_rev,
+                changed_at,
+                current_rev
+              )
+
               value
 
             :stale ->
@@ -84,7 +102,7 @@ defmodule Roux.Runtime do
           end
 
         :miss ->
-          Telemetry.cache_miss(query_name, key, current_rev)
+          Telemetry.cache_miss(Database.id(db), query_name, key, current_rev)
           compute(db, query_name, key, query_key, current_rev, query_fun, :new)
       end
 
@@ -410,7 +428,7 @@ defmodule Roux.Runtime do
       min_durability: :high
     }
 
-    Telemetry.query_start(query_name, key, current_rev)
+    Telemetry.query_start(Database.id(db), query_name, key, current_rev)
     start_time = System.monotonic_time()
 
     old_ctx = put_context(exec_ctx)
@@ -427,7 +445,7 @@ defmodule Roux.Runtime do
 
       changed_at =
         if unchanged? do
-          Telemetry.early_cutoff(query_name, key, current_rev, prior.changed_at)
+          Telemetry.early_cutoff(Database.id(db), query_name, key, current_rev, prior.changed_at)
           prior.changed_at
         else
           current_rev
@@ -456,13 +474,23 @@ defmodule Roux.Runtime do
       old_entities = if prior, do: prior.output_entities, else: []
       GC.sweep_query(db, query_key, old: old_entities, new: entry.output_entities)
 
-      Telemetry.query_stop(query_name, key, current_rev, duration, hash)
+      Telemetry.query_stop(Database.id(db), query_name, key, current_rev, duration, hash)
 
       value
     rescue
       error ->
         duration = System.monotonic_time() - start_time
-        Telemetry.query_exception(query_name, key, current_rev, duration, :error, error)
+
+        Telemetry.query_exception(
+          Database.id(db),
+          query_name,
+          key,
+          current_rev,
+          duration,
+          :error,
+          error
+        )
+
         reraise error, __STACKTRACE__
     after
       restore_context(old_ctx)

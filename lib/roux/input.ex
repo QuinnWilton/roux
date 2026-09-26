@@ -109,7 +109,7 @@ defmodule Roux.Input do
         }
 
         Memo.put(db, query_key, entry)
-        Telemetry.input_set(input_name, key, new_rev, durability)
+        Telemetry.input_set(Database.id(db), input_name, key, new_rev, durability)
         :ok
     end
   end
@@ -181,7 +181,7 @@ defmodule Roux.Input do
     case :ets.take(table, query_key) do
       [_ | _] ->
         new_rev = Revision.advance(db.revision, durability)
-        Telemetry.input_delete(input_name, key, new_rev, durability)
+        Telemetry.input_delete(Database.id(db), input_name, key, new_rev, durability)
 
       [] ->
         :ok

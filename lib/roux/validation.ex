@@ -49,13 +49,13 @@ defmodule Roux.Validation do
     {query_name, key} = decompose_query_key(query_key)
     current_rev = Revision.current(db.revision)
 
-    Telemetry.validation_start(query_name, key, current_rev)
+    Telemetry.validation_start(Database.id(db), query_name, key, current_rev)
     start_time = System.monotonic_time()
 
     result = do_validate(db, query_key, current_rev, query_name, key, ensure_fn)
 
     duration = System.monotonic_time() - start_time
-    Telemetry.validation_stop(query_name, key, current_rev, duration, result)
+    Telemetry.validation_stop(Database.id(db), query_name, key, current_rev, duration, result)
 
     result
   end
@@ -79,7 +79,7 @@ defmodule Roux.Validation do
         # Case 3: durability skip.
         if Revision.last_changed_at_or_above(db.revision, durability) <= verified_at do
           Memo.update_verified(db, query_key, current_rev)
-          Telemetry.durability_skip(query_name, key, durability, current_rev)
+          Telemetry.durability_skip(Database.id(db), query_name, key, durability, current_rev)
           :valid
         else
           # Case 4: walk dependencies. Only this path needs the dependency

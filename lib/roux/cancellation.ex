@@ -164,7 +164,7 @@ defmodule Roux.Cancellation do
     :ets.delete(db.dedup_waiters, query_key)
 
     {query_name, key} = decompose_query_key(query_key)
-    Telemetry.cancel_task(query_name, key, reason)
+    Telemetry.cancel_task(Database.id(db), query_name, key, reason)
   end
 
   # -- Private: transitive dependency check --
