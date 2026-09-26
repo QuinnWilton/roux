@@ -13,6 +13,10 @@ defmodule Roux.Memo.Entry do
   - `dependencies` — `{query_name, key}` pairs read during the last execution.
   - `durability` — minimum durability level across transitive input deps.
   - `output_entities` — entity instances created by this query.
+  - `code_version` — the code version of the query when it executed
+    (`Roux.Query`'s `code:` and `version:`), or nil for a query without
+    one. An entry whose version is not its query's current one is
+    stale (`Roux.Validation`).
   """
 
   @type t :: %__MODULE__{
@@ -22,7 +26,8 @@ defmodule Roux.Memo.Entry do
           verified_at: Roux.Revision.revision(),
           dependencies: [Roux.Memo.dependency()],
           durability: Roux.Revision.durability(),
-          output_entities: [{module(), term()}]
+          output_entities: [{module(), term()}],
+          code_version: binary() | nil
         }
 
   @enforce_keys [
@@ -41,6 +46,7 @@ defmodule Roux.Memo.Entry do
     :verified_at,
     :dependencies,
     :durability,
-    :output_entities
+    :output_entities,
+    code_version: nil
   ]
 end

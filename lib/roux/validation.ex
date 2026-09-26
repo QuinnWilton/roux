@@ -13,6 +13,10 @@ defmodule Roux.Validation do
 
   1. **No memo** — the query has never been computed. Return `:stale`.
   2. **Already validated** — `verified_at == current_rev`. Return `:valid`.
+  - **Code version** — the entry was computed by another version of its
+    query's code than the registered one (`Roux.Query`). Return
+    `:stale`: it re-executes, and early cutoff keeps its `changed_at`
+    when the value comes back the same.
   3. **Durability skip** — no input at this query's durability level (or
      below) has changed since `verified_at`. Update `verified_at` and
      return `:valid` without walking dependencies.
@@ -76,22 +80,38 @@ defmodule Roux.Validation do
         :valid
 
       {:ok, verified_at, durability} ->
-        # Case 3: durability skip.
-        if Revision.last_changed_at_or_above(db.revision, durability) <= verified_at do
-          Memo.update_verified(db, query_key, current_rev)
-          Telemetry.durability_skip(Database.id(db), query_name, key, durability, current_rev)
-          :valid
-        else
+        cond do
+          # Computed by other code: no input moved, so no durability
+          # check can see it. Before the skip, which would pass it.
+          code_changed?(db, query_key, query_name) ->
+            :stale
+
+          # Case 3: durability skip.
+          Revision.last_changed_at_or_above(db.revision, durability) <= verified_at ->
+            Memo.update_verified(db, query_key, current_rev)
+            Telemetry.durability_skip(Database.id(db), query_name, key, durability, current_rev)
+            :valid
+
           # Case 4: walk dependencies. Only this path needs the dependency
           # list, so it is fetched here rather than alongside the above.
-          case Memo.dependencies(db, query_key) do
-            {:ok, deps} ->
-              walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn)
+          true ->
+            case Memo.dependencies(db, query_key) do
+              {:ok, deps} ->
+                walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn)
 
-            :miss ->
-              :stale
-          end
+              :miss ->
+                :stale
+            end
         end
+    end
+  end
+
+  defp code_changed?(_db, {:input, _input_name, _key}, _query_name), do: false
+
+  defp code_changed?(db, query_key, query_name) do
+    case Memo.code_version(db, query_key) do
+      {:ok, version} -> version != Database.code_version(db, query_name)
+      :miss -> true
     end
   end
 

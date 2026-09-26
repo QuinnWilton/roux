@@ -56,8 +56,10 @@ defmodule Roux.Memo do
 
   # -- ETS tuple layout --
   #
-  # {query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities, encoded}
+  # {query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities, encoded,
   #  pos 1      pos 2  pos 3 pos 4       pos 5        pos 6         pos 7       pos 8            pos 9
+  #  code_version}
+  #  pos 10
   #
   # `encoded` is nil when `value` holds the entry's value, and the value in
   # the external term format when the entry was restored and has not been
@@ -181,6 +183,15 @@ defmodule Roux.Memo do
     end
   end
 
+  @doc "Reads an entry's `code_version` without its value."
+  @spec code_version(Database.t(), query_key()) :: {:ok, binary() | nil} | :miss
+  def code_version(%Database{memo_table: table}, key) do
+    case :ets.lookup_element(table, key, 10, :missing) do
+      :missing -> :miss
+      version -> {:ok, version}
+    end
+  end
+
   @doc "Reads an entry's `durability` without its value."
   @spec durability(Database.t(), query_key()) :: {:ok, Roux.Revision.durability()} | :miss
   def durability(%Database{memo_table: table}, key) do
@@ -231,14 +242,15 @@ defmodule Roux.Memo do
   """
   @spec put_unchanged(Database.t(), query_key(), Entry.t()) :: :ok
   def put_unchanged(%Database{memo_table: table} = db, key, %Entry{} = e) do
-    # Positions 3 to 8; the value (2) and its encoding (9) stay.
+    # Positions 3 to 8 and 10; the value (2) and its encoding (9) stay.
     fields = [
       {3, e.hash},
       {4, e.changed_at},
       {5, e.verified_at},
       {6, e.dependencies},
       {7, e.durability},
-      {8, e.output_entities}
+      {8, e.output_entities},
+      {10, e.code_version}
     ]
 
     if :ets.update_element(table, key, fields), do: :ok, else: put(db, key, e)
@@ -336,7 +348,8 @@ defmodule Roux.Memo do
           [persisted()]
   def persisted(%Database{memo_table: table}, keep?) when is_function(keep?, 2) do
     :ets.foldl(
-      fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded}, acc ->
+      fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded, _code},
+         acc ->
         if keep?.(key, durability) do
           encoded = if is_binary(encoded), do: encoded, else: encode_value(value)
           [{key, hash, changed_at, verified_at, deps, durability, outputs, encoded} | acc]
@@ -362,7 +375,7 @@ defmodule Roux.Memo do
       Enum.map(entries, fn
         {key, hash, changed_at, verified_at, deps, durability, outputs, encoded}
         when is_binary(encoded) ->
-          {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded}
+          {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, nil}
 
         other ->
           raise ArgumentError, "not a persisted memo entry: #{inspect(other, limit: 5)}"
@@ -379,20 +392,23 @@ defmodule Roux.Memo do
   @spec decode_persisted(persisted()) :: {query_key(), Entry.t()}
   def decode_persisted({key, hash, changed_at, verified_at, deps, durability, outputs, encoded})
       when is_binary(encoded) do
-    to_entry_pair({key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded})
+    to_entry_pair(
+      {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, nil}
+    )
   end
 
   # -- Private helpers --
 
   defp to_tuple(key, %Entry{} = e) do
     {key, e.value, e.hash, e.changed_at, e.verified_at, e.dependencies, e.durability,
-     e.output_entities, nil}
+     e.output_entities, nil, e.code_version}
   end
 
   defp to_entry_pair(tuple), do: {elem(tuple, 0), to_entry(tuple)}
 
   defp to_entry(
-         {_key, value, hash, changed_at, verified_at, deps, durability, output_entities, encoded}
+         {_key, value, hash, changed_at, verified_at, deps, durability, output_entities, encoded,
+          code_version}
        ) do
     %Entry{
       value: if(is_binary(encoded), do: decode_value(encoded), else: value),
@@ -401,7 +417,8 @@ defmodule Roux.Memo do
       verified_at: verified_at,
       dependencies: deps,
       durability: durability,
-      output_entities: output_entities
+      output_entities: output_entities,
+      code_version: code_version
     }
   end
 

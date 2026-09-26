@@ -182,15 +182,61 @@ defmodule Roux.Lang.Manifest do
   Populates the revision counter, memo table, entity tables, and intern
   tables from the serialized state, leaving memo values and intern rows
   encoded until they are first used (see "Layout"). The database should
-  be freshly created (via `Database.new/0`) before calling this.
+  be freshly created (via `Database.new/0`), with its queries registered,
+  before calling this:
+
+    * an entry of a query that is not registered is left out: nothing
+      could re-execute it, or tell which code computed it;
+    * an entry computed by another code version than its query's
+      (`Roux.Query`) is restored, and stale: it re-executes when next
+      demanded, keeping its `changed_at` if its value comes back the
+      same. The revision advances at `:high` once when there is any,
+      since no durability check sees a code change.
   """
   @spec restore(Database.t(), manifest_data()) :: :ok
   def restore(%Database{} = db, data) do
     Revision.restore(db.revision, data.revision)
-    :ok = Memo.restore_persisted(db, data.memo_entries)
+    {entries, code_moved?} = registered(db, data.memo_entries)
+    :ok = Memo.restore_persisted(db, entries)
+    if code_moved?, do: Revision.advance(db.revision, :high)
     restore_entity_data(db, data.entity_data)
     restore_intern_data(db, data.intern_data)
     :ok
+  end
+
+  # The entries of registered queries (and of every input), and whether
+  # any of them was computed by another code version than its query's.
+  defp registered(db, entries) do
+    {kept, {_versions, moved?}} =
+      Enum.flat_map_reduce(entries, {%{}, false}, fn
+        {{:input, _, _}, _, _, _, _, _, _, _} = entry, acc ->
+          {[entry], acc}
+
+        {{name, _key}, _, _, _, _, _, _, _} = entry, {versions, moved?} ->
+          {registered, versions} = registration(db, name, versions)
+
+          case registered do
+            {:ok, version} -> {[entry], {versions, moved? or version != nil}}
+            :unregistered -> {[], {versions, moved?}}
+          end
+      end)
+
+    {kept, moved?}
+  end
+
+  defp registration(db, name, versions) do
+    case versions do
+      %{^name => registered} ->
+        {registered, versions}
+
+      %{} ->
+        registered =
+          if Database.query_registered?(db, name),
+            do: {:ok, Database.code_version(db, name)},
+            else: :unregistered
+
+        {registered, Map.put(versions, name, registered)}
+    end
   end
 
   @doc """

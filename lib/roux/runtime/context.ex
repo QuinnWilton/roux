@@ -24,6 +24,8 @@ defmodule Roux.Runtime.Context do
   - `min_durability` — the minimum durability level seen across all inputs
     read transitively. Propagated to the memo entry for the durability
     optimization. Starts at `:high` (identity for min).
+  - `code_version` — the code version of the active query (`Roux.Query`),
+    stored with its entry.
   """
 
   @type t :: %__MODULE__{
@@ -32,7 +34,8 @@ defmodule Roux.Runtime.Context do
           query_stack: [Roux.Memo.query_key()],
           recorded_deps: [Roux.Memo.dependency()],
           created_entities: [{module(), Roux.Entity.entity_id()}],
-          min_durability: Roux.Revision.durability()
+          min_durability: Roux.Revision.durability(),
+          code_version: binary() | nil
         }
 
   @enforce_keys [:db]
@@ -42,7 +45,8 @@ defmodule Roux.Runtime.Context do
     query_stack: [],
     recorded_deps: [],
     created_entities: [],
-    min_durability: :high
+    min_durability: :high,
+    code_version: nil
   ]
 
   @doc """

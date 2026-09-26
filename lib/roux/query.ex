@@ -23,6 +23,53 @@ defmodule Roux.Query do
   `Roux.Runtime.execute/4` for memoization and dependency tracking.
   `definput` records an input definition for bulk registration.
   `defentity` declares an entity type for automatic registration.
+
+  ## Code versions
+
+  A memoized value is a function of what its query read and of the
+  code that computed it. Roux tracks the reads; the code it knows about
+  through a query's *code version*, stored with each entry: an entry
+  computed by another version of its query is stale (`Roux.Validation`),
+  and re-executes — keeping its `changed_at` when it comes back to the
+  same value, so an edit that changes no result recomputes nothing
+  downstream.
+
+      use Roux.Query, code: [exclude: &MyApp.Schema.schema_module?/1]
+
+      defquery :facts, key: module, code: {MyApp.Extractors, :all, []} do
+        ...
+      end
+
+      defquery :render, key: finding, version: 2 do
+        ...
+      end
+
+  `use Roux.Query, code: opts` versions every query of the module by
+  the code its module reaches (`Roux.Code.digest/2`, given `opts`; `true`
+  for none): an edit to any module that code calls moves the version of
+  every query here, and an edit anywhere else moves none. Split queries
+  into modules by what they run to keep each closure tight. A query's
+  own `code:` adds roots its body reaches by dynamic dispatch — a list
+  of modules, or `{m, f, a}` returning one at registration — and turns
+  code versions on for that query alone when the module's are off.
+  `version:` is a term mixed into the version by hand, for a change the
+  code cannot show (a rule file read at runtime, a format).
+
+  Versions are computed when the module is registered
+  (`Roux.Lang.register_module/2`), once per VM for each set of roots. A
+  module compiled in memory has no object code to read: its queries get
+  a version that no other VM shares, so their entries never outlive the
+  VM.
+
+  ## Wrapping bodies
+
+  `use Roux.Query, around: {m, f}` runs every query body of the module
+  inside `m.f(context, body)`, where `context` is
+  `%{db: db, query: name, key: key}` and `body` a zero-arity function
+  returning the body's value; `f` returns what the query returns. It
+  runs inside the query's execution, so what it reads becomes the
+  query's dependencies: a hook that records what the body read some
+  other way and turns it into edges.
   """
 
   alias Roux.Query.Definition
@@ -30,8 +77,21 @@ defmodule Roux.Query do
   @type query_name :: atom()
   @type definition :: Definition.t()
 
+  @typedoc "What `use Roux.Query, code: ...` holds: nil, or the options of `Roux.Code.digest/2`."
+  @type code_options :: [Roux.Code.option()] | nil
+
   @doc false
-  defmacro __using__(_opts) do
+  defmacro __using__(opts) do
+    code =
+      case Keyword.get(opts, :code) do
+        nil -> nil
+        false -> nil
+        true -> []
+        list when is_list(list) -> list
+      end
+
+    around = Keyword.get(opts, :around)
+
     quote do
       import Roux.Query,
         only: [defquery: 2, defquery: 3, definput: 1, definput: 2, defentity: 1]
@@ -39,6 +99,8 @@ defmodule Roux.Query do
       Module.register_attribute(__MODULE__, :roux_queries, accumulate: true)
       Module.register_attribute(__MODULE__, :roux_inputs, accumulate: true)
       Module.register_attribute(__MODULE__, :roux_entities, accumulate: true)
+      @roux_code unquote(code)
+      @roux_around unquote(around)
 
       @before_compile Roux.Query
     end
@@ -55,6 +117,9 @@ defmodule Roux.Query do
 
     * `:key` — (required) the key parameter pattern
     * `:returns` — (optional) return type; generates a `@spec` for the query function
+    * `:code` — (optional) roots of the query's code beyond its module:
+      a list of modules or `{module, function, args}` (see "Code versions")
+    * `:version` — (optional) a term mixed into the query's code version
     * `:do` — the query body block
 
   ## Example
@@ -78,6 +143,8 @@ defmodule Roux.Query do
     {body, opts} = Keyword.pop!(opts, :do)
     {key_pattern, opts} = Keyword.pop!(opts, :key)
     {returns, opts} = Keyword.pop(opts, :returns)
+    {code, opts} = Keyword.pop(opts, :code)
+    {version, opts} = Keyword.pop(opts, :version)
 
     spec_ast =
       if returns do
@@ -91,7 +158,9 @@ defmodule Roux.Query do
         name: unquote(name),
         module: __MODULE__,
         function: unquote(name),
-        opts: unquote(opts)
+        opts: unquote(opts),
+        code: unquote(code),
+        version: unquote(version)
       }
 
       unquote(spec_ast)
@@ -102,14 +171,86 @@ defmodule Roux.Query do
           unquote(name),
           unquote(key_pattern),
           fn var!(db), unquote(key_pattern) ->
-            try do
-              unquote(body)
-            catch
-              :throw, {:roux_query_error, reason} -> {:error, reason}
-            end
+            Roux.Query.__run__(
+              @roux_around,
+              var!(db),
+              unquote(name),
+              unquote(key_pattern),
+              fn ->
+                try do
+                  unquote(body)
+                catch
+                  :throw, {:roux_query_error, reason} -> {:error, reason}
+                end
+              end
+            )
           end
         )
       end
+    end
+  end
+
+  @doc false
+  # Runs a query body, inside the module's `around:` hook when it has one.
+  @spec __run__({module(), atom()} | nil, Roux.Database.t(), atom(), term(), (-> result)) ::
+          result
+        when result: var
+  def __run__(nil, _db, _name, _key, body), do: body.()
+
+  def __run__({module, function}, db, name, key, body),
+    do: apply(module, function, [%{db: db, query: name, key: key}, body])
+
+  @doc """
+  The code version of `definition` (see "Code versions"), given the
+  code options of its module (`use Roux.Query, code: ...`): nil for a
+  query with neither code versions nor a `version:`.
+  """
+  @spec code_version(Definition.t(), code_options()) :: binary() | nil
+  def code_version(%Definition{code: nil, version: nil}, nil), do: nil
+
+  def code_version(%Definition{} = definition, module_code) do
+    code =
+      if module_code != nil or definition.code != nil do
+        roots = [definition.module | extra_roots(definition)]
+
+        case Roux.Code.digest(roots, module_code || []) do
+          {:ok, digest} -> digest
+          {:error, reason} -> {:unversioned, reason, vm_token()}
+        end
+      end
+
+    :crypto.hash(:sha256, :erlang.term_to_binary({code, definition.version}, [:deterministic]))
+  end
+
+  defp extra_roots(%Definition{code: nil}), do: []
+  defp extra_roots(%Definition{code: roots}) when is_list(roots), do: roots
+
+  defp extra_roots(%Definition{code: {m, f, a}} = definition) do
+    case apply(m, f, a) do
+      roots when is_list(roots) ->
+        roots
+
+      other ->
+        raise ArgumentError,
+              "the code roots of query #{inspect(definition.name)} " <>
+                "(#{inspect(m)}.#{f}/#{length(a)}) must be a list of modules, got: " <>
+                inspect(other)
+    end
+  end
+
+  # What a version no other VM shares is made of: code with no object
+  # code to read can be named only within the VM that loaded it.
+  defp vm_token do
+    key = {__MODULE__, :vm_token}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        token = :crypto.strong_rand_bytes(16)
+        :persistent_term.put(key, token)
+        token
+
+      token ->
+        token
     end
   end
 
@@ -167,13 +308,16 @@ defmodule Roux.Query do
         end
       end
 
+    code = Module.get_attribute(env.module, :roux_code)
+
     roux_queries_fn =
       quote do
         def __roux_queries__ do
           %{
             queries: unquote(Macro.escape(queries)),
             inputs: unquote(Macro.escape(inputs)),
-            entities: unquote(Macro.escape(entities))
+            entities: unquote(Macro.escape(entities)),
+            code: unquote(Macro.escape(code))
           }
         end
       end

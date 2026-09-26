@@ -123,8 +123,8 @@ defmodule Roux.QueryTest do
       assert input_names == [:source_text, :config, :events]
     end
 
-    test "empty module returns %{queries: [], inputs: [], entities: []}" do
-      assert %{queries: [], inputs: [], entities: []} =
+    test "empty module returns %{queries: [], inputs: [], entities: [], code: nil}" do
+      assert %{queries: [], inputs: [], entities: [], code: nil} =
                EmptyQueries.__roux_queries__()
     end
   end
@@ -181,6 +181,118 @@ defmodule Roux.QueryTest do
 
       # Re-registering does not raise.
       assert :ok = Database.register_query(db, defn.name, Map.from_struct(defn))
+    end
+  end
+
+  # -- Code versions --
+
+  describe "code versions" do
+    setup do
+      db = Database.new()
+      on_exit(fn -> quietly(fn -> Database.shutdown(db) end) end)
+      %{db: db}
+    end
+
+    defp quietly(fun) do
+      fun.()
+    catch
+      :exit, _ -> :ok
+    end
+
+    defp version(db, name), do: Database.code_version(db, name)
+
+    test "a module's code versions its queries; `code:` and `version:` tell them apart",
+         %{db: db} do
+      :ok = Roux.Lang.register_module(db, Roux.Test.VersionedQueries)
+      len = version(db, :versioned_len)
+      rooted = version(db, :versioned_rooted)
+      bumped = version(db, :versioned_bumped)
+
+      assert is_binary(len) and byte_size(len) == 32
+      assert Enum.uniq([len, rooted, bumped]) == [len, rooted, bumped]
+
+      # Registered again, the same: computed once per VM, and stable.
+      other = Database.new()
+      :ok = Roux.Lang.register_module(other, Roux.Test.VersionedQueries)
+      assert version(other, :versioned_len) == len
+      Database.shutdown(other)
+    end
+
+    test "a version alone versions a query of a module without code versions", %{db: db} do
+      :ok = Roux.Lang.register_module(db, Roux.Test.HandBumpedQueries)
+      assert is_binary(version(db, :bumped_only))
+      assert version(db, :unversioned) == nil
+    end
+
+    test "the version is the module's code, excluded modules walked through" do
+      %{code: code, queries: queries} = Roux.Test.VersionedQueries.__roux_queries__()
+      assert code == [exclude: [Roux.Test.VersionedHelper]]
+      len = Enum.find(queries, &(&1.name == :versioned_len))
+
+      {:ok, digest} = Roux.Code.digest([Roux.Test.VersionedQueries], code)
+
+      assert Roux.Query.code_version(len, code) ==
+               :crypto.hash(:sha256, :erlang.term_to_binary({digest, nil}, [:deterministic]))
+
+      # Without code versions and without a version, nothing to name.
+      assert Roux.Query.code_version(%{len | version: nil}, nil) == nil
+    end
+
+    test "a body reads its own version, stored with its entry", %{db: db} do
+      :ok = Roux.Lang.register_module(db, Roux.Test.VersionedQueries)
+      Roux.Input.set(db, :vsrc, "a", "abc")
+
+      assert {3, version} = Roux.Test.VersionedQueries.versioned_len(db, "a")
+      assert version == version(db, :versioned_len)
+      assert {:ok, %{code_version: ^version}} = Roux.Memo.get(db, {:versioned_len, "a"})
+
+      assert_raise ArgumentError, fn -> Roux.Runtime.code_version() end
+    end
+
+    test "registering a query again under another version makes its entries stale",
+         %{db: db} do
+      :ok = Roux.Lang.register_module(db, Roux.Test.VersionedQueries)
+      Roux.Input.set(db, :vsrc, "a", "abc")
+      {3, _} = Roux.Test.VersionedQueries.versioned_len(db, "a")
+      log = Roux.QueryLog.start(db)
+
+      Database.register_query(db, :versioned_len, %{
+        module: Roux.Test.VersionedQueries,
+        function: :versioned_len,
+        code_version: "another"
+      })
+
+      assert {3, "another"} = Roux.Test.VersionedQueries.versioned_len(db, "a")
+      assert Roux.QueryLog.executions(log, :versioned_len) == ["a"]
+      Roux.QueryLog.stop(log)
+    end
+  end
+
+  # -- around: --
+
+  describe "around:" do
+    setup do
+      db = Database.new()
+      :ok = Roux.Lang.register_module(db, Roux.Test.AroundQueries)
+      on_exit(fn -> quietly(fn -> Database.shutdown(db) end) end)
+      %{db: db}
+    end
+
+    test "wraps every body, and what the hook reads is the query's dependency", %{db: db} do
+      Roux.Input.set(db, :around_src, "a", 1)
+      assert Roux.Test.AroundQueries.wrapped(db, "a") == {:wrapped, 0, {:body, 1}}
+
+      {:ok, entry} = Roux.Memo.get(db, {:wrapped, "a"})
+      assert {:input_absent, :around_extra, "a"} in entry.dependencies
+      assert {:input, :around_src, "a"} in entry.dependencies
+
+      Roux.Input.set(db, :around_extra, "a", 5)
+      assert Roux.Test.AroundQueries.wrapped(db, "a") == {:wrapped, 5, {:body, 1}}
+    end
+
+    test "sees the body's short-circuited error as its value", %{db: db} do
+      assert {:wrapped, 0, {:error, {:input_not_set, :around_src, "b"}}} =
+               Roux.Test.AroundQueries.wrapped(db, "b")
     end
   end
 

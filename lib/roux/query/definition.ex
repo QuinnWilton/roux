@@ -5,17 +5,26 @@ defmodule Roux.Query.Definition do
 
   Used by the `defquery` macro to record metadata that `Roux.Database` reads
   during module registration.
+
+  `code` and `version` make up the query's code version (see
+  `Roux.Query`): the roots its code is read from beyond its own module
+  (a list of modules, or `{module, function, args}` returning one), and
+  a term a query's author bumps by hand.
   """
+
+  @type code :: [module()] | {module(), atom(), [term()]} | nil
 
   @type t :: %__MODULE__{
           name: atom(),
           module: module(),
           function: atom(),
-          opts: keyword()
+          opts: keyword(),
+          code: code(),
+          version: term()
         }
 
   @enforce_keys [:name, :module, :function]
-  defstruct [:name, :module, :function, opts: []]
+  defstruct [:name, :module, :function, opts: [], code: nil, version: nil]
 
   @doc """
   Creates a new query definition.

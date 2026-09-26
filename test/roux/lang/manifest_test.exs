@@ -334,13 +334,21 @@ defmodule Roux.Lang.ManifestTest do
     db
   end
 
-  # Registrations are not persisted: a run registers its inputs again.
-  defp restored(path) do
+  # Registrations are not persisted: a run registers its inputs and
+  # queries again. The queries here run as closures (`Runtime.execute/4`);
+  # a registration is what lets a restore keep their entries.
+  defp restored(path, queries \\ [:rows, :derived]) do
     {:ok, data} = Manifest.load(path)
     db = Database.new()
     Database.register_input(db, :source_text, durability: :medium)
+    Database.register_input(db, :src, durability: :medium)
+    for name <- queries, do: register_closure(db, name)
     :ok = Manifest.restore(db, data)
     db
+  end
+
+  defp register_closure(db, name, version \\ nil) do
+    Database.register_query(db, name, %{module: __MODULE__, function: name, code_version: version})
   end
 
   defp entity_rows(db) do
@@ -468,6 +476,59 @@ defmodule Roux.Lang.ManifestTest do
         after
           Database.shutdown(db3)
         end
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    test "leaves out the entries of queries no longer registered", %{db: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      Manifest.write(populate(db), %{}, path)
+      db2 = restored(path, [])
+
+      try do
+        assert Memo.get(db2, {:rows, "a.mini"}) == :miss
+        assert {:ok, _} = Memo.get(db2, {:input, :source_text, "a.mini"})
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    test "an entry of another code version re-executes; unchanged, its readers do not",
+         %{db: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      Database.register_input(db, :source_text, durability: :medium)
+      register_closure(db, :len, "v1")
+      register_closure(db, :parity)
+      Input.set(db, :source_text, "a", "abcd")
+
+      len = fn db, key -> db |> Runtime.input(:source_text, key) |> byte_size() end
+      parity = fn db, key -> rem(Runtime.execute(db, :len, key, len), 2) end
+      assert Runtime.execute(db, :parity, "a", parity) == 0
+      Manifest.write(db, %{}, path)
+
+      {:ok, data} = Manifest.load(path)
+      db2 = Database.new()
+
+      try do
+        Database.register_input(db2, :source_text, durability: :medium)
+        register_closure(db2, :len, "v2")
+        register_closure(db2, :parity)
+        :ok = Manifest.restore(db2, data)
+        log = Roux.QueryLog.start(db2)
+
+        # Another body, and the same value: :len re-runs, :parity is kept.
+        len2 = fn db, key -> db |> Runtime.input(:source_text, key) |> String.length() end
+        Process.put({Runtime, :query_fun, :len}, len2)
+
+        assert Runtime.execute(db2, :parity, "a", fn _db, _key -> flunk("recomputed") end) ==
+                 0
+
+        assert Roux.QueryLog.executions(log, :len) == ["a"]
+        assert Roux.QueryLog.cutoffs(log, :len) == ["a"]
+        assert {:ok, entry} = Memo.get(db2, {:len, "a"})
+        assert entry.code_version == "v2"
+        Roux.QueryLog.stop(log)
       after
         Database.shutdown(db2)
       end

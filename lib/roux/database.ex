@@ -114,16 +114,47 @@ defmodule Roux.Database do
   end
 
   @doc """
-  Registers a derived query definition.
+  Registers a derived query definition: at least its `:module` and
+  `:function`, and optionally its `:code_version` (`Roux.Query`).
 
-  Called during module compilation by the `defquery` macro, or manually.
-  Idempotent — re-registering the same name overwrites the previous definition.
+  Idempotent — re-registering the same name overwrites the previous
+  definition. Registering a query again under another code version makes
+  every entry of the query stale, and advances the revision at `:high`
+  so that no durability check skips the entries that read them.
   """
   @spec register_query(t(), atom(), map()) :: :ok
-  def register_query(%__MODULE__{query_registry: reg}, name, definition)
+  def register_query(%__MODULE__{query_registry: reg, revision: revision}, name, definition)
       when is_atom(name) and is_map(definition) do
-    :ets.insert(reg, {name, definition})
+    version = Map.get(definition, :code_version)
+
+    case :ets.lookup(reg, name) do
+      [{^name, %{} = old}] ->
+        :ets.insert(reg, {name, definition})
+        if Map.get(old, :code_version) != version, do: Revision.advance(revision, :high)
+
+      [] ->
+        :ets.insert(reg, {name, definition})
+    end
+
     :ok
+  end
+
+  @doc """
+  The code version a query is registered with (`register_query/3`): nil
+  for a query registered without one, or not registered at all.
+  """
+  @spec code_version(t(), atom()) :: binary() | nil
+  def code_version(%__MODULE__{query_registry: reg}, name) when is_atom(name) do
+    case :ets.lookup(reg, name) do
+      [{^name, %{} = definition}] -> Map.get(definition, :code_version)
+      _ -> nil
+    end
+  end
+
+  @doc "Whether a derived query of this name is registered."
+  @spec query_registered?(t(), atom()) :: boolean()
+  def query_registered?(%__MODULE__{query_registry: reg}, name) when is_atom(name) do
+    match?([{^name, %{}}], :ets.lookup(reg, name))
   end
 
   @doc """

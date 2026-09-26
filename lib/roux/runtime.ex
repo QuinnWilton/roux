@@ -358,6 +358,25 @@ defmodule Roux.Runtime do
   end
 
   @doc """
+  The code version of the query whose body is running (`Roux.Query`),
+  or nil for a query without one: for a body that keys something of its
+  own — an action-cache entry, a file it keeps — on the code computing
+  it.
+
+  Raises `ArgumentError` outside a query body.
+  """
+  @spec code_version() :: binary() | nil
+  def code_version do
+    case get_context() do
+      %Context{active_query: {_name, _key}, code_version: version} ->
+        version
+
+      _outside ->
+        raise ArgumentError, "Roux.Runtime.code_version/0 called outside a query body"
+    end
+  end
+
+  @doc """
   Records that the current query depends on another query.
 
   Pure function that returns an updated context. Called internally
@@ -466,7 +485,8 @@ defmodule Roux.Runtime do
       query_stack: parent_stack ++ [query_key],
       recorded_deps: [],
       created_entities: [],
-      min_durability: :high
+      min_durability: :high,
+      code_version: Database.code_version(db, query_name)
     }
 
     Telemetry.query_start(Database.id(db), query_name, key, current_rev)
@@ -499,7 +519,8 @@ defmodule Roux.Runtime do
         verified_at: current_rev,
         dependencies: Enum.reverse(final_ctx.recorded_deps),
         durability: final_ctx.min_durability,
-        output_entities: final_ctx.created_entities
+        output_entities: final_ctx.created_entities,
+        code_version: exec_ctx.code_version
       }
 
       # An unchanged value stays as it is stored: copying the equal new
