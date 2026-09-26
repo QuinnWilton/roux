@@ -270,6 +270,45 @@ defmodule Roux.CodeTest do
     end
   end
 
+  describe "digest/2 with a store" do
+    test "a fresh VM's digest comes from the stamps of what the last one read",
+         %{tmp_dir: tmp} do
+      %{a: a, c: c, paths: paths} = chain!(tmp)
+      store = Roux.Blob.open!(Path.join(tmp, "store"))
+      past = System.os_time(:second) - 60
+      for {_mod, path} <- paths, do: File.touch!(path, past)
+
+      {:ok, digest} = RouxCode.digest([a], store: store)
+      assert {:ok, ^digest} = RouxCode.digest([a])
+      :ok = RouxCode.forget()
+
+      # Found by its trace: no beam is read, so none need be on the path.
+      ebin = paths |> Map.fetch!(a) |> Path.dirname() |> String.to_charlist()
+      :code.del_path(ebin)
+      assert {:ok, ^digest} = RouxCode.digest([a], store: store)
+      :code.add_patha(ebin)
+
+      # A module rebuilt moves its stamp, and the digest is computed again.
+      :ok = RouxCode.forget()
+      File.rm!(paths[c])
+
+      %{^c => rebuilt} =
+        build(Path.join(tmp, "edit"), "defmodule #{inspect(c)}, do: def(leaf(x), do: x + 2)")
+
+      File.cp!(rebuilt, paths[c])
+      assert {:ok, moved} = RouxCode.digest([a], store: store)
+      assert moved != digest
+    end
+
+    test "keeps no trace over a file written moments ago", %{tmp_dir: tmp} do
+      %{a: a} = chain!(tmp)
+      store = Roux.Blob.open!(Path.join(tmp, "store"))
+
+      assert {:ok, _digest} = RouxCode.digest([a], store: store)
+      assert Path.wildcard(Path.join([store.root, "traces", "*", "*"])) == []
+    end
+  end
+
   describe "Verify.executed/2" do
     test "names the modules a computation called into", %{tmp_dir: tmp} do
       %{a: a, b: b, c: c, d: d} = chain!(tmp)

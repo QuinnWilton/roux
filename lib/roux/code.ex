@@ -32,7 +32,21 @@ defmodule Roux.Code do
   A closure and its digest are computed once per VM for each set of
   roots and options: a VM that loads new code mid-run keeps the digest
   of the code it started with (`forget/0` drops them).
+
+  ## Kept across VMs
+
+  With `store:`, `digest/2` keeps a digest in a `Roux.Blob` store as a
+  verifying trace (`Roux.Blob.Trace`) over what computing it read: the
+  stat stamp (size, modification time, inode, change time) of every
+  file the walk read object code from, and the absence of every module
+  it found absent. A fresh VM whose beams have not moved gets the digest
+  from a few `stat` calls, reading no beam at all. A trace is not kept
+  when a file was written within the last two seconds (a stamp that
+  young may not yet show a write that follows it), nor when a module
+  lives in an archive, whose members have no stamp of their own.
   """
+
+  alias Roux.Blob
 
   @typedoc "Where a module of a closure was read from, or `:absent` (not on the code path)."
   @type location :: Path.t() | :absent
@@ -46,10 +60,17 @@ defmodule Roux.Code do
     * `:follow_excluded` — whether the walk goes on through an excluded
       module to what it calls (default `true`): its callees are code
       like any other. `false` stops there.
+    * `:store` — a `Roux.Blob` store to keep the digest in across VMs
+      (`digest/2` only; see "Kept across VMs").
   """
   @type option ::
           {:exclude, [module()] | (module() -> boolean())}
           | {:follow_excluded, boolean()}
+          | {:store, Blob.t() | nil}
+
+  # A stamp younger than this may not yet show a write that follows it
+  # within the same second.
+  @recent_seconds 2
 
   @elixir_apps [:elixir, :eex, :ex_unit, :iex, :logger, :mix]
 
@@ -249,13 +270,69 @@ defmodule Roux.Code do
   """
   @spec digest([module()], [option()]) :: {:ok, String.t()} | {:error, term()}
   def digest(roots, opts \\ []) when is_list(roots) do
+    {store, opts} = Keyword.pop(opts, :store)
     {exclude, follow?} = exclusion(opts)
+    key = {:digest, Enum.sort(roots), exclude, follow?}
 
-    memo({:digest, Enum.sort(roots), exclude, follow?}, fn ->
-      with {:ok, seen} <- walk(roots, %{}, exclude, follow?) do
-        {:ok, digest_of(seen)}
+    memo(key, fn ->
+      case store do
+        nil -> compute_digest(roots, exclude, follow?)
+        %Blob{} = store -> kept_digest(store, key, roots, exclude, follow?)
       end
     end)
+  end
+
+  defp compute_digest(roots, exclude, follow?) do
+    with {:ok, seen} <- walk(roots, %{}, exclude, follow?) do
+      {:ok, digest_of(seen)}
+    end
+  end
+
+  # A digest kept as a verifying trace over what computing it read (see
+  # "Kept across VMs").
+  defp kept_digest(store, key, roots, exclude, follow?) do
+    name = {__MODULE__, key, runtime_version()}
+
+    case Blob.Trace.find(store, name, &observe/1) do
+      {:ok, digest} ->
+        {:ok, digest}
+
+      :miss ->
+        with {:ok, seen} <- walk(roots, %{}, exclude, follow?) do
+          digest = digest_of(seen)
+          deps = Enum.flat_map(seen, &trace_deps/1)
+          if Enum.all?(deps, &trustworthy?/1), do: _ = Blob.Trace.put(store, name, deps, digest)
+          {:ok, digest}
+        end
+    end
+  end
+
+  # What the walk read of each module it met: the file of one it read
+  # (walked-through ones too: their import tables shape the closure),
+  # and the absence of one it found absent.
+  defp trace_deps({_mod, {:object, _bin, file}}), do: [{{:file, file}, stamp(file)}]
+  defp trace_deps({_mod, {:walked, file}}), do: [{{:file, file}, stamp(file)}]
+  defp trace_deps({mod, :absent}), do: [{{:absent, mod}, true}]
+  defp trace_deps({_mod, _runtime_or_skipped}), do: []
+
+  defp trustworthy?({{:file, _file}, :none}), do: false
+
+  defp trustworthy?({{:file, _file}, {_size, mtime, _inode, _ctime}}),
+    do: mtime < System.os_time(:second) - @recent_seconds
+
+  defp trustworthy?({{:absent, _mod}, true}), do: true
+
+  defp observe({:file, file}), do: stamp(file)
+  defp observe({:absent, mod}), do: :code.which(mod) == :non_existing
+
+  defp stamp(file) do
+    case File.stat(file, time: :posix) do
+      {:ok, %File.Stat{size: size, mtime: mtime, inode: inode, ctime: ctime}} ->
+        {size, mtime, inode, ctime}
+
+      {:error, _} ->
+        :none
+    end
   end
 
   defp digest_of(seen) do

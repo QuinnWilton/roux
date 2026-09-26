@@ -21,8 +21,8 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 0: Code" do
-    test "Roux.Code has no Roux dependencies", %{boundary: boundary} do
-      assert_boundary(boundary, modules: under(Roux.Code), allow: [])
+    test "Roux.Code depends only on Blob", %{boundary: boundary} do
+      assert_boundary(boundary, modules: under(Roux.Code), allow: [under(Roux.Blob)])
     end
   end
 
