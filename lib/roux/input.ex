@@ -80,8 +80,8 @@ defmodule Roux.Input do
         :ok
 
       other ->
-        durability =
-          Keyword.get_lazy(opts, :durability, fn -> lookup_durability!(db, input_name) end)
+        registered = lookup_durability!(db, input_name)
+        durability = Keyword.get(opts, :durability, registered)
 
         # When a key's durability CHANGES, advance at the level it USED to
         # have, not the new one. Readers recorded at the old level check
@@ -90,10 +90,16 @@ defmodule Roux.Input do
         # Advancing at the old level invalidates them once, after which
         # they re-record the new level — validation refreshes it — and
         # subsequent writes are cheap again.
+        #
+        # A key set for the first time was, until now, absent — and a
+        # reader of its absence (`Roux.Runtime.input/4` with a default)
+        # recorded the input's registered durability, having no key's to
+        # go by. Advancing at the more durable of the two reaches it.
         advance_at =
           case other do
             {:ok, %Entry{durability: old}} when old != nil and old != durability -> old
-            _ -> durability
+            {:ok, _entry} -> durability
+            :miss -> more_durable(durability, registered)
           end
 
         new_rev = Revision.advance(db.revision, advance_at)
@@ -207,6 +213,12 @@ defmodule Roux.Input do
   end
 
   # -- Private --
+
+  defp more_durable(:high, _), do: :high
+  defp more_durable(_, :high), do: :high
+  defp more_durable(:medium, _), do: :medium
+  defp more_durable(_, :medium), do: :medium
+  defp more_durable(:low, :low), do: :low
 
   defp lookup_durability!(%Database{input_registry: reg}, input_name) do
     case :ets.lookup(reg, input_name) do

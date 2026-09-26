@@ -137,6 +137,26 @@ defmodule Roux.Validation do
     ArgumentError -> :stale
   end
 
+  # An input read while it had no value (`Roux.Runtime.input/4` with a
+  # default) is clean for as long as it has none. A value there now is the
+  # change: the entry executed or was validated while the input was
+  # absent, so the value arrived after. It carries the durability the
+  # input was registered with, as a read of a value would.
+  defp check_deps(
+         db,
+         [{:input_absent, input_name, key} | rest],
+         verified_at,
+         ensure_fn,
+         durability
+       ) do
+    with :miss <- Memo.changed_at(db, {:input, input_name, key}),
+         {:ok, input_durability} <- registered_durability(db, input_name) do
+      check_deps(db, rest, verified_at, ensure_fn, min_durability(durability, input_durability))
+    else
+      _set_or_unregistered -> :stale
+    end
+  end
+
   defp check_deps(db, [dep | rest], verified_at, ensure_fn, durability) do
     ensure_fn.(db, dep)
 
@@ -156,6 +176,12 @@ defmodule Roux.Validation do
       :miss ->
         :stale
     end
+  end
+
+  defp registered_durability(db, input_name) do
+    {:ok, Database.input_durability(db, input_name)}
+  rescue
+    ArgumentError -> :error
   end
 
   # `:low` is absorbing, matching Runtime's propagation.

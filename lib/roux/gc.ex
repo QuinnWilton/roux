@@ -208,5 +208,8 @@ defmodule Roux.GC do
     ArgumentError -> false
   end
 
+  # An edge to an input's absence points at nothing by design.
+  defp orphaned_dep?(_db, {:input_absent, _input_name, _key}), do: false
+
   defp orphaned_dep?(db, dep), do: Memo.get(db, dep) == :miss
 end

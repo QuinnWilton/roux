@@ -174,6 +174,11 @@ defmodule Roux.Cancellation do
     true
   end
 
+  # A read of the input while it had no value depends on it as much as a
+  # read of its value does.
+  defp depends_on?(_db, {:input_absent, name, key}, {:input, name, key}, _visited), do: true
+  defp depends_on?(_db, {:input_absent, _name, _key}, _target_key, _visited), do: false
+
   defp depends_on?(db, query_key, target_key, visited) do
     if is_map_key(visited, query_key) do
       false

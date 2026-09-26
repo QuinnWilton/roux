@@ -434,6 +434,93 @@ defmodule Roux.RuntimeTest do
     end
   end
 
+  # -- input/4 --
+
+  describe "input/4 with a default" do
+    setup %{db: db} do
+      register_input(db, :flag, durability: :medium)
+      register_input(db, :other, durability: :medium)
+      counter = :counters.new(1, [])
+
+      reader = fn db, key ->
+        :counters.add(counter, 1, 1)
+
+        {Runtime.input(db, :flag, key, default: :unset),
+         Runtime.input(db, :other, :k, default: 0)}
+      end
+
+      %{reader: reader, runs: fn -> :counters.get(counter, 1) end}
+    end
+
+    test "an unset key reads as the default, and stays fresh while unset", ctx do
+      %{db: db, reader: reader, runs: runs} = ctx
+
+      assert Runtime.execute(db, :read, "a", reader) == {:unset, 0}
+      assert {:ok, entry} = Memo.get(db, {:read, "a"})
+      assert {:input_absent, :flag, "a"} in entry.dependencies
+
+      # Another key of the input, and another input, move the revision.
+      Input.set(db, :flag, "b", :on)
+      assert Runtime.execute(db, :read, "a", reader) == {:unset, 0}
+      assert runs.() == 1
+    end
+
+    test "setting the key later invalidates the reader", ctx do
+      %{db: db, reader: reader, runs: runs} = ctx
+
+      assert Runtime.execute(db, :read, "a", reader) == {:unset, 0}
+      Input.set(db, :flag, "a", :on)
+      assert Runtime.execute(db, :read, "a", reader) == {:on, 0}
+      assert runs.() == 2
+
+      {:ok, entry} = Memo.get(db, {:read, "a"})
+      assert {:input, :flag, "a"} in entry.dependencies
+      refute {:input_absent, :flag, "a"} in entry.dependencies
+    end
+
+    test "deleting the key brings the default back", ctx do
+      %{db: db, reader: reader} = ctx
+
+      Input.set(db, :flag, "a", :on)
+      assert Runtime.execute(db, :read, "a", reader) == {:on, 0}
+      Input.delete(db, :flag, "a")
+      assert Runtime.execute(db, :read, "a", reader) == {:unset, 0}
+    end
+
+    test "a key first set at a lower durability than its input's still reaches the reader",
+         %{db: db} do
+      register_input(db, :stable, durability: :high)
+      reader = fn db, key -> Runtime.input(db, :stable, key, default: :unset) end
+
+      assert Runtime.execute(db, :read_stable, "a", reader) == :unset
+      assert {:ok, :high} = Memo.durability(db, {:read_stable, "a"})
+
+      # The reader's level is the input's: advancing only :low would leave
+      # its durability check skipping the change.
+      Input.set(db, :stable, "a", :on, durability: :low)
+      assert Runtime.execute(db, :read_stable, "a", reader) == :on
+    end
+
+    test "is kept by a GC sweep", ctx do
+      %{db: db, reader: reader} = ctx
+      assert Runtime.execute(db, :read, "a", reader) == {:unset, 0}
+      Roux.GC.sweep(db)
+      assert {:ok, _} = Memo.get(db, {:read, "a"})
+    end
+
+    test "without a default, an unset key raises as input/3 does", %{db: db} do
+      assert_raise Roux.Input.NotSetError, fn ->
+        Runtime.execute(db, :strict, "a", fn db, key -> Runtime.input(db, :flag, key, []) end)
+      end
+
+      assert_raise ArgumentError, fn ->
+        Runtime.execute(db, :typo, "a", fn db, key ->
+          Runtime.input(db, :flag, key, deafult: 1)
+        end)
+      end
+    end
+  end
+
   # -- Cycle detection --
 
   describe "cycle detection" do

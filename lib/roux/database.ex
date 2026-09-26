@@ -139,6 +139,19 @@ defmodule Roux.Database do
   end
 
   @doc """
+  The durability an input was registered with (`register_input/3`),
+  `:medium` when it names none. Raises `ArgumentError` for an input that
+  is not registered.
+  """
+  @spec input_durability(t(), atom()) :: Revision.durability()
+  def input_durability(%__MODULE__{input_registry: reg}, name) when is_atom(name) do
+    case :ets.lookup(reg, name) do
+      [{^name, opts}] -> Map.get(opts, :durability, :medium)
+      [] -> raise ArgumentError, "input #{inspect(name)} is not registered"
+    end
+  end
+
+  @doc """
   Registers an entity type, creating its ETS table for field storage.
 
   Idempotent — calling with the same module twice returns `:ok` without

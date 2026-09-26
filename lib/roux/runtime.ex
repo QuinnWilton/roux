@@ -169,6 +169,47 @@ defmodule Roux.Runtime do
   end
 
   @doc """
+  Reads an input value, or `default` when the key has none.
+
+  An unset key is a dependency like a set one: the reader records that
+  the input was absent, and setting it later invalidates the reader
+  (`Roux.Validation`). While it stays unset the reader validates as
+  fresh — where reading `Roux.Input.exists?/3` first and depending on the
+  input only when it is set would leave a reader that never learns it
+  was set, and depending on an unset input always would re-run the
+  reader on every validation.
+
+  ## Options
+
+    * `:default` — the value of an unset key. Without it, behaves as
+      `input/3` (raising `Roux.Input.NotSetError` on an unset key).
+  """
+  @spec input(Database.t(), atom(), term(), keyword()) :: term()
+  def input(%Database{} = db, input_name, key, opts) when is_atom(input_name) and is_list(opts) do
+    opts = Keyword.validate!(opts, [:default])
+
+    case Keyword.fetch(opts, :default) do
+      :error ->
+        input(db, input_name, key)
+
+      {:ok, default} ->
+        query_key = {:input, input_name, key}
+
+        case Roux.Input.fetch(db, input_name, key) do
+          {:ok, value} ->
+            record_dep(query_key)
+            track_input_durability(db, input_name, query_key)
+            value
+
+          :error ->
+            record_dep({:input_absent, input_name, key})
+            track_input_durability(db, input_name, query_key)
+            default
+        end
+    end
+  end
+
+  @doc """
   Reads an input value, short-circuiting on missing keys.
 
   Like `input/3`, but if the key has not been set, throws a
