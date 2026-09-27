@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0-dev (unreleased)
+## 0.2.0 — 2026-09-27
 
 0.2 makes roux the whole incremental backend of a tool like argus: code
 versions, a content-addressed blob store, persistence policies, fan-out
