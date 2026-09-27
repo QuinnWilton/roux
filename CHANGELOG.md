@@ -22,9 +22,10 @@
   one observation of them all), and a module found in other files fails
   it. Traces 0.2.0 kept are never consulted (the trace name carries a
   format). Upgrade; and a store 0.2.0 wrote may hold results filed under
-  another build's code version, so if analyses came out degraded, clear
-  it — for argus, `argus gc`, or delete the store directory (a
-  collection removes only what went unused).
+  another build's code version, so if analyses came out degraded, delete
+  the store directory (for argus, `~/.cache/argus/store`, or
+  `$ARGUS_CACHE_DIR`). A collection (`argus gc`) is not enough: it
+  removes only what went unused, and stale results in use survive it.
 
 ## 0.2.0 — 2026-09-27
 
