@@ -63,6 +63,12 @@ groups, and a session that ties them to a manifest.
   sweep the rest after a grace period, renaming aside first). Entries are
   immutable and installed by rename; a vanished or corrupt entry is a
   miss. `Roux.Blob.MissingError`, `Roux.Blob.FormatError`.
+- **A trace name's history is bounded** (D28): `Roux.Blob.Trace.put/5`
+  keeps the `keep:` most recently used traces of the name (default 8,
+  or `:infinity`) and removes the rest, rename-aside then unlink; a hit
+  through `find/4` touches its trace. `Roux.Blob.Trace.fetch/3` and
+  `find/4` take `limit:` and read and decode only the most recently used
+  `limit` traces (default: all).
 - **The blob store is trusted as the manifest is** (D27): its terms decode
   without `:safe`, so a term naming an atom a fresh VM has not made yet
   is a hit, not a miss. `Roux.Blob.open/1` enforces the boundary instead:

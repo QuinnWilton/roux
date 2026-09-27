@@ -789,6 +789,13 @@ defmodule Roux.Blob do
     end
   end
 
+  @doc false
+  # Takes the file at `path` out of the store whole: renamed aside into
+  # `trash/`, then removed, so a reader finds it complete or not at all.
+  # A file already gone is no error.
+  @spec discard(t(), Path.t()) :: :ok
+  def discard(%__MODULE__{} = store, path), do: evict(store, path)
+
   defp evict(%__MODULE__{root: root}, path) do
     aside = staging(root, "trash")
 

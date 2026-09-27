@@ -189,6 +189,109 @@ defmodule Roux.BlobTest do
     end
   end
 
+  describe "trace history" do
+    defp trace_files(store, name) do
+      Path.wildcard(Path.join([store.root, "traces", Blob.term_digest(name), "*"]))
+    end
+
+    defp backdate!(store, name, deps, age) do
+      path = Path.join([store.root, "traces", Blob.term_digest(name), Blob.term_digest(deps)])
+      File.touch!(path, System.os_time(:second) - age)
+    end
+
+    # How many files the calling process read during `fun`: its calls to
+    # `:file.read_file/1`, traced for this process alone (other tests'
+    # reads do not count) and counted by a tracer of its own (a process
+    # cannot be its own tracer).
+    defp reads_during(fun) do
+      collector = spawn_link(fn -> collect_reads(0) end)
+      :erlang.trace_pattern({:file, :read_file, 1}, true, [])
+      :erlang.trace(self(), true, [:call, {:tracer, collector}])
+
+      result =
+        try do
+          fun.()
+        after
+          :erlang.trace(self(), false, [:call])
+        end
+
+      # Every trace message this process caused has reached the tracer.
+      ref = :erlang.trace_delivered(self())
+      assert_receive {:trace_delivered, _pid, ^ref}
+      send(collector, {:count, self()})
+      assert_receive {:reads, reads}
+      {result, reads}
+    end
+
+    defp collect_reads(n) do
+      receive do
+        {:trace, _pid, :call, {:file, :read_file, _args}} -> collect_reads(n + 1)
+        {:count, from} -> send(from, {:reads, n})
+      end
+    end
+
+    test "a name keeps its most recent traces, however many are put", %{store: store} do
+      for n <- 1..30, do: :ok = Trace.put(store, :bounded, [{:n, n}], n)
+      assert length(trace_files(store, :bounded)) == 8
+
+      for n <- 1..5, do: :ok = Trace.put(store, :three, [{:n, n}], n, keep: 3)
+      assert length(trace_files(store, :three)) == 3
+      assert {:ok, 5} = Trace.find(store, :three, fn :n -> 5 end)
+
+      for n <- 1..12, do: :ok = Trace.put(store, :all, [{:n, n}], n, keep: :infinity)
+      assert length(trace_files(store, :all)) == 12
+
+      assert_raise ArgumentError, fn -> Trace.put(store, :bad, [], 1, keep: 0) end
+    end
+
+    test "most recently used means used: a trace found survives the next prune", %{
+      store: store
+    } do
+      for {n, age} <- [{1, 300}, {2, 200}, {3, 100}] do
+        :ok = Trace.put(store, :lru, [{:n, n}], n, keep: 3)
+        backdate!(store, :lru, [{:n, n}], age)
+      end
+
+      # The oldest, used now.
+      assert {:ok, 1} = Trace.find(store, :lru, fn :n -> 1 end)
+      :ok = Trace.put(store, :lru, [{:n, 4}], 4, keep: 3)
+
+      kept = store |> Trace.fetch(:lru) |> Enum.map(& &1.value) |> Enum.sort()
+      assert kept == [1, 3, 4]
+    end
+
+    test "limit reads the most recently used, whatever the history's length", %{store: store} do
+      big = :binary.copy("x", 20_000)
+
+      for {name, count} <- [short: 10, long: 200] do
+        for n <- 1..count do
+          :ok = Trace.put(store, name, [{:n, n}], {n, big}, keep: :infinity)
+          backdate!(store, name, [{:n, n}], 1_000 - n)
+        end
+      end
+
+      for name <- [:short, :long] do
+        {traces, reads} = reads_during(fn -> Trace.fetch(store, name, limit: 4) end)
+        assert reads == 4
+        assert length(traces) == 4
+
+        # The newest first: the last four put.
+        count = length(trace_files(store, name))
+        assert Enum.map(traces, &elem(&1.value, 0)) == Enum.to_list(count..(count - 3)//-1)
+      end
+
+      {_traces, all} = reads_during(fn -> Trace.fetch(store, :long) end)
+      assert all == 200
+
+      # A find looks among the same few: a hit beyond them is a miss.
+      {hit, reads} = reads_during(fn -> Trace.find(store, :long, fn :n -> 199 end, limit: 4) end)
+      assert {:ok, {199, _}} = hit
+      assert reads == 4
+      assert Trace.find(store, :long, fn :n -> 1 end, limit: 4) == :miss
+      assert {:ok, {1, _}} = Trace.find(store, :long, fn :n -> 1 end)
+    end
+  end
+
   describe "scratch/2" do
     test "hands out a directory of its own, removed afterwards", %{store: store} do
       dir = Blob.scratch(store, fn dir -> File.dir?(dir) && dir end)
