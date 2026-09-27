@@ -199,13 +199,13 @@ defmodule Roux.BlobTest do
       File.touch!(path, System.os_time(:second) - age)
     end
 
-    # How many files the calling process read during `fun`: its calls to
-    # `:file.read_file/1`, traced for this process alone (other tests'
-    # reads do not count) and counted by a tracer of its own (a process
-    # cannot be its own tracer).
+    # How many files the calling process read during `fun`: its raw calls
+    # to `:file.read_file/2` (`Roux.Blob.IO`), traced for this process
+    # alone (other tests' reads do not count) and counted by a tracer of
+    # its own (a process cannot be its own tracer).
     defp reads_during(fun) do
       collector = spawn_link(fn -> collect_reads(0) end)
-      :erlang.trace_pattern({:file, :read_file, 1}, true, [])
+      :erlang.trace_pattern({:file, :read_file, 2}, true, [])
       :erlang.trace(self(), true, [:call, {:tracer, collector}])
 
       result =
@@ -247,7 +247,8 @@ defmodule Roux.BlobTest do
     test "most recently used means used: a trace found survives the next prune", %{
       store: store
     } do
-      for {n, age} <- [{1, 300}, {2, 200}, {3, 100}] do
+      # Last used hours ago: longer than the store's refresh interval.
+      for {n, age} <- [{1, 4 * 3600}, {2, 3 * 3600}, {3, 2 * 3600}] do
         :ok = Trace.put(store, :lru, [{:n, n}], n, keep: 3)
         backdate!(store, :lru, [{:n, n}], age)
       end
@@ -289,6 +290,59 @@ defmodule Roux.BlobTest do
       assert reads == 4
       assert Trace.find(store, :long, fn :n -> 1 end, limit: 4) == :miss
       assert {:ok, {1, _}} = Trace.find(store, :long, fn :n -> 1 end)
+    end
+  end
+
+  describe "refreshing on a hit" do
+    defp mtime(path), do: File.stat!(path, time: :posix).mtime
+
+    defp age!(path, seconds), do: File.touch!(path, System.os_time(:second) - seconds)
+
+    test "leaves an entry used within the refresh interval alone, and marks an older one",
+         %{store: store} do
+      {:ok, digest} = Blob.put(store, "bytes")
+      :ok = Blob.remember(store, :key, :value)
+      :ok = Trace.put(store, :name, [{:n, 1}], :traced)
+      cas = Blob.path(store, digest)
+      [ac] = Path.wildcard(Path.join([store.root, "ac", "*", "*"]))
+      [trace] = Path.wildcard(Path.join([store.root, "traces", "*", "*"]))
+
+      hit = fn ->
+        {:ok, ^digest} = Blob.put(store, "bytes")
+        {:ok, :value} = Blob.recall(store, :key)
+        {:ok, :traced} = Trace.find(store, :name, fn :n -> 1 end)
+      end
+
+      # Ten minutes ago: within the hour, so a hit writes nothing.
+      for path <- [cas, ac, trace], do: age!(path, 600)
+      before = Enum.map([cas, ac, trace], &mtime/1)
+      hit.()
+      assert Enum.map([cas, ac, trace], &mtime/1) == before
+
+      # Two hours ago: a hit marks each used now.
+      for path <- [cas, ac, trace], do: age!(path, 2 * 3600)
+      hit.()
+      now = System.os_time(:second)
+      for path <- [cas, ac, trace], do: assert(now - mtime(path) < 60)
+    end
+
+    test "with refresh: 0, every hit marks", %{tmp_dir: tmp} do
+      store = Blob.open!(Path.join(tmp, "eager"), refresh: 0)
+      :ok = Blob.remember(store, :key, :value)
+      [ac] = Path.wildcard(Path.join([store.root, "ac", "*", "*"]))
+      age!(ac, 30)
+      {:ok, :value} = Blob.recall(store, :key)
+      assert System.os_time(:second) - mtime(ac) < 30
+      assert_raise ArgumentError, fn -> Blob.open(Path.join(tmp, "bad"), refresh: -1) end
+    end
+
+    test "a collection's grace is never shorter than the refresh interval", %{store: store} do
+      # Twenty minutes old and named by nothing: a grace of zero would take
+      # it, though a hit within the hour may have left its time alone.
+      {:ok, digest} = Blob.put(store, "recent enough")
+      age!(Blob.path(store, digest), 1200)
+      Blob.gc(store, grace: 0, keep: 0)
+      assert Blob.member?(store, digest)
     end
   end
 

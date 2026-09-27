@@ -2,21 +2,22 @@ defmodule Roux.Blob.RacesTest do
   @moduledoc """
   What a store's readers, writers and collectors do when another process
   acts between their steps. Each race is held open in a VM of its own by
-  `Roux.Test.FileGate`: its stand-in for the file server acts at the
-  step a race needs, so the interleaving happens on every run.
+  `Roux.Test.RawGate`, on the hook every raw file operation of the store
+  calls (`Roux.Blob.IO`): it acts at the step a race needs, so the
+  interleaving happens on every run.
   """
 
   use ExUnit.Case, async: true
 
   alias Roux.Blob
   alias Roux.Blob.Trace
-  alias Roux.Test.FileGate
+  alias Roux.Test.RawGate
 
   @moduletag :tmp_dir
 
   @day 24 * 60 * 60
 
-  # A VM of this one's code, whose file server a test may stand in for.
+  # A VM of this one's code, whose store operations a test may gate.
   defp peer! do
     {:ok, peer, _node} = :peer.start_link(%{connection: :standard_io})
     :ok = :peer.call(peer, :code, :add_pathsa, [:code.get_path()])
@@ -24,24 +25,24 @@ defmodule Roux.Blob.RacesTest do
     peer
   end
 
-  # A peer the test already stopped, or a stand-in already taken down,
-  # is no failure of the test.
+  # A peer the test already stopped, or a gate already taken down, is no
+  # failure of the test.
   defp quietly(fun) do
     fun.()
   catch
     :exit, _ -> :ok
   end
 
-  # `mfa` run in `peer` with `gates` in front of its file server: what
-  # it returned, and each gate's action's result.
+  # `mfa` run in `peer` with `gates` on its store operations: what it
+  # returned, and each gate's action's result.
   defp gated(peer, gates, {module, function, args}) do
-    :ok = :peer.call(peer, FileGate, :install, [gates])
+    :ok = :peer.call(peer, RawGate, :install, [gates])
 
     try do
       {:peer.call(peer, module, function, args, 60_000),
-       :peer.call(peer, FileGate, :uninstall, [])}
+       :peer.call(peer, RawGate, :uninstall, [])}
     after
-      quietly(fn -> :peer.call(peer, FileGate, :uninstall, []) end)
+      quietly(fn -> :peer.call(peer, RawGate, :uninstall, []) end)
     end
   end
 
@@ -61,12 +62,14 @@ defmodule Roux.Blob.RacesTest do
       store = store!(tmp)
       :ok = Blob.remember(store, :key, :value)
       [path] = Path.wildcard(Path.join([store.root, "ac", "*", "*"]))
+      # Used longer ago than the store's refresh interval: a hit touches it.
+      File.touch!(path, System.os_time(:second) - 2 * @day)
 
-      # The entry goes right after the lookup's touch reached it.
-      gate = %{name: :gc, ops: [:write_file_info], path: path, action: {File, :rm, [path]}}
+      # The entry goes right after the lookup read it, before its touch.
+      gate = %{name: :gc, ops: [:read_file], path: path, action: {File, :rm, [path]}}
       {recalled, %{gc: :ok}} = gated(peer!(), [gate], {Blob, :recall, [store, :key]})
 
-      assert recalled in [:miss, {:ok, :value}]
+      assert recalled == {:ok, :value}
       assert File.lstat(path) == {:error, :enoent}
       assert Blob.recall(store, :key) == :miss
     end
@@ -86,11 +89,12 @@ defmodule Roux.Blob.RacesTest do
   end
 
   describe "a trace lookup" do
-    # A trace put two minutes ago, and its file.
+    # A trace last used two hours ago (longer than the store's refresh
+    # interval: a hit touches it), and its file.
     defp old_trace!(store, name, n) do
       :ok = Trace.put(store, name, [{n, n}], {:value, n})
       path = Path.join([store.root, "traces", Blob.term_digest(name), Blob.term_digest([{n, n}])])
-      File.touch!(path, System.os_time(:second) - 120)
+      File.touch!(path, System.os_time(:second) - 2 * 60 * 60)
       path
     end
 

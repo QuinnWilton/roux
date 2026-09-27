@@ -359,7 +359,7 @@ defmodule Roux.Code do
   # an archive, which has no stamp of its own — the archive, the nearest
   # ancestor on its path that is a regular file.
   defp stamped_file(file) do
-    if File.regular?(file), do: file, else: archive_of(file) || file
+    if type(file) == :regular, do: file, else: archive_of(file) || file
   end
 
   defp archive_of(path) do
@@ -367,9 +367,16 @@ defmodule Roux.Code do
 
     cond do
       parent == path -> nil
-      File.regular?(parent) -> parent
-      File.dir?(parent) -> nil
+      type(parent) == :regular -> parent
+      type(parent) == :directory -> nil
       true -> archive_of(parent)
+    end
+  end
+
+  defp type(path) do
+    case Blob.IO.stat(path) do
+      {:ok, %File.Stat{type: type}} -> type
+      {:error, _} -> nil
     end
   end
 
@@ -383,8 +390,10 @@ defmodule Roux.Code do
   defp observe({:file, file}), do: stamp(file)
   defp observe({:absent, mod}), do: :code.which(mod) == :non_existing
 
+  # Raw: a fresh VM checks a kept digest with a stat per file, and none of
+  # them waits on the VM's file server.
   defp stamp(file) do
-    case File.stat(file, time: :posix) do
+    case Blob.IO.stat(file) do
       {:ok, %File.Stat{size: size, mtime: mtime, inode: inode, ctime: ctime}} ->
         {size, mtime, inode, ctime}
 

@@ -37,16 +37,17 @@ Roux.Code            — code closures and digests; per-query code versions
 Roux.Code.Verify     — call tracing for closure tests
 Roux.Blob            — content-addressed store: CAS, action cache, scratch, GC
 Roux.Blob.Trace      — verifying traces
+Roux.Blob.IO         — the store's raw file operations (and the race-test hook)
 Roux.Session         — a database across runs (open, commit, close)
 Roux.Sources         — files as inputs (stat prefilter, hashing)
 Roux.Stamp           — values kept while files' stat stamps hold
 Roux.QueryLog        — one database's recompute set, from telemetry
 ```
 
-Design decisions D18–D28 (code versions, persistence policy, fan-out
+Design decisions D18–D29 (code versions, persistence policy, fan-out
 groups, the blob store, values held by digest, optional inputs, sessions,
 telemetry's database, optional gen_lsp, the blob store's trust model,
-bounded trace history) are in docs/decisions.md.
+bounded trace history, raw store I/O) are in docs/decisions.md.
 
 ### Subsystem docs
 

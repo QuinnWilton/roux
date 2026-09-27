@@ -63,6 +63,15 @@ groups, and a session that ties them to a manifest.
   sweep the rest after a grace period, renaming aside first). Entries are
   immutable and installed by rename; a vanished or corrupt entry is a
   miss. `Roux.Blob.MissingError`, `Roux.Blob.FormatError`.
+- **The store's file I/O is raw, and a hit refreshes an entry at most
+  once an hour** (D29): `Roux.Blob`, `Roux.Blob.Trace`, `Roux.Stamp` and
+  `Roux.Code`'s stamps no longer go through the VM's file server, which
+  serialized every lookup of a `Roux.Runtime.parallel/3` fan-out (1,000
+  warm lookups on 8 workers: about 400 ms before, 140 ms after). A hit
+  sets an entry's modification time only when it is older than the
+  store's `refresh:` interval (`Roux.Blob.open/2`, an hour by default), so
+  a warm run writes nothing; `gc/2` never uses a grace or keep period
+  shorter than it. Traces carry their `mtime`.
 - **A trace name's history is bounded** (D28): `Roux.Blob.Trace.put/5`
   keeps the `keep:` most recently used traces of the name (default 8,
   or `:infinity`) and removes the rest, rename-aside then unlink; a hit

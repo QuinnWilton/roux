@@ -14,9 +14,11 @@ defmodule Roux.Blob.Trace do
   A name keeps several traces, one per distinct set of observations: a
   value computed before an edit is found again once the edit is undone.
   `find/4` tries the most recently used first, observing each dependency
-  at most once, and touches the trace it returns, so "recently used"
-  means used, not only written — and a collection (`Roux.Blob.gc/2`)
-  keeps traces in use, and the entries their values name.
+  at most once, and refreshes the trace it returns (`Roux.Blob`'s "Raw
+  I/O, and touches that refresh": within the store's refresh interval,
+  it is left alone), so "recently used" means used, not only written —
+  and a collection (`Roux.Blob.gc/2`) keeps traces in use, and the
+  entries their values name. Recency is known to within that interval.
 
   ## Bounded history
 
@@ -37,12 +39,24 @@ defmodule Roux.Blob.Trace do
   """
 
   alias Roux.Blob
+  alias Roux.Blob.IO, as: RawIO
 
   @typedoc "What computing a value observed: `{what was looked at, what it was}`."
   @type dep :: {term(), term()}
 
-  @typedoc "A trace: its name, its observations, the value they gave, and where it is kept."
-  @type t :: %{name: term(), deps: [dep()], value: term(), path: Path.t()}
+  @typedoc """
+  A trace: its name, its observations, the value they gave, where it is
+  kept, when it was last used (its modification time, POSIX seconds), and
+  the refresh interval of the store it came from.
+  """
+  @type t :: %{
+          name: term(),
+          deps: [dep()],
+          value: term(),
+          path: Path.t(),
+          mtime: integer(),
+          refresh: non_neg_integer()
+        }
 
   @default_keep 8
 
@@ -70,15 +84,15 @@ defmodule Roux.Blob.Trace do
     data = :erlang.term_to_binary({name, deps, value}, [:deterministic, {:compressed, 1}])
     staging = Path.join([root, "tmp", "#{:os.getpid()}-#{System.unique_integer([:positive])}"])
 
-    with :ok <- File.mkdir_p(dir),
-         :ok <- File.mkdir_p(Path.dirname(staging)),
-         :ok <- File.write(staging, data) do
-      case File.rename(staging, path) do
+    with :ok <- RawIO.mkdir_p(dir),
+         :ok <- RawIO.mkdir_p(Path.dirname(staging)),
+         :ok <- RawIO.write(staging, data) do
+      case RawIO.rename(staging, path) do
         :ok ->
           prune(store, dir, path, keep)
 
         {:error, _} = error ->
-          File.rm(staging)
+          RawIO.delete(staging)
           error
       end
     end
@@ -91,6 +105,7 @@ defmodule Roux.Blob.Trace do
   defp prune(store, dir, written, keep) do
     dir
     |> by_recency()
+    |> Enum.map(&elem(&1, 1))
     |> Enum.reject(&(&1 == written))
     |> Enum.drop(keep - 1)
     |> Enum.each(&Blob.discard(store, &1))
@@ -106,35 +121,36 @@ defmodule Roux.Blob.Trace do
       each.
   """
   @spec fetch(Blob.t(), term(), keyword()) :: [t()]
-  def fetch(%Blob{root: root}, name, opts \\ []) do
+  def fetch(%Blob{root: root} = store, name, opts \\ []) do
     limit = opts |> Keyword.validate!(limit: :all) |> Keyword.fetch!(:limit)
 
     unless limit == :all or (is_integer(limit) and limit >= 0) do
       raise ArgumentError, ":limit must be a non-negative integer or :all, got: #{inspect(limit)}"
     end
 
-    paths = by_recency(dir(root, name))
-    paths = if limit == :all, do: paths, else: Enum.take(paths, limit)
+    stamped = by_recency(dir(root, name))
+    stamped = if limit == :all, do: stamped, else: Enum.take(stamped, limit)
+    refresh = Blob.refresh_interval(store)
 
     # A trace removed since the listing (by a prune, a collection) is not
     # there to read, and is passed over.
-    for path <- paths,
-        {:ok, data} <- [File.read(path)],
+    for {mtime, path} <- stamped,
+        {:ok, data} <- [RawIO.read(path)],
         {:ok, {^name, deps, value}} <- [Blob.decode(data)] do
-      %{name: name, deps: deps, value: value, path: path}
+      %{name: name, deps: deps, value: value, path: path, mtime: mtime, refresh: refresh}
     end
   end
 
-  # A directory's trace files, the most recently used (modified) first:
-  # a file gone between the listing and its stat is left out.
+  # A directory's trace files as `{mtime, path}`, the most recently used
+  # (modified) first: a file gone between the listing and its stat is
+  # left out.
   defp by_recency(dir) do
-    for file <- ls(dir),
+    for file <- RawIO.ls(dir),
         path = Path.join(dir, file),
-        {:ok, %File.Stat{mtime: mtime}} <- [File.stat(path, time: :posix)] do
+        {:ok, %File.Stat{mtime: mtime}} <- [RawIO.stat(path)] do
       {mtime, path}
     end
     |> Enum.sort(:desc)
-    |> Enum.map(&elem(&1, 1))
   end
 
   @doc """
@@ -189,18 +205,12 @@ defmodule Roux.Blob.Trace do
     if now === observed, do: holds(rest, observe, seen), else: {:changed, seen}
   end
 
-  # A trace removed since it was read cannot be touched, and needs not be.
-  defp touch(%{path: path}) do
-    _ = Blob.touch(path)
+  # Marks a trace used, unless it was within its store's refresh interval.
+  # A trace removed since it was read cannot be touched, and need not be.
+  defp touch(%{path: path, mtime: mtime, refresh: refresh}) do
+    if System.os_time(:second) - mtime >= refresh, do: _ = Blob.touch(path)
     :ok
   end
 
   defp dir(root, name), do: Path.join([root, "traces", Blob.term_digest(name)])
-
-  defp ls(dir) do
-    case File.ls(dir) do
-      {:ok, names} -> names
-      {:error, _} -> []
-    end
-  end
 end

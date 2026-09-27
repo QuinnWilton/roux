@@ -52,6 +52,23 @@ defmodule Roux.Blob do
   decode — a truncated or corrupt file — are still a miss, never a
   crash.
 
+  ## Raw I/O, and touches that refresh
+
+  Every file operation of the store is raw (`Roux.Blob.IO`): it goes
+  straight to the operating system from the calling process, never
+  through the VM's one file server, so a fan-out of lookups
+  (`Roux.Runtime.parallel/3`) runs side by side.
+
+  A lookup that finds an entry — a `put/2` of bytes already there, a
+  `recall/2` hit, a trace found (`Roux.Blob.Trace`) — refreshes its
+  modification time, which is what a collection and a trace prune read
+  as "in use". It does so only when that time is older than the store's
+  `refresh:` interval (an hour by default, `open/2`): a warm run that
+  reads the same entries again writes nothing. Recency is therefore
+  known to within the interval, which is why a collection's grace and
+  keep periods are never shorter than it (a shorter one is taken as the
+  interval).
+
   ## Collection
 
   `gc/2` marks from the live roots — every owner's retained digests
@@ -64,14 +81,19 @@ defmodule Roux.Blob do
   it: a run's own entries are young until it retains them.
   """
 
-  require Record
-  Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
+  alias Roux.Blob.IO, as: RawIO
+
+  @refresh 60 * 60
 
   @enforce_keys [:root]
-  defstruct [:root, temporary?: false]
+  defstruct [:root, temporary?: false, refresh: @refresh]
 
-  @typedoc "A store: its root directory."
-  @type t :: %__MODULE__{root: Path.t(), temporary?: boolean()}
+  @typedoc """
+  A store: its root directory, whether `temporary/0` made it, and the
+  interval within which a hit leaves an entry's modification time alone
+  (see "Raw I/O, and touches that refresh").
+  """
+  @type t :: %__MODULE__{root: Path.t(), temporary?: boolean(), refresh: non_neg_integer()}
 
   @typedoc "An entry's name: the SHA-256 of its bytes, lowercase hex."
   @type digest :: String.t()
@@ -90,28 +112,40 @@ defmodule Roux.Blob do
   Opens the store at `root`, creating it (mode `0700`) when it is not
   there. Refuses a directory holding a store of another layout
   (`FORMAT`), and one another user could have written: see "Trust".
+
+  ## Options
+
+    * `:refresh` — seconds within which a hit leaves an entry's
+      modification time alone (default an hour; see "Raw I/O, and
+      touches that refresh").
   """
-  @spec open(Path.t()) ::
+  @spec open(Path.t(), keyword()) ::
           {:ok, t()}
           | {:error, {:format, String.t()} | Roux.Blob.TrustError.t() | File.posix()}
-  def open(root) when is_binary(root) do
+  def open(root, opts \\ []) when is_binary(root) do
+    refresh = opts |> Keyword.validate!(refresh: @refresh) |> Keyword.fetch!(:refresh)
+
+    unless is_integer(refresh) and refresh >= 0 do
+      raise ArgumentError, ":refresh must be a non-negative integer, got: #{inspect(refresh)}"
+    end
+
     root = Path.expand(root)
     format = Path.join(root, "FORMAT")
 
     with :ok <- ensure_root(root),
          :ok <- trusted(root, :directory) do
-      case File.read(format) do
+      case RawIO.read(format) do
         {:ok, contents} ->
           with :ok <- trusted(format, :regular) do
             if contents == @format,
-              do: {:ok, %__MODULE__{root: root}},
+              do: {:ok, %__MODULE__{root: root, refresh: refresh}},
               else: {:error, {:format, contents}}
           end
 
         {:error, :enoent} ->
-          with :ok <- File.mkdir_p(Path.join(root, "tmp")),
+          with :ok <- RawIO.mkdir_p(Path.join(root, "tmp")),
                :ok <- install_file(root, format, @format, 0o444) do
-            open(root)
+            open(root, opts)
           end
 
         {:error, reason} ->
@@ -123,14 +157,14 @@ defmodule Roux.Blob do
   # A root that is not there is made, readable and writable by this user
   # alone; one that is there is left as it is, for `trusted/2` to judge.
   defp ensure_root(root) do
-    case File.lstat(root) do
+    case RawIO.lstat(root) do
       {:ok, _} ->
         :ok
 
       {:error, :enoent} ->
-        with :ok <- File.mkdir_p(Path.dirname(root)) do
-          case File.mkdir(root) do
-            :ok -> File.chmod(root, 0o700)
+        with :ok <- RawIO.mkdir_p(Path.dirname(root)) do
+          case RawIO.mkdir(root) do
+            :ok -> RawIO.chmod(root, 0o700)
             {:error, :eexist} -> :ok
             error -> error
           end
@@ -150,14 +184,14 @@ defmodule Roux.Blob do
     if match?({:win32, _}, :os.type()) do
       :ok
     else
-      with {:ok, stat} <- File.lstat(path),
+      with {:ok, stat} <- RawIO.lstat(path),
            {:ok, stat} <- follow(path, stat, kind) do
         judge(path, stat, kind, current_uid())
       end
     end
   end
 
-  defp follow(path, %File.Stat{type: :symlink}, :directory), do: File.stat(path)
+  defp follow(path, %File.Stat{type: :symlink}, :directory), do: RawIO.stat(path)
   defp follow(_path, stat, _kind), do: {:ok, stat}
 
   defp judge(path, %File.Stat{type: type} = stat, kind, user) do
@@ -208,10 +242,10 @@ defmodule Roux.Blob do
     end
   end
 
-  @doc "Opens the store at `root` (`open/1`), raising on failure."
-  @spec open!(Path.t()) :: t()
-  def open!(root) do
-    case open(root) do
+  @doc "Opens the store at `root` (`open/2`), raising on failure."
+  @spec open!(Path.t(), keyword()) :: t()
+  def open!(root, opts \\ []) do
+    case open(root, opts) do
       {:ok, store} ->
         store
 
@@ -264,7 +298,7 @@ defmodule Roux.Blob do
   defp put_encoded(store, digest, data) do
     path = path(store, digest)
 
-    if present?(path, byte_size(data)) do
+    if present?(store, path, byte_size(data)) do
       {:ok, digest}
     else
       with :ok <- mkdir(Path.dirname(path)),
@@ -313,14 +347,14 @@ defmodule Roux.Blob do
     with {:ok, digest} <- file_digest(path),
          target = path(store, digest),
          :ok <- mkdir(Path.dirname(target)),
-         :ok <- File.chmod(path, 0o444),
+         :ok <- RawIO.chmod(path, 0o444),
          :ok <- move(store, path, target) do
       {:ok, digest}
     end
   end
 
   defp move(store, path, target) do
-    case File.rename(path, target) do
+    case RawIO.rename(path, target) do
       :ok ->
         :ok
 
@@ -328,9 +362,9 @@ defmodule Roux.Blob do
         staging = staging(store.root)
 
         with :ok <- File.cp(path, staging),
-             :ok <- File.chmod(staging, 0o444),
-             :ok <- File.rename(staging, target) do
-          File.rm(path)
+             :ok <- RawIO.chmod(staging, 0o444),
+             :ok <- RawIO.rename(staging, target) do
+          RawIO.delete(path)
         end
 
       {:error, _} = error ->
@@ -347,7 +381,7 @@ defmodule Roux.Blob do
   def get(%__MODULE__{} = store, digest) when is_binary(digest) do
     path = path(store, digest)
 
-    case File.read(path) do
+    case RawIO.read(path) do
       {:ok, data} ->
         if digest(data) == digest do
           {:ok, data}
@@ -387,7 +421,8 @@ defmodule Roux.Blob do
 
   @doc "Whether `digest` is stored (without reading it)."
   @spec member?(t(), digest()) :: boolean()
-  def member?(%__MODULE__{} = store, digest), do: File.regular?(path(store, digest))
+  def member?(%__MODULE__{} = store, digest),
+    do: match?({:ok, %File.Stat{type: :regular}}, RawIO.stat(path(store, digest)))
 
   @doc """
   Makes `dest` name the entry of `digest`: a hard link, or a copy when
@@ -398,16 +433,16 @@ defmodule Roux.Blob do
   def link(%__MODULE__{} = store, digest, dest) do
     source = path(store, digest)
 
-    case File.ln(source, dest) do
+    case RawIO.link(source, dest) do
       :ok ->
         :ok
 
       {:error, :enoent} ->
-        if File.exists?(source), do: {:error, :enoent}, else: {:error, :missing}
+        if match?({:ok, _}, RawIO.stat(source)), do: {:error, :enoent}, else: {:error, :missing}
 
       {:error, reason} when reason in [:exdev, :eperm, :enotsup] ->
         case File.cp(source, dest) do
-          :ok -> File.chmod(dest, 0o444)
+          :ok -> RawIO.chmod(dest, 0o444)
           {:error, :enoent} -> {:error, :missing}
           {:error, _} = error -> error
         end
@@ -425,15 +460,18 @@ defmodule Roux.Blob do
   # -- Action cache --
 
   @doc """
-  The value remembered under `key` (any term), or `:miss`. A hit touches
-  the entry: a collection keeps what recently used entries name.
+  The value remembered under `key` (any term), or `:miss`. A hit
+  refreshes the entry (see "Raw I/O, and touches that refresh"): a
+  collection keeps what recently used entries name.
   """
   @spec recall(t(), term()) :: {:ok, term()} | :miss
   def recall(%__MODULE__{} = store, key) do
     path = ac_path(store, key)
 
-    with {:ok, data} <- read_touching(path),
+    with {:ok, %File.Stat{mtime: mtime}} <- RawIO.stat(path),
+         {:ok, data} <- RawIO.read(path),
          {:ok, {^key, value}} <- decode(data) do
+      refresh(store, path, mtime)
       {:ok, value}
     else
       _ -> :miss
@@ -520,7 +558,7 @@ defmodule Roux.Blob do
   @doc "Forgets what `owner` kept alive (`retain/3`)."
   @spec release(t(), term()) :: :ok
   def release(%__MODULE__{root: root}, owner) do
-    _ = File.rm(Path.join([root, "roots", term_digest(owner)]))
+    _ = RawIO.delete(Path.join([root, "roots", term_digest(owner)]))
     :ok
   end
 
@@ -547,12 +585,14 @@ defmodule Roux.Blob do
   Collects the store: marks what the live roots name (see the
   moduledoc), and removes every other entry older than the grace period,
   every action-cache entry and trace unused for longer than `keep:`, and
-  scratch directories and writes a dead process left behind.
+  scratch directories and writes a dead process left behind. A grace or
+  keep period shorter than the store's refresh interval is taken as the
+  interval: an entry in use may look that much older than it is.
   """
   @spec gc(t(), [gc_option()]) :: gc_stats()
-  def gc(%__MODULE__{root: root} = store, opts \\ []) do
-    grace = Keyword.get(opts, :grace, @day)
-    keep = Keyword.get(opts, :keep, 7 * @day)
+  def gc(%__MODULE__{root: root, refresh: refresh} = store, opts \\ []) do
+    grace = max(Keyword.get(opts, :grace, @day), refresh)
+    keep = max(Keyword.get(opts, :keep, 7 * @day), refresh)
     now = System.os_time(:second)
 
     {pointers, stale_pointers} = pointers(store, now - keep)
@@ -627,7 +667,7 @@ defmodule Roux.Blob do
 
     for name <- ls(dir),
         path = Path.join(dir, name),
-        {:ok, data} <- [File.read(path)],
+        {:ok, data} <- [RawIO.read(path)],
         {:ok, {owner, digests}} <- [decode(data)],
         live_owner?(owner, path),
         digest <- digests,
@@ -639,7 +679,7 @@ defmodule Roux.Blob do
     if File.exists?(owner) do
       true
     else
-      File.rm(path)
+      RawIO.delete(path)
       false
     end
   end
@@ -659,7 +699,7 @@ defmodule Roux.Blob do
       if older_than?(path, since) do
         {marked, [path | stale]}
       else
-        case File.read(path) do
+        case RawIO.read(path) do
           {:ok, data} -> {digests_in(data, marked), stale}
           {:error, _} -> {marked, stale}
         end
@@ -697,18 +737,18 @@ defmodule Roux.Blob do
   # put back when a touch came between the look and the rename.
   defp sweep(%__MODULE__{root: root}, path, since) do
     with true <- older_than?(path, since),
-         {:ok, %File.Stat{size: size}} <- File.stat(path),
+         {:ok, %File.Stat{size: size}} <- RawIO.stat(path),
          aside = staging(root, "trash"),
          :ok <- mkdir(Path.dirname(aside)),
-         :ok <- File.rename(path, aside) do
+         :ok <- RawIO.rename(path, aside) do
       if older_than?(aside, since) do
-        File.rm(aside)
+        RawIO.delete(aside)
         {:ok, size}
       else
         # Touched meanwhile: back under its name, unless a writer put the
         # same bytes there again (then this copy goes).
-        _ = File.ln(aside, path)
-        File.rm(aside)
+        _ = RawIO.link(aside, path)
+        RawIO.delete(aside)
         :kept
       end
     else
@@ -763,31 +803,38 @@ defmodule Roux.Blob do
 
   defp hex(bin), do: Base.encode16(bin, case: :lower)
 
-  # Whether `path` holds `size` bytes, touching it: a present entry is
+  # Whether `path` holds `size` bytes, refreshing it: a present entry is
   # one a collection must now keep.
-  defp present?(path, size) do
-    case File.stat(path) do
-      {:ok, %File.Stat{type: :regular, size: ^size}} -> touch(path) == :ok
-      _ -> false
+  defp present?(store, path, size) do
+    case RawIO.stat(path) do
+      {:ok, %File.Stat{type: :regular, size: ^size, mtime: mtime}} ->
+        refresh(store, path, mtime) == :ok
+
+      _ ->
+        false
     end
   end
+
+  # Marks an entry in use — sets its modification time to now — unless
+  # it was marked within the store's refresh interval. A touch of an
+  # entry gone meanwhile is an error, and makes nothing.
+  defp refresh(%__MODULE__{refresh: interval}, path, mtime) do
+    if System.os_time(:second) - mtime >= interval, do: touch(path), else: :ok
+  end
+
+  @doc false
+  # The interval within which a hit leaves an entry alone, for traces
+  # fetched with no store at hand (`Roux.Blob.Trace.find/4`).
+  @spec refresh_interval(t() | nil) :: non_neg_integer()
+  def refresh_interval(%__MODULE__{refresh: interval}), do: interval
+  def refresh_interval(nil), do: @refresh
 
   @doc false
   # One change of the entry's times: it finds the entry or fails, and
   # never makes one (`File.touch/1` would create an empty file, which a
   # reader would then take for an entry).
   @spec touch(Path.t()) :: :ok | {:error, File.posix()}
-  def touch(path) do
-    now = System.os_time(:second)
-    :file.write_file_info(path, file_info(mtime: now, atime: now), [{:time, :posix}])
-  end
-
-  defp read_touching(path) do
-    case touch(path) do
-      :ok -> File.read(path)
-      {:error, _} = error -> error
-    end
-  end
+  def touch(path), do: RawIO.utime(path, System.os_time(:second))
 
   @doc false
   # Takes the file at `path` out of the store whole: renamed aside into
@@ -800,8 +847,8 @@ defmodule Roux.Blob do
     aside = staging(root, "trash")
 
     with :ok <- mkdir(Path.dirname(aside)),
-         :ok <- File.rename(path, aside) do
-      File.rm(aside)
+         :ok <- RawIO.rename(path, aside) do
+      RawIO.delete(aside)
     end
 
     :ok
@@ -812,12 +859,12 @@ defmodule Roux.Blob do
     staging = staging(root)
 
     result =
-      with :ok <- File.write(staging, data),
-           :ok <- if(mode, do: File.chmod(staging, mode), else: :ok) do
-        File.rename(staging, path)
+      with :ok <- RawIO.write(staging, data),
+           :ok <- if(mode, do: RawIO.chmod(staging, mode), else: :ok) do
+        RawIO.rename(staging, path)
       end
 
-    if result != :ok, do: File.rm(staging)
+    if result != :ok, do: RawIO.delete(staging)
     result
   end
 
@@ -825,38 +872,15 @@ defmodule Roux.Blob do
     do: Path.join([root, dir, "#{:os.getpid()}-#{System.unique_integer([:positive])}"])
 
   defp older_than?(path, since) do
-    case File.lstat(path, time: :posix) do
+    case RawIO.lstat(path) do
       {:ok, %File.Stat{mtime: mtime}} -> mtime < since
       {:error, _} -> false
     end
   end
 
-  # One `mkdir`, and the parents only when it says they are missing: most
-  # of the time the directory, or its parent, is there already.
-  defp mkdir(dir) do
-    case File.mkdir(dir) do
-      :ok ->
-        :ok
+  # One raw `mkdir`, and the parents only when it says they are missing:
+  # most of the time the directory, or its parent, is there already.
+  defp mkdir(dir), do: RawIO.mkdir_p(dir)
 
-      {:error, :eexist} ->
-        :ok
-
-      {:error, :enoent} ->
-        case File.mkdir_p(dir) do
-          :ok -> :ok
-          {:error, :eexist} -> :ok
-          error -> error
-        end
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  defp ls(dir) do
-    case File.ls(dir) do
-      {:ok, names} -> Enum.sort(names)
-      {:error, _} -> []
-    end
-  end
+  defp ls(dir), do: dir |> RawIO.ls() |> Enum.sort()
 end
