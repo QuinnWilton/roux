@@ -23,18 +23,29 @@ defmodule Roux.Blob do
       (`Roux.Blob.Trace`);
     * `roots/<owner digest>` — the digests an owner keeps alive
       (`retain/3`), a manifest's among them;
-    * `scratch/<os pid>.<token>-<n>/` — a directory per use (`scratch/2`),
-      named after the OS process and a token of its VM's own;
+    * `scratch/<os pid>-<n>/` — a directory per use (`scratch/2`);
     * `tmp/` — files being written; `trash/` — entries being removed.
 
   ## Entries
 
   An entry is immutable. It is written under a name of its own in
-  `tmp/` and renamed into place, so a reader finds it whole or not at
-  all, and two writers of one entry (same bytes) both succeed. CAS
-  entries are read-only on disk: a hard link to one (`link/3`) shares
-  its inode, and a program writing into the link would write into the
-  store. A reader that finds an entry gone, or not holding what its name
+  `tmp/` and hard-linked into place, so a reader finds it whole or not
+  at all. A CAS entry is never replaced: a writer that finds its name
+  taken (`EEXIST`) has found the same bytes — content addressing makes
+  "already there" always right — and leaves them. A rename that replaces
+  a name is not atomic everywhere: on APFS a concurrent link(2) or open
+  finds no name for a moment, so replacing the empty relation file that
+  every solve links made those links fail (`{:error, :enoent}`) while
+  the entry was there all along. CAS entries are read-only on disk: a
+  hard link to one (`link/3`) shares its inode, and a program writing
+  into the link would write into the store.
+
+  The names that are replaced on purpose — an action-cache entry, a
+  trace, a root, whose value can change — are renamed into place, and
+  only when their bytes change (an equal write refreshes the file
+  instead). Their readers take a name missing for that moment for a
+  miss, never an error: a recall misses, a trace lookup passes over the
+  trace. A reader that finds an entry gone, or not holding what its name
   says, takes it for a miss (and a corrupt one is taken out of its name,
   so the next write replaces it).
 
@@ -145,7 +156,7 @@ defmodule Roux.Blob do
 
         {:error, :enoent} ->
           with :ok <- RawIO.mkdir_p(Path.join(root, "tmp")),
-               :ok <- install_file(root, format, @format, 0o444) do
+               :ok <- install_new(root, format, @format, 0o444) do
             open(root, opts)
           end
 
@@ -303,9 +314,51 @@ defmodule Roux.Blob do
       {:ok, digest}
     else
       with :ok <- mkdir(Path.dirname(path)),
-           :ok <- install_file(store.root, path, data, 0o444) do
+           :ok <- install_entry(store, path, &RawIO.write(&1, data)) do
         {:ok, digest}
       end
+    end
+  end
+
+  # Installs a CAS entry: `stage` writes the bytes under a name of the
+  # writer's own, which is then hard-linked under the entry's name and
+  # removed. Never a rename: see "Entries".
+  defp install_entry(store, path, stage) do
+    staging = staging(store.root)
+
+    result =
+      with :ok <- stage.(staging),
+           :ok <- RawIO.chmod(staging, 0o444) do
+        link_into_place(store, staging, path)
+      end
+
+    _ = RawIO.delete(staging)
+    result
+  end
+
+  # Links `source` under the entry name `path`. A name already there is
+  # the same bytes: refreshed as a hit is (a collection that found it old
+  # must now keep it), and linked again should a collection have taken it
+  # in between.
+  defp link_into_place(store, source, path, attempts \\ 3) do
+    case RawIO.link(source, path) do
+      :ok ->
+        :ok
+
+      {:error, :eexist} ->
+        with {:ok, %File.Stat{mtime: mtime}} <- RawIO.stat(path),
+             :ok <- refresh(store, path, mtime) do
+          :ok
+        else
+          {:error, :enoent} when attempts > 1 ->
+            link_into_place(store, source, path, attempts - 1)
+
+          {:error, _} = error ->
+            error
+        end
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -354,18 +407,19 @@ defmodule Roux.Blob do
     end
   end
 
+  # Linked into place, then removed from where it was: an entry is never
+  # replaced (see "Entries"). Across file systems, a copy is staged in the
+  # store and linked into place instead.
   defp move(store, path, target) do
-    case RawIO.rename(path, target) do
+    case link_into_place(store, path, target) do
       :ok ->
+        _ = RawIO.delete(path)
         :ok
 
-      {:error, :exdev} ->
-        staging = staging(store.root)
-
-        with :ok <- File.cp(path, staging),
-             :ok <- RawIO.chmod(staging, 0o444),
-             :ok <- RawIO.rename(staging, target) do
-          RawIO.delete(path)
+      {:error, reason} when reason in [:exdev, :eperm, :enotsup] ->
+        with :ok <- install_entry(store, target, &File.cp(path, &1)) do
+          _ = RawIO.delete(path)
+          :ok
         end
 
       {:error, _} = error ->
@@ -485,7 +539,7 @@ defmodule Roux.Blob do
     path = ac_path(store, key)
 
     with :ok <- mkdir(Path.dirname(path)) do
-      install_file(store.root, path, :erlang.term_to_binary({key, value}, @term_opts))
+      replace_file(store, path, :erlang.term_to_binary({key, value}, @term_opts))
     end
   end
 
@@ -547,12 +601,12 @@ defmodule Roux.Blob do
   the collection once nothing is at that path.
   """
   @spec retain(t(), term(), [digest()]) :: :ok | {:error, File.posix()}
-  def retain(%__MODULE__{root: root}, owner, digests) when is_list(digests) do
+  def retain(%__MODULE__{root: root} = store, owner, digests) when is_list(digests) do
     dir = Path.join(root, "roots")
 
     with :ok <- mkdir(dir) do
       data = :erlang.term_to_binary({owner, Enum.uniq(digests)}, @term_opts)
-      install_file(root, Path.join(dir, term_digest(owner)), data)
+      replace_file(store, Path.join(dir, term_digest(owner)), data)
     end
   end
 
@@ -597,6 +651,7 @@ defmodule Roux.Blob do
     now = System.os_time(:second)
 
     {pointers, stale_pointers} = pointers(store, now - keep)
+
     marked = MapSet.union(root_digests(store), pointers)
 
     removed =
@@ -833,12 +888,48 @@ defmodule Roux.Blob do
   end
 
   # Written under a name of its own in `tmp/`, then renamed into place.
-  defp install_file(root, path, data, mode \\ nil) do
+  # A file that is only ever made, never replaced (`FORMAT`): linked into
+  # place, a name already there being the same.
+  defp install_new(root, path, data, mode) do
     staging = staging(root)
 
     result =
       with :ok <- RawIO.write(staging, data),
-           :ok <- if(mode, do: RawIO.chmod(staging, mode), else: :ok) do
+           :ok <- RawIO.chmod(staging, mode) do
+        case RawIO.link(staging, path) do
+          {:error, :eexist} -> :ok
+          other -> other
+        end
+      end
+
+    _ = RawIO.delete(staging)
+    result
+  end
+
+  # A file replaced on purpose (an action-cache entry, a root): renamed
+  # into place, and only when its bytes change — equal bytes are
+  # refreshed instead, so a reader meets the replacing rename's missing
+  # name (see "Entries") only when there is something new to read.
+  defp replace_file(store, path, data) do
+    case RawIO.read(path) do
+      {:ok, ^data} ->
+        with {:ok, %File.Stat{mtime: mtime}} <- RawIO.stat(path),
+             :ok <- refresh(store, path, mtime) do
+          :ok
+        else
+          _vanished -> write_and_rename(store.root, path, data)
+        end
+
+      _missing_or_other ->
+        write_and_rename(store.root, path, data)
+    end
+  end
+
+  defp write_and_rename(root, path, data) do
+    staging = staging(root)
+
+    result =
+      with :ok <- RawIO.write(staging, data) do
         RawIO.rename(staging, path)
       end
 

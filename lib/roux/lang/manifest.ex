@@ -69,7 +69,11 @@ defmodule Roux.Lang.Manifest do
   partly read; the values decoded later are bytes the checksum covered. `write/3` writes a
   temporary file beside the manifest and renames it over the old one:
   a reader sees the old manifest or the new one, and a write that dies
-  halfway leaves the old one in place.
+  halfway leaves the old one in place. On some file systems (APFS) that
+  replacing rename leaves the name missing for a moment, so `load/1`
+  reads again, twice, before it takes a missing manifest for none: a
+  run that did meet the moment starts cold, which costs time and never
+  a wrong result.
 
   ## Versioning
 
@@ -218,13 +222,28 @@ defmodule Roux.Lang.Manifest do
   """
   @spec load(String.t()) :: {:ok, manifest_data()} | :error
   def load(path) when is_binary(path) do
-    with {:ok, binary} <- File.read(path),
+    with {:ok, binary} <- read_settled(path),
          <<@magic, @format::32, crc::32, payload::binary>> <- binary,
          ^crc <- :erlang.crc32(payload),
          {:ok, data} <- decode_payload(payload) do
       {:ok, Map.put(data, :vsn, @format)}
     else
       _ -> :error
+    end
+  end
+
+  @doc false
+  # A file replaced by rename may be missing for a moment (see
+  # "Integrity"): read again, twice, before taking it for absent.
+  @spec read_settled(Path.t(), [non_neg_integer()]) :: {:ok, binary()} | {:error, File.posix()}
+  def read_settled(path, pauses \\ [1, 5]) do
+    case {File.read(path), pauses} do
+      {{:error, :enoent}, [pause | rest]} ->
+        Process.sleep(pause)
+        read_settled(path, rest)
+
+      {result, _} ->
+        result
     end
   end
 

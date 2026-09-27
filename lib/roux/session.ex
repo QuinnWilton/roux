@@ -167,7 +167,7 @@ defmodule Roux.Session do
   """
   @spec read_extra(Path.t()) :: {:ok, term()} | :error
   def read_extra(manifest) when is_binary(manifest) do
-    with {:ok, bytes} <- File.read(extra_path(manifest)),
+    with {:ok, bytes} <- Manifest.read_settled(extra_path(manifest)),
          {:ok, extra} <- Blob.decode(bytes) do
       {:ok, extra}
     else

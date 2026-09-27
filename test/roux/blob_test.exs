@@ -346,6 +346,55 @@ defmodule Roux.BlobTest do
     end
   end
 
+  describe "never replacing what readers count on" do
+    defp inode(path), do: File.stat!(path).inode
+
+    test "a CAS entry written again keeps its inode: it is never replaced", %{store: store} do
+      {:ok, digest} = Blob.put(store, "same")
+      path = Blob.path(store, digest)
+      before = inode(path)
+
+      # Found missing by a writer that races another: the link loses to
+      # the entry there, which stays.
+      Blob.scratch(store, fn dir ->
+        output = Path.join(dir, "out")
+        File.write!(output, "same")
+        assert {:ok, ^digest} = Blob.adopt(store, output)
+        refute File.exists?(output)
+      end)
+
+      assert inode(path) == before
+    end
+
+    test "an equal action-cache value, trace or root is not written again", %{
+      store: store,
+      tmp_dir: tmp
+    } do
+      :ok = Blob.remember(store, :k, :v)
+      :ok = Trace.put(store, :t, [{:a, 1}], :v)
+      owner = Path.join(tmp, "owner")
+      File.write!(owner, "")
+      :ok = Blob.retain(store, owner, ["d"])
+
+      files =
+        for dir <- ["ac", "traces", "roots"],
+            path <- Path.wildcard(Path.join([store.root, dir, "**"])),
+            File.regular?(path),
+            do: path
+
+      before = Map.new(files, &{&1, inode(&1)})
+
+      :ok = Blob.remember(store, :k, :v)
+      :ok = Trace.put(store, :t, [{:a, 1}], :v)
+      :ok = Blob.retain(store, owner, ["d"])
+      assert Map.new(files, &{&1, inode(&1)}) == before
+
+      # A changed value is written.
+      :ok = Blob.remember(store, :k, :w)
+      assert {:ok, :w} = Blob.recall(store, :k)
+    end
+  end
+
   describe "scratch/2" do
     test "hands out a directory of its own, removed afterwards", %{store: store} do
       dir = Blob.scratch(store, fn dir -> File.dir?(dir) && dir end)

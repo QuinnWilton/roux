@@ -85,16 +85,32 @@ defmodule Roux.Blob.Trace do
     staging = Path.join([root, "tmp", "#{RawIO.ospid()}-#{RawIO.unique()}"])
 
     with :ok <- RawIO.mkdir_p(dir),
-         :ok <- RawIO.mkdir_p(Path.dirname(staging)),
-         :ok <- RawIO.write(staging, data) do
-      case RawIO.rename(staging, path) do
-        :ok ->
-          prune(store, dir, path, keep)
+         :ok <- place(store, path, staging, data) do
+      prune(store, dir, path, keep)
+    end
+  end
 
-        {:error, _} = error ->
-          RawIO.delete(staging)
-          error
-      end
+  # Renamed into place, replacing a trace of the same observations — only
+  # when its bytes change: an equal one is marked used instead, so a
+  # lookup meets a replacing rename's missing name (`Roux.Blob`'s
+  # "Entries") only when there is a new value to find.
+  defp place(store, path, staging, data) do
+    with {:ok, ^data} <- RawIO.read(path),
+         {:ok, %File.Stat{mtime: mtime}} <- RawIO.stat(path) do
+      touch(%{path: path, mtime: mtime, refresh: Blob.refresh_interval(store)})
+    else
+      _new_or_changed ->
+        with :ok <- RawIO.mkdir_p(Path.dirname(staging)),
+             :ok <- RawIO.write(staging, data) do
+          case RawIO.rename(staging, path) do
+            :ok ->
+              :ok
+
+            {:error, _} = error ->
+              RawIO.delete(staging)
+              error
+          end
+        end
     end
   end
 
