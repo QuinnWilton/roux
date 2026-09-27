@@ -37,6 +37,21 @@ defmodule Roux.Blob do
   says, takes it for a miss (and a corrupt one is taken out of its name,
   so the next write replaces it).
 
+  ## Trust
+
+  A store has the manifest's trust model: its files were written by this
+  tool, for this user, on this machine. Terms are decoded as the
+  manifest decodes them — without `:safe`, so a term naming an atom the
+  VM has not created yet (a function name in a stored finding) decodes
+  in a fresh VM instead of missing. What makes that trust good is who
+  can write the files, and `open/1` checks exactly that: it refuses a
+  root, or a `FORMAT` file, that the current OS user does not own or
+  that is writable by its group or by everyone (`Roux.Blob.TrustError`).
+  A symbolic link as the root is followed, and its target checked the
+  same way. A root `open/1` creates is made `0700`. Bytes that do not
+  decode — a truncated or corrupt file — are still a miss, never a
+  crash.
+
   ## Collection
 
   `gc/2` marks from the live roots — every owner's retained digests
@@ -72,29 +87,124 @@ defmodule Roux.Blob do
   # -- Opening --
 
   @doc """
-  Opens the store at `root`, creating it when it is not there. Refuses
-  a directory holding a store of another layout (`FORMAT`).
+  Opens the store at `root`, creating it (mode `0700`) when it is not
+  there. Refuses a directory holding a store of another layout
+  (`FORMAT`), and one another user could have written: see "Trust".
   """
-  @spec open(Path.t()) :: {:ok, t()} | {:error, {:format, String.t()} | File.posix()}
+  @spec open(Path.t()) ::
+          {:ok, t()}
+          | {:error, {:format, String.t()} | Roux.Blob.TrustError.t() | File.posix()}
   def open(root) when is_binary(root) do
     root = Path.expand(root)
     format = Path.join(root, "FORMAT")
 
-    case File.read(format) do
-      {:ok, @format} ->
-        {:ok, %__MODULE__{root: root}}
+    with :ok <- ensure_root(root),
+         :ok <- trusted(root, :directory) do
+      case File.read(format) do
+        {:ok, contents} ->
+          with :ok <- trusted(format, :regular) do
+            if contents == @format,
+              do: {:ok, %__MODULE__{root: root}},
+              else: {:error, {:format, contents}}
+          end
 
-      {:ok, other} ->
-        {:error, {:format, other}}
+        {:error, :enoent} ->
+          with :ok <- File.mkdir_p(Path.join(root, "tmp")),
+               :ok <- install_file(root, format, @format, 0o444) do
+            open(root)
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # A root that is not there is made, readable and writable by this user
+  # alone; one that is there is left as it is, for `trusted/2` to judge.
+  defp ensure_root(root) do
+    case File.lstat(root) do
+      {:ok, _} ->
+        :ok
 
       {:error, :enoent} ->
-        with :ok <- File.mkdir_p(Path.join(root, "tmp")),
-             :ok <- install_file(root, format, @format) do
-          open(root)
+        with :ok <- File.mkdir_p(Path.dirname(root)) do
+          case File.mkdir(root) do
+            :ok -> File.chmod(root, 0o700)
+            {:error, :eexist} -> :ok
+            error -> error
+          end
         end
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Whether `path` is what the store needs it to be (a directory, or a
+  # regular file), owned by this user and writable by no one else. A
+  # symbolic root is followed and its target judged; a symbolic FORMAT
+  # is refused. On Windows, whose file modes say nothing of this, every
+  # path passes.
+  defp trusted(path, kind) do
+    if match?({:win32, _}, :os.type()) do
+      :ok
+    else
+      with {:ok, stat} <- File.lstat(path),
+           {:ok, stat} <- follow(path, stat, kind) do
+        judge(path, stat, kind, current_uid())
+      end
+    end
+  end
+
+  defp follow(path, %File.Stat{type: :symlink}, :directory), do: File.stat(path)
+  defp follow(_path, stat, _kind), do: {:ok, stat}
+
+  defp judge(path, %File.Stat{type: type} = stat, kind, user) do
+    cond do
+      kind == :directory and type != :directory ->
+        {:error, %Roux.Blob.TrustError{path: path, reason: :not_a_directory}}
+
+      kind == :regular and type != :regular ->
+        {:error, %Roux.Blob.TrustError{path: path, reason: :not_a_regular_file}}
+
+      stat.uid != user ->
+        {:error,
+         %Roux.Blob.TrustError{path: path, reason: :not_owner, owner: stat.uid, user: user}}
+
+      Bitwise.band(stat.mode, 0o022) != 0 ->
+        {:error, %Roux.Blob.TrustError{path: path, reason: :writable_by_others, mode: stat.mode}}
+
+      true ->
+        :ok
+    end
+  end
+
+  # The effective uid of this VM: the owner of a file it just made. Once
+  # per VM.
+  defp current_uid do
+    case :persistent_term.get({__MODULE__, :uid}, nil) do
+      nil ->
+        probe =
+          Path.join(
+            System.tmp_dir!(),
+            "roux-uid-#{:os.getpid()}-#{System.unique_integer([:positive])}"
+          )
+
+        File.write!(probe, "", [:exclusive])
+
+        uid =
+          try do
+            File.stat!(probe).uid
+          after
+            File.rm(probe)
+          end
+
+        :persistent_term.put({__MODULE__, :uid}, uid)
+        uid
+
+      uid ->
+        uid
     end
   end
 
@@ -108,14 +218,17 @@ defmodule Roux.Blob do
       {:error, {:format, found}} ->
         raise Roux.Blob.FormatError, root: root, found: found
 
+      {:error, %Roux.Blob.TrustError{} = error} ->
+        raise error
+
       {:error, reason} ->
         raise File.Error, reason: reason, action: "open blob store", path: root
     end
   end
 
   @doc """
-  A store of its own in the system's temporary directory, for a run that
-  keeps nothing: `destroy/1` removes it.
+  A store of its own in the system's temporary directory (mode `0700`),
+  for a run that keeps nothing: `destroy/1` removes it.
   """
   @spec temporary() :: t()
   def temporary do
@@ -250,8 +363,8 @@ defmodule Roux.Blob do
 
   @doc """
   The term stored under `digest` (`put_term/2`), or `:miss` — including
-  for bytes that do not decode as a term (read with `:safe`, which
-  refuses to create atoms).
+  for bytes that do not decode as a term. Decoded as the manifest
+  decodes, atoms and all (see "Trust").
   """
   @spec get_term(t(), digest()) :: {:ok, term()} | :miss
   def get_term(%__MODULE__{} = store, digest) do
@@ -616,9 +729,13 @@ defmodule Roux.Blob do
   def term_digest(term), do: digest(:erlang.term_to_binary(term, [:deterministic]))
 
   @doc false
+  # A stored term, or `:miss` for bytes that do not decode (truncated,
+  # corrupt). Not `:safe`: the store is trusted as the manifest is, and a
+  # term naming an atom this VM has not made yet must decode (see
+  # "Trust").
   @spec decode(binary()) :: {:ok, term()} | :miss
   def decode(data) do
-    {:ok, :erlang.binary_to_term(data, [:safe])}
+    {:ok, :erlang.binary_to_term(data)}
   rescue
     ArgumentError -> :miss
   end

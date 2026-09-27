@@ -224,3 +224,11 @@ The only case where the framework must be involved is fan-out within a query bod
 **Decision**: `gen_lsp` is an optional dependency; `Roux.Lang.LSP` compiles only where it is installed.
 
 **Rationale**: A tool that never serves LSP — an escript above all — should not bundle a JSON-RPC stack and its four dependencies. A project serving LSP through roux declares the dependency it uses.
+
+## D27: The blob store's trust model is the manifest's; its boundary is ownership and permissions
+
+**Decision**: `Roux.Blob` decodes CAS terms, action-cache values, traces and blob-held memo values without `:safe`, as the manifest decodes its own. `Roux.Blob.open/1` refuses a store root, or its `FORMAT` file, that the current OS user does not own or that is writable by its group or by everyone (`Roux.Blob.TrustError`); a symbolic root is followed and its target checked the same way, and a symbolic `FORMAT` is refused. A root `open/1` creates, and `temporary/0`'s, is made `0700`. Bytes that do not decode are still a miss.
+
+**Rationale**: A store's files are written by this tool, for this user, on this machine: the same trust as a manifest in `_build`. `:safe` is for input from outside that boundary, and inside it only cost: a term naming an atom the VM has not made yet (a function name in a stored finding, a module in a line table) decoded as a miss in every fresh VM, so each new Mix run rebuilt what the store held. Two decode policies for one kind of file also meant two trust models. The flag was never the boundary; who can write the files is, so `open/1` checks that, once, where a store is chosen.
+
+**Trade-off**: The check covers the root and `FORMAT`, not every file below them: a root writable by no one else keeps others out of what it holds (and one roux creates is `0700`, which keeps them from reading it too). On Windows, whose file modes say nothing of this, every root passes.

@@ -163,7 +163,7 @@ defmodule Roux.Session do
   @doc """
   The `extra` term a session committed beside the manifest at
   `manifest` (`commit/3`), or `:error` when there is none, or it does
-  not decode (safely: no atom is made).
+  not decode.
   """
   @spec read_extra(Path.t()) :: {:ok, term()} | :error
   def read_extra(manifest) when is_binary(manifest) do

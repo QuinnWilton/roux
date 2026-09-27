@@ -63,6 +63,14 @@ groups, and a session that ties them to a manifest.
   sweep the rest after a grace period, renaming aside first). Entries are
   immutable and installed by rename; a vanished or corrupt entry is a
   miss. `Roux.Blob.MissingError`, `Roux.Blob.FormatError`.
+- **The blob store is trusted as the manifest is** (D27): its terms decode
+  without `:safe`, so a term naming an atom a fresh VM has not made yet
+  is a hit, not a miss. `Roux.Blob.open/1` enforces the boundary instead:
+  it refuses a root or `FORMAT` that another user owns or that its group
+  or everyone can write (`Roux.Blob.TrustError`, naming the path and the
+  `chmod`/`chown` to fix it; `open/1` returns it, `open!/1` raises it),
+  follows a symbolic root to check its target, and makes the roots it
+  creates `0700`.
 - **`Roux.Session`**: `open/1` (`modules:`, `languages:`, `manifest:`,
   `blob:`, `force:`), `commit/3` (writes the manifest iff the run changed
   something it holds; `extra:` keeps a small term beside it), `read_extra/1`,

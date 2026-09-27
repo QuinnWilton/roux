@@ -21,7 +21,9 @@ defmodule Roux.BlobTest do
       assert File.read!(Path.join(root, "FORMAT")) == "roux-blob 1\n"
       assert {:ok, _} = Blob.open(root)
 
-      File.write!(Path.join(root, "FORMAT"), "roux-blob 0\n")
+      format = Path.join(root, "FORMAT")
+      File.chmod!(format, 0o644)
+      File.write!(format, "roux-blob 0\n")
       assert {:error, {:format, "roux-blob 0\n"}} = Blob.open(root)
       assert_raise Roux.Blob.FormatError, ~r/another layout/, fn -> Blob.open!(root) end
     end
@@ -68,7 +70,7 @@ defmodule Roux.BlobTest do
       assert {:ok, "the real bytes"} = Blob.get(store, digest)
     end
 
-    test "put_term encodes deterministically; get_term decodes safely", %{store: store} do
+    test "put_term encodes deterministically; get_term decodes what it stored", %{store: store} do
       a = Map.new(1..40, &{&1, Integer.to_string(&1)})
       b = 40..1//-1 |> Enum.map(&{&1, Integer.to_string(&1)}) |> Map.new()
 
@@ -80,11 +82,17 @@ defmodule Roux.BlobTest do
       {:ok, not_a_term} = Blob.put(store, "not a term")
       assert Blob.get_term(store, not_a_term) == :miss
 
-      # An atom this VM never saw: `:safe` refuses to make it.
+      # An atom this VM never saw is made, as the manifest makes it (the
+      # store is trusted: see Roux.Blob.TrustTest).
       name = "roux_blob_test_#{System.unique_integer([:positive])}"
       unknown = <<131, 119, byte_size(name)::8, name::binary>>
       {:ok, atom_digest} = Blob.put(store, unknown)
-      assert Blob.get_term(store, atom_digest) == :miss
+      assert {:ok, atom} = Blob.get_term(store, atom_digest)
+      assert Atom.to_string(atom) == name
+
+      # A truncated term is still a miss.
+      {:ok, cut} = Blob.put(store, binary_part(unknown, 0, byte_size(unknown) - 2))
+      assert Blob.get_term(store, cut) == :miss
     end
 
     test "adopt moves a file in by rename", %{store: store, tmp_dir: tmp} do
