@@ -211,6 +211,8 @@ The only case where the framework must be involved is fan-out within a query bod
 
 **Rationale**: A warm no-op run's budget is a fraction of a second; rewriting a multi-megabyte manifest it did not change is most of it. The `extra` sidecar lets a Mix compiler's `diagnostics/0` answer without loading the manifest.
 
+**Restore and unregistered queries**: a restore leaves out every entry of a query that is not registered and every entry that read one, transitively, as the manifest's transient cascade does (D19). Treating such a dependency as stale at validation instead would still leave the dangling edge in the table, and a reader restored above it would pass its durability check without ever walking to it. Scanning the restored dependencies costs about 0.3 ms on a 3,354-entry manifest.
+
 ## D25: Telemetry events name their database
 
 **Decision**: Every event about a database carries `database:` (`Roux.Database.id/1`, its memo table's tid), and `Roux.QueryLog` filters on it.

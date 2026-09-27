@@ -343,6 +343,7 @@ defmodule Roux.Lang.ManifestTest do
     db = Database.new()
     Database.register_input(db, :source_text, durability: :medium)
     Database.register_input(db, :src, durability: :medium)
+    Database.register_input(db, :stable, durability: :high)
     for name <- queries, do: register_closure(db, name)
     :ok = Manifest.restore(db, data)
     db
@@ -490,6 +491,88 @@ defmodule Roux.Lang.ManifestTest do
       try do
         assert Memo.get(db2, {:rows, "a.mini"}) == :miss
         assert {:ok, _} = Memo.get(db2, {:input, :source_text, "a.mini"})
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    # :gone's body, dispatched by name (`register_closure/3` names this
+    # module): a fan-out demands its members through the registry.
+    def gone(db, key) do
+      Runtime.execute(db, :gone, key, fn db, key -> Runtime.input(db, :source_text, key) end)
+    end
+
+    # A graph over an input: :gone reads it, :reader reads :gone, :top
+    # reads :reader, :fan reads :gone through a fan-out, :other reads the
+    # input alone. All registered when written; restored without :gone.
+    defp gone_graph(db) do
+      Database.register_input(db, :source_text, durability: :medium)
+      Database.register_input(db, :stable, durability: :high)
+      for name <- [:gone, :reader, :top, :fan, :other], do: register_closure(db, name)
+      Input.set(db, :source_text, "a", "alpha")
+      Input.set(db, :stable, :k, 1)
+
+      Runtime.execute(db, :top, "a", fn db, key ->
+        Runtime.execute(db, :reader, key, fn db, key -> gone(db, key) end)
+      end)
+
+      Runtime.execute(db, :fan, "a", fn db, key -> Runtime.parallel(db, [{:gone, key}]) end)
+
+      Runtime.execute(db, :other, "a", fn db, key ->
+        {Runtime.input(db, :source_text, key), Runtime.input(db, :stable, :k)}
+      end)
+    end
+
+    test "leaves out every entry that read a query no longer registered, transitively",
+         %{db: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      gone_graph(db)
+      Manifest.write(db, %{}, path)
+
+      db2 = restored(path, [:reader, :top, :fan, :other])
+
+      try do
+        for query <- [:gone, :reader, :top, :fan] do
+          assert Memo.get(db2, {query, "a"}) == :miss, "#{query} was restored"
+        end
+
+        assert {:ok, %Entry{value: {"alpha", 1}}} = Memo.get(db2, {:other, "a"})
+
+        # Validation walks what was kept (a :high input moved) and never
+        # meets an edge to a query nothing can run.
+        Input.set(db2, :stable, :k, 2)
+
+        assert Runtime.execute(db2, :other, "a", fn db, key ->
+                 {Runtime.input(db, :source_text, key), Runtime.input(db, :stable, :k)}
+               end) == {"alpha", 2}
+
+        assert Runtime.execute(db2, :top, "a", fn _db, _key -> :recomputed end) == :recomputed
+      after
+        Database.shutdown(db2)
+      end
+    end
+
+    test "an entry that read an unregistered query whose own entry was not kept goes too",
+         %{db: db, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "compile.roux")
+      Database.register_input(db, :source_text, durability: :medium)
+      register_closure(db, :reader)
+      Input.set(db, :source_text, "a", "alpha")
+
+      # :ephemeral is never registered: its entry is not restored, and
+      # nothing could run it again.
+      Runtime.execute(db, :reader, "a", fn db, key ->
+        Runtime.execute(db, :ephemeral, key, fn db, key ->
+          Runtime.input(db, :source_text, key)
+        end)
+      end)
+
+      Manifest.write(db, %{}, path)
+      db2 = restored(path, [:reader])
+
+      try do
+        assert Memo.get(db2, {:reader, "a"}) == :miss
+        assert {:ok, _} = Memo.get(db2, {:input, :source_text, "a"})
       after
         Database.shutdown(db2)
       end

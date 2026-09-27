@@ -103,9 +103,13 @@ groups, and a session that ties them to a manifest.
   format 4 — are discarded and rebuilt once. `Roux.Memo.persisted()`
   tuples have ten elements.
 - **`Roux.Lang.Manifest.restore/2` leaves out the entries of queries that
-  are not registered**: register a database's queries before restoring
-  (`Roux.Session.open/1` does). A restored entry of another code version
-  is kept, stale, and the revision advances once at `:high`.
+  are not registered, and every entry that read one, transitively**:
+  register a database's queries before restoring (`Roux.Session.open/1`
+  does). A kept reader would hold an edge nothing can re-execute — the
+  next validation that walked it raised `ArgumentError` — and its own
+  readers' durability checks would pass over it. A restored entry of
+  another code version is kept, stale, and the revision advances once at
+  `:high`.
 - **The memo table's ETS rows have twelve elements** (0.1.4 had eight):
   the encoding (or `{:blob, digest}`), the code version, the persistence
   policy and the held blobs. `Roux.Input.keys/2` matches them; code that

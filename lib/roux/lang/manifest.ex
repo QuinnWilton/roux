@@ -238,7 +238,11 @@ defmodule Roux.Lang.Manifest do
   before calling this:
 
     * an entry of a query that is not registered is left out: nothing
-      could re-execute it, or tell which code computed it;
+      could re-execute it, or tell which code computed it — and so is
+      every entry that read one, directly or through others, whether or
+      not the manifest kept the unregistered query's own entry. Kept, it
+      would hold an edge nothing can bring up to date, and its readers'
+      durability checks would pass over it;
     * an entry computed by another code version than its query's
       (`Roux.Query`) is restored, and stale: it re-executes when next
       demanded, keeping its `changed_at` if its value comes back the
@@ -258,30 +262,82 @@ defmodule Roux.Lang.Manifest do
     :ok
   end
 
-  # The entries of registered queries (and of every input), and whether
-  # any of them was computed by another code version than its query's.
+  # The entries to restore — every input's, and the entries of registered
+  # queries that read no unregistered one, even transitively — and
+  # whether any of them was computed by another code version than its
+  # query's.
   defp registered(db, entries) do
-    {kept, {_versions, moved?}} =
-      Enum.flat_map_reduce(entries, {%{}, false}, fn
-        {{:input, _, _}, _, _, _, _, _, _, _, _, _} = entry, acc ->
-          {[entry], acc}
+    {verdicts, registry} =
+      Enum.map_reduce(entries, %{}, fn entry, registry ->
+        {own, registry} = own_verdict(db, entry, registry)
+        {dangling?, registry} = reads_unregistered?(db, elem(entry, 4), registry)
+        {{entry, own, dangling?}, registry}
+      end)
 
-        {{name, _key}, _, _, _, _, _, _, _, stored, _} = entry, {versions, moved?} ->
-          {registered, versions} = registration(db, name, versions)
+    _ = registry
 
-          case registered do
-            {:ok, version} -> {[entry], {versions, moved? or version != stored}}
-            :unregistered -> {[], {versions, moved?}}
+    dropped =
+      case for({entry, own, dangling?} <- verdicts, own == :drop or dangling?, do: elem(entry, 0)) do
+        [] -> %{}
+        roots -> spread(roots, readers(verdicts), %{})
+      end
+
+    kept =
+      for {entry, own, _} <- verdicts, not Map.has_key?(dropped, elem(entry, 0)), do: {entry, own}
+
+    {Enum.map(kept, &elem(&1, 0)), Enum.any?(kept, &(elem(&1, 1) == :moved))}
+  end
+
+  # An input is kept; a derived entry is dropped when its query is not
+  # registered, and moved when it was computed by another code version.
+  defp own_verdict(_db, {{:input, _, _}, _, _, _, _, _, _, _, _, _}, registry),
+    do: {:keep, registry}
+
+  defp own_verdict(db, {{name, _key}, _, _, _, _, _, _, _, stored, _}, registry) do
+    case registration(db, name, registry) do
+      {{:ok, ^stored}, registry} -> {:keep, registry}
+      {{:ok, _other}, registry} -> {:moved, registry}
+      {:unregistered, registry} -> {:drop, registry}
+    end
+  end
+
+  # Whether any dependency names a query that is not registered.
+  defp reads_unregistered?(_db, [], registry), do: {false, registry}
+
+  defp reads_unregistered?(db, [dep | rest], registry) do
+    {unregistered?, registry} =
+      Enum.reduce_while(read_keys(dep), {false, registry}, fn
+        {:input, _, _}, acc ->
+          {:cont, acc}
+
+        {name, _key}, {false, registry} ->
+          case registration(db, name, registry) do
+            {:unregistered, registry} -> {:halt, {true, registry}}
+            {{:ok, _}, registry} -> {:cont, {false, registry}}
           end
       end)
 
-    {kept, moved?}
+    if unregistered?, do: {true, registry}, else: reads_unregistered?(db, rest, registry)
   end
 
-  defp registration(db, name, versions) do
-    case versions do
+  # For each entry, the entries that read it.
+  defp readers(verdicts) do
+    Enum.reduce(verdicts, %{}, fn {entry, _own, _dangling?}, acc ->
+      key = elem(entry, 0)
+
+      entry
+      |> elem(4)
+      |> Enum.flat_map(&read_keys/1)
+      |> Enum.reduce(acc, &Map.update(&2, &1, [key], fn keys -> [key | keys] end))
+    end)
+  end
+
+  # A query's registration, `{:ok, code_version}` or `:unregistered`,
+  # looked up once per name.
+  defp registration(db, name, registry) do
+    case registry do
       %{^name => registered} ->
-        {registered, versions}
+        {registered, registry}
 
       %{} ->
         registered =
@@ -289,7 +345,7 @@ defmodule Roux.Lang.Manifest do
             do: {:ok, Database.code_version(db, name)},
             else: :unregistered
 
-        {registered, Map.put(versions, name, registered)}
+        {registered, Map.put(registry, name, registered)}
     end
   end
 
