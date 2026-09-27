@@ -88,6 +88,20 @@ defmodule Roux.SessionTest do
     end
   end
 
+  test "a module compiled against another roux raises, and its database goes", %{tmp_dir: tmp} do
+    {:links, before} = Process.info(self(), :links)
+
+    assert_raise Roux.Query.FormatError, fn ->
+      Session.open(
+        modules: [PersistQueries, Roux.Test.StaleLang],
+        manifest: Path.join(tmp, "state/graph.manifest")
+      )
+    end
+
+    # The database's supervisor, linked to the caller, is stopped.
+    assert Process.info(self(), :links) == {:links, before}
+  end
+
   test "force starts cold, and still commits", %{tmp_dir: tmp} do
     first = open(tmp)
     run(first, %{"a" => 1})

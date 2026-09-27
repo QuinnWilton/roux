@@ -21,7 +21,7 @@ Roux.Database.Heir   — ETS table preservation across crashes
 Roux.Database.TableOwner — ETS table ownership
 Roux.Memo            — memo entry storage (the cache)
 Roux.Input           — input queries (external values)
-Roux.Query           — derived query definition + defquery macro
+Roux.Query           — derived query definition + defquery macro; definition format
 Roux.Runtime         — query execution engine + dependency tracking
 Roux.Runtime.Context — threaded context passed through query calls
 Roux.Validation      — validation algorithm + early cutoff

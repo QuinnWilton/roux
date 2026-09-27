@@ -77,21 +77,18 @@ defmodule Roux.Session do
     manifest = Keyword.fetch!(opts, :manifest)
     db = Database.new(blob: blob)
 
-    Enum.each(Keyword.fetch!(opts, :languages), &Lang.register(db, &1))
-    Enum.each(Keyword.fetch!(opts, :modules), &Lang.register_module(db, &1))
-
+    # A module that cannot be registered (`Roux.Query.FormatError`) is
+    # a session that never opened: its database goes with it.
     {sources, restored?} =
-      if manifest != nil and not Keyword.fetch!(opts, :force) do
-        case Manifest.load(manifest) do
-          {:ok, data} ->
-            :ok = Manifest.restore(db, data)
-            {data.sources, true}
-
-          :error ->
-            {%{}, false}
-        end
-      else
-        {%{}, false}
+      try do
+        Enum.each(Keyword.fetch!(opts, :languages), &Lang.register(db, &1))
+        Enum.each(Keyword.fetch!(opts, :modules), &Lang.register_module(db, &1))
+        restore(db, manifest, Keyword.fetch!(opts, :force))
+      rescue
+        error ->
+          Runtime.drop_cached_values(db)
+          Database.shutdown(db)
+          reraise error, __STACKTRACE__
       end
 
     %__MODULE__{
@@ -103,6 +100,20 @@ defmodule Roux.Session do
       revision: Revision.current(db.revision),
       writes: Database.writes(db)
     }
+  end
+
+  defp restore(_db, nil, _force), do: {%{}, false}
+  defp restore(_db, _manifest, true), do: {%{}, false}
+
+  defp restore(db, manifest, false) do
+    case Manifest.load(manifest) do
+      {:ok, data} ->
+        :ok = Manifest.restore(db, data)
+        {data.sources, true}
+
+      :error ->
+        {%{}, false}
+    end
   end
 
   defp open_blob(nil), do: nil

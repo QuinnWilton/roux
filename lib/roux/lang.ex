@@ -174,10 +174,15 @@ defmodule Roux.Lang do
   (`Roux.Query.code_version/2`).
 
   Intended to be called from a language's `register_queries/1` callback.
+
+  Raises `ArgumentError` for a module that is not available or does not
+  use `Roux.Query`, and `Roux.Query.FormatError` for one compiled
+  against a roux of another definition format (`Roux.Query.format/0`):
+  none of its code runs.
   """
   @spec register_module(Database.t(), module()) :: :ok
   def register_module(%Database{} = db, module) when is_atom(module) do
-    metadata = module.__roux_queries__()
+    metadata = query_metadata!(module)
 
     Enum.each(Map.get(metadata, :entities, []), fn entity_module ->
       Database.register_entity(db, entity_module)
@@ -200,6 +205,30 @@ defmodule Roux.Lang do
     end)
 
     :ok
+  end
+
+  # The metadata of a module of queries, read only once its format is
+  # this roux's: an older one's definitions lack fields this roux reads.
+  defp query_metadata!(module) do
+    case Code.ensure_loaded(module) do
+      {:module, ^module} ->
+        :ok
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "cannot register the queries of #{inspect(module)}: " <>
+                "the module is not available (#{inspect(reason)})"
+    end
+
+    unless function_exported?(module, :__roux_queries__, 0) do
+      raise ArgumentError,
+            "cannot register the queries of #{inspect(module)}: it does not use Roux.Query"
+    end
+
+    case Query.check_format(module) do
+      :ok -> module.__roux_queries__()
+      {:error, error} -> raise error
+    end
   end
 
   @doc """

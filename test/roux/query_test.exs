@@ -2,12 +2,23 @@ defmodule Roux.QueryTest do
   use ExUnit.Case, async: true
 
   alias Roux.Database
-  alias Roux.Query.Definition
-  alias Roux.Test.{AroundQueries, EmptyQueries, PersistQueries, SampleQueries, VersionedQueries}
+  alias Roux.Query.{Definition, FormatError}
+
+  alias Roux.Test.{
+    AroundQueries,
+    EmptyQueries,
+    FutureQueries,
+    PersistQueries,
+    SampleQueries,
+    StaleLang,
+    VersionedQueries
+  }
 
   # Ensure fixture modules are loaded before function_exported? checks.
   Code.ensure_loaded!(Roux.Test.SampleQueries)
   Code.ensure_loaded!(Roux.Test.EmptyQueries)
+  Code.ensure_loaded!(Roux.Test.StaleLang)
+  Code.ensure_loaded!(Roux.Test.FutureQueries)
 
   # -- Definition.new --
 
@@ -125,6 +136,39 @@ defmodule Roux.QueryTest do
     test "empty module returns %{queries: [], inputs: [], entities: [], code: nil}" do
       assert %{queries: [], inputs: [], entities: [], code: nil} =
                EmptyQueries.__roux_queries__()
+    end
+  end
+
+  # -- Definition format --
+
+  describe "definition format" do
+    test "use Roux.Query stamps a module with this roux's format" do
+      assert SampleQueries.__roux_format__() == Roux.Query.format()
+      assert EmptyQueries.__roux_format__() == Roux.Query.format()
+      assert Roux.Query.check_format(SampleQueries) == :ok
+    end
+
+    test "a module of no stamp was compiled against a roux older than formats" do
+      assert {:error, %FormatError{module: StaleLang, format: nil} = error} =
+               Roux.Query.check_format(StaleLang)
+
+      assert error.expected == Roux.Query.format()
+      assert Exception.message(error) =~ "Roux.Test.StaleLang was compiled against a roux older"
+      assert Exception.message(error) =~ "recompile it against this roux"
+    end
+
+    test "a module of a newer format was compiled against a newer roux" do
+      newer = Roux.Query.format() + 1
+
+      assert {:error, %FormatError{module: FutureQueries, format: ^newer} = error} =
+               Roux.Query.check_format(FutureQueries)
+
+      assert Exception.message(error) =~ "a newer roux (definition format #{newer})"
+    end
+
+    test "an older stamp names its format" do
+      error = %FormatError{module: StaleLang, format: 1, expected: 2}
+      assert Exception.message(error) =~ "an older roux (definition format 1)"
     end
   end
 

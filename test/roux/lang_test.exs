@@ -2,6 +2,7 @@ defmodule Roux.LangTest do
   use ExUnit.Case, async: true
 
   alias Roux.{Database, Input, Lang, Runtime}
+  alias Roux.Query.FormatError
   alias Roux.Test.MiniLang
 
   setup do
@@ -68,6 +69,39 @@ defmodule Roux.LangTest do
       # Queries are registered — the query registry has entries.
       assert [{:mini_parse, _}] = :ets.lookup(db.query_registry, :mini_parse)
       assert [{:mini_compile, _}] = :ets.lookup(db.query_registry, :mini_compile)
+    end
+
+    # What roux 0.1 compiled: definitions of the old shape, read by a
+    # roux that took their missing fields for granted (a KeyError).
+    test "a module compiled against a roux older than formats raises FormatError", %{db: db} do
+      error =
+        assert_raise FormatError, fn -> Lang.register_module(db, Roux.Test.StaleLang) end
+
+      assert %FormatError{module: Roux.Test.StaleLang, format: nil} = error
+      assert :ets.lookup(db.query_registry, :stale_compile) == []
+    end
+
+    test "a language compiled against another roux raises before it registers", %{db: db} do
+      assert_raise FormatError, fn -> Lang.register(db, Roux.Test.StaleLang) end
+      assert Lang.lang_for_extension(db, ".stale") == :error
+    end
+
+    test "a module of a newer format raises FormatError", %{db: db} do
+      assert_raise FormatError, ~r/a newer roux/, fn ->
+        Lang.register_module(db, Roux.Test.FutureQueries)
+      end
+    end
+
+    test "a module that does not use Roux.Query raises ArgumentError", %{db: db} do
+      assert_raise ArgumentError, ~r/Enum: it does not use Roux.Query/, fn ->
+        Lang.register_module(db, Enum)
+      end
+    end
+
+    test "a module that is not available raises ArgumentError", %{db: db} do
+      assert_raise ArgumentError, ~r/Roux.Test.NoSuchQueries: the module is not available/, fn ->
+        Lang.register_module(db, Roux.Test.NoSuchQueries)
+      end
     end
   end
 

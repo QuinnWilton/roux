@@ -126,6 +126,15 @@ groups, and a session that ties them to a manifest.
 
 ### Changed (breaking)
 
+- **A module of queries carries a definition format, and registration
+  reads only its own.** `use Roux.Query` stamps `__roux_format__/0`
+  (`Roux.Query.format/0`, `check_format/1`); `Roux.Lang.register_module/2`
+  raises `Roux.Query.FormatError` for a module compiled against a roux of
+  another format — including every module compiled against 0.1, which
+  has none — where it raised `KeyError` reading the fields 0.1's
+  definitions lack, and `ArgumentError` for a module that is not
+  available or does not use `Roux.Query`. `Roux.Session.open/1` shuts
+  its database down when a registration raises.
 - **`gen_lsp` is an optional dependency.** `Roux.Lang.LSP` compiles only
   where it is installed; a project serving LSP through roux adds
   `{:gen_lsp, "~> 0.11.3"}` itself. `mix roux.lsp` without it raises

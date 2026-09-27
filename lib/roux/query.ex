@@ -93,15 +93,50 @@ defmodule Roux.Query do
   runs inside the query's execution, so what it reads becomes the
   query's dependencies: a hook that records what the body read some
   other way and turns it into edges.
+
+  ## Definition format
+
+  What `use Roux.Query` generates — the definitions of
+  `__roux_queries__/0` and the query functions' calls into roux — has
+  a format (`format/0`), stamped on the module as `__roux_format__/0`.
+  Registration reads only its own: a module compiled against another
+  roux raises `Roux.Query.FormatError` rather than run code its
+  runtime does not match. A Mix build recompiles such a module when
+  roux changes.
   """
 
-  alias Roux.Query.Definition
+  alias Roux.Query.{Definition, FormatError}
 
   @type query_name :: atom()
   @type definition :: Definition.t()
 
   @typedoc "What `use Roux.Query, code: ...` holds: nil, or the options of `Roux.Code.digest/2`."
   @type code_options :: [Roux.Code.option()] | nil
+
+  # The shape of what `use Roux.Query` generates: the definition
+  # structs, `__roux_queries__/0`, and the calls the query functions
+  # make into roux. Bump it with any change to that shape, so modules
+  # compiled against the old one are recompiled before they run.
+  @format 1
+
+  @doc """
+  The definition format of this roux (see "Definition format").
+  """
+  @spec format() :: pos_integer()
+  def format, do: @format
+
+  @doc """
+  Checks that `module`, a loaded module that uses `Roux.Query`, was
+  compiled against a roux of this definition format (`format/0`).
+  """
+  @spec check_format(module()) :: :ok | {:error, FormatError.t()}
+  def check_format(module) when is_atom(module) do
+    format = if function_exported?(module, :__roux_format__, 0), do: module.__roux_format__()
+
+    if format == @format,
+      do: :ok,
+      else: {:error, %FormatError{module: module, format: format, expected: @format}}
+  end
 
   @doc false
   defmacro __using__(opts) do
@@ -374,6 +409,12 @@ defmodule Roux.Query do
         end
       end
 
-    {:__block__, [], query_definition_clauses ++ [roux_queries_fn]}
+    format_fn =
+      quote do
+        @doc false
+        def __roux_format__, do: unquote(@format)
+      end
+
+    {:__block__, [], query_definition_clauses ++ [roux_queries_fn, format_fn]}
   end
 end
