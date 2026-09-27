@@ -127,7 +127,7 @@ groups, and a session that ties them to a manifest.
 ### Changed (breaking)
 
 - **A module of queries carries a definition format, and registration
-  reads only its own.** `use Roux.Query` stamps `__roux_format__/0`
+  reads only its own** (D31). `use Roux.Query` stamps `__roux_format__/0`
   (`Roux.Query.format/0`, `check_format/1`); `Roux.Lang.register_module/2`
   raises `Roux.Query.FormatError` for a module compiled against a roux of
   another format — including every module compiled against 0.1, which
@@ -135,6 +135,14 @@ groups, and a session that ties them to a manifest.
   definitions lack, and `ArgumentError` for a module that is not
   available or does not use `Roux.Query`. `Roux.Session.open/1` shuts
   its database down when a registration raises.
+- **The Roux Mix compiler waits for `:elixir` when its languages are not
+  ready** (D31). A language not compiled yet (a cold build) or compiled
+  against another roux (an upgrade, whose warm build failed with
+  `KeyError` until `mix clean`) is run once `:elixir` has compiled it,
+  when `:elixir` follows `:roux` in the project's compilers
+  (`Mix.Task.Compiler.after_compiler/2`): a cold build compiles its
+  sources in its first run, where it compiled them only in the next. A
+  language still not ready then is an error diagnostic.
 - **`gen_lsp` is an optional dependency.** `Roux.Lang.LSP` compiles only
   where it is installed; a project serving LSP through roux adds
   `{:gen_lsp, "~> 0.11.3"}` itself. `mix roux.lsp` without it raises

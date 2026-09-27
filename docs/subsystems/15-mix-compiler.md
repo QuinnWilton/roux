@@ -31,6 +31,8 @@ config :roux,
 
 The `:roux` compiler runs before the standard Elixir compiler. Custom language modules are compiled to `.beam` files in `_build` before the Elixir compiler sees them.
 
+A language is Elixir code too, often the project's own, so the compiler runs only languages compiled against this roux (`Roux.Query.format/0`, D31). A language not compiled yet (a cold build) or compiled against a roux of another definition format (an upgrade: Mix recompiles what uses the changed roux, but in `:elixir`, after `:roux`) makes the run wait for `:elixir` when it follows `:roux` in the project's compilers: the compiler registers a `Mix.Task.Compiler.after_compiler/2` callback and compiles the sources in it, once `:elixir` has compiled the language (nothing runs after an `:elixir` that failed). A language still not ready then is an error diagnostic — one of another format names the command that recompiles it — and no module of another format ever runs: `Roux.Lang.register_module/2` raises `Roux.Query.FormatError` before reading its definitions.
+
 ## Mix compiler behaviour
 
 ```elixir

@@ -25,11 +25,26 @@ defmodule Roux.Lang.Compiler do
           # ...
         ]
       end
+
+  ## Languages compiled after it
+
+  The compiler runs before `:elixir`, so the project's Elixir code can
+  call what it compiles; but a language is Elixir code, and often the
+  project's own, compiled by `:elixir`. It runs only languages compiled
+  against this roux (`Roux.Query.format/0`): one not compiled yet (a
+  cold build), or compiled against a roux of another definition format
+  (an upgrade, after which Mix recompiles what uses roux), is compiled
+  only once `:elixir` has run. When `:elixir` follows `:roux` in the
+  project's compilers, the run waits for it
+  (`Mix.Task.Compiler.after_compiler/2`), and compiles the sources then;
+  a language still not ready then is an error. Otherwise a language not
+  compiled yet compiles nothing, and one of another format is an error.
   """
 
   use Mix.Task.Compiler
 
-  alias Roux.{Database, Lang, Session, Sources}
+  alias Roux.{Database, Lang, Query, Session, Sources}
+  alias Roux.Query.FormatError
 
   @doc """
   Runs the Roux compiler.
@@ -56,25 +71,133 @@ defmodule Roux.Lang.Compiler do
           {:ok, [Mix.Task.Compiler.Diagnostic.t()]}
           | {:error, [Mix.Task.Compiler.Diagnostic.t()]}
           | {:noop, []}
-  def compile(roux_config) do
+  def compile(roux_config), do: compile(roux_config, :first)
+
+  defp compile(roux_config, attempt) do
     languages = Keyword.get(roux_config, :languages, [])
     source_dirs = Keyword.get(roux_config, :source_dirs, ["lib"])
 
-    # Skip if no languages configured or if language modules aren't compiled yet
-    # (cold bootstrap: roux compiler runs before elixir compiler has built them).
-    if languages == [] or not Enum.all?(languages, &Code.ensure_loaded?/1) do
+    if languages == [] do
       {:noop, []}
     else
+      case open(languages) do
+        {:ok, session} ->
+          try do
+            compile_session(session, languages, source_dirs, roux_config)
+          after
+            Session.close(session)
+          end
+
+        {:not_ready, reason} ->
+          not_ready(reason, roux_config, attempt)
+      end
+    end
+  end
+
+  # A session over the languages, once each is compiled against this
+  # roux; otherwise why not: a language not compiled yet, or a module
+  # of queries compiled against a roux of another definition format.
+  # A language's own format is checked before anything of it runs.
+  defp open(languages) do
+    with :ok <- Enum.reduce_while(languages, :ok, &ready/2) do
       # Mix compilers run before app.start, so telemetry isn't started yet.
       {:ok, _} = Application.ensure_all_started(:telemetry)
 
-      session = Session.open(languages: languages, manifest: manifest_path())
-
       try do
-        compile_session(session, languages, source_dirs, roux_config)
-      after
-        Session.close(session)
+        {:ok, Session.open(languages: languages, manifest: manifest_path())}
+      rescue
+        error in FormatError -> {:not_ready, {:stale, error}}
       end
+    end
+  end
+
+  defp ready(lang, :ok) do
+    cond do
+      not Code.ensure_loaded?(lang) ->
+        {:halt, {:not_ready, {:unavailable, lang}}}
+
+      not function_exported?(lang, :__roux_queries__, 0) ->
+        {:cont, :ok}
+
+      true ->
+        case Query.check_format(lang) do
+          :ok -> {:cont, :ok}
+          {:error, error} -> {:halt, {:not_ready, {:stale, error}}}
+        end
+    end
+  end
+
+  # The first attempt waits for `:elixir` when it follows; the attempt
+  # after it has nothing left to wait for.
+  defp not_ready(reason, roux_config, :first) do
+    cond do
+      elixir_follows?() ->
+        Mix.Task.Compiler.after_compiler(:elixir, &after_elixir(&1, roux_config))
+        {:noop, []}
+
+      match?({:unavailable, _}, reason) ->
+        {:noop, []}
+
+      true ->
+        failed(reason)
+    end
+  end
+
+  defp not_ready(reason, _roux_config, :after_elixir), do: failed(reason)
+
+  defp elixir_follows? do
+    compilers = Mix.Project.config()[:compilers] || Mix.compilers()
+    :elixir in Enum.drop_while(compilers, &(&1 != :roux))
+  end
+
+  # What `:elixir` returned, and this compiler's run after it: nothing
+  # runs after an `:elixir` that failed.
+  defp after_elixir({:error, _} = elixir, _roux_config), do: elixir
+
+  defp after_elixir({status, diagnostics}, roux_config) do
+    {roux_status, roux_diagnostics} = compile(roux_config, :after_elixir)
+    {merge_status(status, roux_status), diagnostics ++ roux_diagnostics}
+  end
+
+  defp merge_status(_status, :error), do: :error
+  defp merge_status(:ok, _roux_status), do: :ok
+  defp merge_status(_status, roux_status), do: roux_status
+
+  defp failed({:unavailable, lang}) do
+    fail(
+      diagnostic(
+        Mix.Project.project_file() || "mix.exs",
+        "language #{inspect(lang)} is not available: it is neither a dependency's " <>
+          "nor compiled from the project's Elixir code (the :languages of the :roux config)",
+        :error
+      )
+    )
+  end
+
+  # Reached when the Elixir compiler did not recompile the module: it
+  # saw no change to it, or it is a dependency's.
+  defp failed({:stale, %FormatError{module: module} = error}) do
+    message =
+      Exception.message(error) <>
+        " (mix compile --force recompiles the project's modules, " <>
+        "mix deps.compile --force a dependency's)"
+
+    fail(diagnostic(source_of(module), message, :error))
+  end
+
+  defp fail(diagnostic) do
+    print_diagnostic(diagnostic)
+    {:error, [diagnostic]}
+  end
+
+  # Where a diagnostic about a module points: its source, when the
+  # module was compiled from a file that is still there.
+  defp source_of(module) do
+    with source when is_list(source) <- module.module_info(:compile)[:source],
+         true <- File.regular?(source) do
+      List.to_string(source)
+    else
+      _ -> Mix.Project.project_file() || "mix.exs"
     end
   end
 

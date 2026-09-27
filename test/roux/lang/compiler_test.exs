@@ -101,6 +101,36 @@ defmodule Roux.Lang.CompilerTest do
     end
   end
 
+  # -- languages not ready --
+
+  # Roux's own project does not list :roux among its compilers, so
+  # these runs have no :elixir to wait for (compiler_mix_test.exs runs
+  # the Mix builds that do).
+  describe "languages not ready" do
+    test "a language compiled against another roux is an error, and nothing of it runs",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "old.stale"), "code")
+
+      stderr =
+        capture_io(:stderr, fn ->
+          assert {:error, [%Mix.Task.Compiler.Diagnostic{severity: :error} = diag]} =
+                   compile([Roux.Test.StaleLang], tmp_dir)
+
+          assert diag.message =~ "Roux.Test.StaleLang was compiled against a roux older"
+          assert diag.compiler_name == "roux"
+          assert String.ends_with?(diag.file, "test/support/languages/stale_lang.ex")
+        end)
+
+      assert stderr =~ "recompile it against this roux (mix compile --force recompiles"
+      refute File.exists?(Compiler.manifests() |> hd())
+    end
+
+    test "a language not compiled yet compiles nothing", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "app.mini"), "code")
+      assert {:noop, []} = compile([Roux.Test.MiniLang, Roux.Test.NoSuchLang], tmp_dir)
+    end
+  end
+
   # -- manifest / incremental compilation --
 
   describe "warm start" do

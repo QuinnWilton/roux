@@ -102,7 +102,7 @@ defmodule Roux.Query do
   Registration reads only its own: a module compiled against another
   roux raises `Roux.Query.FormatError` rather than run code its
   runtime does not match. A Mix build recompiles such a module when
-  roux changes.
+  roux changes, and `Roux.Lang.Compiler` waits for that (see there).
   """
 
   alias Roux.Query.{Definition, FormatError}
