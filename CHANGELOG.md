@@ -26,7 +26,11 @@ groups, and a session that ties them to a manifest.
   `ExCk` and `Docs`), `runtime_version/0`, `forget/0`, and
   `Roux.Code.Verify.executed/2` (the modules a computation called into,
   for a closure test). Object code is read with
-  `:code.get_object_code/1`, which works inside escripts.
+  `:code.get_object_code/1`, which works inside escripts. In an escript
+  that embeds Elixir, Elixir's modules are recognized by their
+  application (its library directory is inside the archive, not beside
+  the escript), and a module in the archive is stamped by the escript
+  file: a fresh run verifies a kept digest with one `stat`.
 - **`use Roux.Query, around: {m, f}`** runs every body of a module inside
   `m.f(%{db:, query:, key:}, body)`, within the query's execution: what
   the hook reads becomes the query's dependency.

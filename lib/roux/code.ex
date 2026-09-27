@@ -40,10 +40,19 @@ defmodule Roux.Code do
   stat stamp (size, modification time, inode, change time) of every
   file the walk read object code from, and the absence of every module
   it found absent. A fresh VM whose beams have not moved gets the digest
-  from a few `stat` calls, reading no beam at all. A trace is not kept
-  when a file was written within the last two seconds (a stamp that
-  young may not yet show a write that follows it), nor when a module
-  lives in an archive, whose members have no stamp of their own.
+  from a few `stat` calls, reading no beam at all. A module in an
+  archive — an escript's — has no stamp of its own, and is stamped by
+  the archive: a fresh run of an escript verifies one `stat`. A trace is
+  not kept when a file was written within the last two seconds (a stamp
+  that young may not yet show a write that follows it).
+
+  ## In an escript
+
+  An escript's modules live in its archive, and so does Elixir's
+  standard library when the escript embeds it (as `mix escript.build`
+  does): Elixir's `:code.lib_dir/1` is then a path inside the escript.
+  Elixir's modules are recognized by their application wherever they
+  live, and everything else in the archive is code like any other.
   """
 
   alias Roux.Blob
@@ -73,6 +82,7 @@ defmodule Roux.Code do
   @recent_seconds 2
 
   @elixir_apps [:elixir, :eex, :ex_unit, :iex, :logger, :mix]
+  @elixir_app_names Enum.map(@elixir_apps, &Atom.to_string/1)
 
   # -- Closure --
 
@@ -237,8 +247,35 @@ defmodule Roux.Code do
   end
 
   defp runtime?(mod, path) do
-    String.starts_with?(path, otp_root()) or String.starts_with?(path, elixir_root()) or
-      "consolidated" in Path.split(path) or elixir_app?(mod)
+    String.starts_with?(path, otp_root()) or under_elixir_root?(path) or
+      "consolidated" in Path.split(path) or elixir_app?(mod) or elixir_app_dir?(path)
+  end
+
+  # Under the directory of Elixir's installed applications. An escript
+  # that embeds Elixir has none: its `:elixir` library directory is a
+  # path inside the escript's archive, and the directory above it is the
+  # escript itself, whose every member would count as the runtime's.
+  defp under_elixir_root?(path) do
+    case elixir_root() do
+      nil -> false
+      root -> String.starts_with?(path, root)
+    end
+  end
+
+  defp elixir_root do
+    memo(:elixir_root, fn ->
+      lib_dir = :elixir |> :code.lib_dir() |> List.to_string()
+      if File.dir?(lib_dir), do: Path.dirname(lib_dir) <> "/"
+    end)
+  end
+
+  # A beam in the `ebin` of one of Elixir's applications (`elixir/ebin`,
+  # `logger-1.19.4/ebin`): Elixir's own, wherever it lives. No project
+  # or dependency application can bear one of their names.
+  defp elixir_app_dir?(path) do
+    app = path |> Path.dirname() |> Path.dirname() |> Path.basename()
+    [name | _version] = String.split(app, "-", parts: 2)
+    Path.basename(Path.dirname(path)) == "ebin" and name in @elixir_app_names
   end
 
   # Elixir's own modules bundled into an escript live in its archive,
@@ -256,10 +293,6 @@ defmodule Roux.Code do
   end
 
   defp otp_root, do: List.to_string(:code.root_dir()) <> "/"
-
-  defp elixir_root do
-    (:elixir |> :code.lib_dir() |> List.to_string() |> Path.dirname()) <> "/"
-  end
 
   # -- Digest --
 
@@ -300,7 +333,7 @@ defmodule Roux.Code do
       :miss ->
         with {:ok, seen} <- walk(roots, %{}, exclude, follow?) do
           digest = digest_of(seen)
-          deps = Enum.flat_map(seen, &trace_deps/1)
+          deps = seen |> Enum.flat_map(&trace_deps/1) |> Enum.uniq()
           if Enum.all?(deps, &trustworthy?/1), do: _ = Blob.Trace.put(store, name, deps, digest)
           {:ok, digest}
         end
@@ -308,12 +341,37 @@ defmodule Roux.Code do
   end
 
   # What the walk read of each module it met: the file of one it read
-  # (walked-through ones too: their import tables shape the closure),
-  # and the absence of one it found absent.
-  defp trace_deps({_mod, {:object, _bin, file}}), do: [{{:file, file}, stamp(file)}]
-  defp trace_deps({_mod, {:walked, file}}), do: [{{:file, file}, stamp(file)}]
+  # (walked-through ones too: their import tables shape the closure), and
+  # the absence of one it found absent. A module in an archive (an
+  # escript's) is stamped by the archive: every module in it shares that
+  # one stat.
+  defp trace_deps({_mod, {:object, _bin, file}}), do: [file_dep(file)]
+  defp trace_deps({_mod, {:walked, file}}), do: [file_dep(file)]
   defp trace_deps({mod, :absent}), do: [{{:absent, mod}, true}]
   defp trace_deps({_mod, _runtime_or_skipped}), do: []
+
+  defp file_dep(file) do
+    stamped = stamped_file(file)
+    {{:file, stamped}, stamp(stamped)}
+  end
+
+  # The file whose stamp speaks for `file`: itself, or — for a member of
+  # an archive, which has no stamp of its own — the archive, the nearest
+  # ancestor on its path that is a regular file.
+  defp stamped_file(file) do
+    if File.regular?(file), do: file, else: archive_of(file) || file
+  end
+
+  defp archive_of(path) do
+    parent = Path.dirname(path)
+
+    cond do
+      parent == path -> nil
+      File.regular?(parent) -> parent
+      File.dir?(parent) -> nil
+      true -> archive_of(parent)
+    end
+  end
 
   defp trustworthy?({{:file, _file}, :none}), do: false
 
