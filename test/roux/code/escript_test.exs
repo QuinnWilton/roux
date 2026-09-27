@@ -102,10 +102,15 @@ defmodule Roux.Code.EscriptTest do
     assert {:ok, digest} = first.digest
     assert first.reads > 0
 
-    # One trace, over one stamp: the escript's.
+    # One trace, over where its modules resolve and one stamp: the
+    # escript's.
     [trace] = Path.wildcard(Path.join([store, "traces", "*", "*"]))
     {:ok, {_name, deps, ^digest}} = Roux.Blob.decode(File.read!(trace))
-    assert [{{:file, ^escript}, {_size, _mtime, _inode, _ctime}}] = deps
+
+    assert [{{:resolved, modules}, _where}, {{:file, ^escript}, {_size, _mtime, _inode, _ctime}}] =
+             deps
+
+    assert Enum.sort([a, b, c]) -- modules == []
 
     # A fresh VM verifies that one stat and reads no beam.
     second = run!(escript, store, [a])

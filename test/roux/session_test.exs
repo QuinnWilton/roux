@@ -8,11 +8,14 @@ defmodule Roux.SessionTest do
 
   defp open(tmp, opts \\ []) do
     Session.open(
-      [
-        modules: [PersistQueries],
-        manifest: Path.join(tmp, "state/graph.manifest"),
-        blob: Path.join(tmp, "store")
-      ] ++ opts
+      Keyword.merge(
+        [
+          modules: [PersistQueries],
+          manifest: Path.join(tmp, "state/graph.manifest"),
+          blob: Path.join(tmp, "store")
+        ],
+        opts
+      )
     )
   end
 
@@ -144,6 +147,84 @@ defmodule Roux.SessionTest do
     [root] = Path.wildcard(Path.join([store.root, "roots", "*"]))
     assert {:ok, {owner, [_digest]}} = Blob.decode(File.read!(root))
     assert owner == Path.join(tmp, "state/graph.manifest")
+  end
+
+  # Two builds sharing a store (an application renamed, its old ebin left
+  # in `_build`): a value computed by the first build's code must not be
+  # served once that code resolves to the second's, though every file of
+  # the first is still there, unchanged.
+  test "an entry computed by one build's code is recomputed once its code resolves to another's",
+       %{tmp_dir: tmp} do
+    n = System.unique_integer([:positive])
+    leaf = Module.concat(Roux.SessionTest, "Leaf#{n}")
+    queries = Module.concat(Roux.SessionTest, "BuildQueries#{n}")
+    old = build!(Path.join(tmp, "old"), "defmodule #{inspect(leaf)}, do: def(v, do: :old)")
+    new = build!(Path.join(tmp, "new"), "defmodule #{inspect(leaf)}, do: def(v, do: :new)")
+
+    ebin =
+      build!(Path.join(tmp, "queries"), """
+      defmodule #{inspect(queries)} do
+        # roux's own modules left out: a digest over beams `mix test` just
+        # built keeps no trace.
+        use Roux.Query, code: [exclude: [Roux.Query, Roux.Runtime], follow_excluded: false]
+        @compile {:no_warn_undefined, #{inspect(leaf)}}
+
+        defquery :leaf_value, key: _key do
+          #{inspect(leaf)}.v()
+        end
+      end
+      """)
+
+    on_exit(fn ->
+      for dir <- [old, new, ebin], do: :code.del_path(String.to_charlist(dir))
+      Enum.each([leaf, queries], &unload/1)
+    end)
+
+    run = fn ->
+      session = open(tmp, modules: [queries])
+      value = queries.leaf_value(session.db, :k)
+      Session.commit(session, %{})
+      Session.close(session)
+      value
+    end
+
+    true = :code.add_patha(String.to_charlist(ebin))
+    true = :code.add_patha(String.to_charlist(old))
+    assert run.() == :old
+    assert [_kept] = Path.wildcard(Path.join([tmp, "store", "traces", "*", "*"]))
+
+    # The next run, as a fresh VM would make it: the module resolves to
+    # the second build now.
+    unload(leaf)
+    :code.del_path(String.to_charlist(old))
+    true = :code.add_patha(String.to_charlist(new))
+    :ok = Roux.Code.forget()
+    assert run.() == :new
+  end
+
+  # Compiles `source` into `dir/ebin`, the beams a minute old (a trace is
+  # kept only over files that old), and unloads what it defined.
+  defp build!(dir, source) do
+    ebin = Path.join(dir, "ebin")
+    File.mkdir_p!(ebin)
+    past = System.os_time(:second) - 60
+
+    for {module, beam} <- Code.compile_string(source, Path.join(dir, "source.ex")) do
+      unload(module)
+      path = Path.join(ebin, "#{module}.beam")
+      File.write!(path, beam)
+      File.touch!(path, past)
+    end
+
+    ebin
+  end
+
+  # Old code first: `:code.delete/1` keeps a module loaded while it has
+  # old code (a second compile of its name leaves one).
+  defp unload(module) do
+    :code.purge(module)
+    :code.delete(module)
+    :code.purge(module)
   end
 
   test "a session without a manifest keeps nothing; a temporary store goes on close" do

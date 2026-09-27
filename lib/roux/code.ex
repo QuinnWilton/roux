@@ -36,15 +36,24 @@ defmodule Roux.Code do
   ## Kept across VMs
 
   With `store:`, `digest/2` keeps a digest in a `Roux.Blob` store as a
-  verifying trace (`Roux.Blob.Trace`) over what computing it read: the
-  stat stamp (size, modification time, inode, change time) of every
-  file the walk read object code from, and the absence of every module
-  it found absent. A fresh VM whose beams have not moved gets the digest
-  from a few `stat` calls, reading no beam at all. A module in an
-  archive — an escript's — has no stamp of its own, and is stamped by
-  the archive: a fresh run of an escript verifies one `stat`. A trace is
-  not kept when a file was written within the last two seconds (a stamp
-  that young may not yet show a write that follows it).
+  verifying trace (`Roux.Blob.Trace`) over what computing it read:
+  where every module the walk met resolves (`:code.which/1`, one
+  observation of them all), the stat stamp (size, modification time,
+  inode, change time) of every file the walk read object code from, and
+  the absence of every module it found absent. A fresh VM whose beams
+  have not moved gets the digest from the code server and a few `stat`
+  calls, reading no beam at all. A module in an archive — an escript's —
+  has no stamp of its own, and is stamped by the archive: a fresh run of
+  an escript verifies one `stat`. A trace is not kept when a file was
+  written within the last two seconds (a stamp that young may not yet
+  show a write that follows it).
+
+  The stamps alone would say only that the files the walk read are
+  unchanged, not that a walk now would read them: builds that share a
+  store — two checkouts, an application renamed with its old `ebin` left
+  in `_build`, an escript beside a project — each leave their files in
+  place, and a trace over one build's files verified in another served
+  the other build's digest. Where each module resolves tells them apart.
 
   ## In an escript
 
@@ -80,6 +89,11 @@ defmodule Roux.Code do
   # A stamp younger than this may not yet show a write that follows it
   # within the same second.
   @recent_seconds 2
+
+  # In every kept digest's trace name: bumped when what a trace observes
+  # changes, so traces that observe less are never consulted again. 2:
+  # where each module resolves (0.2.0's traces verified stamps alone).
+  @trace_format 2
 
   @elixir_apps [:elixir, :eex, :ex_unit, :iex, :logger, :mix]
   @elixir_app_names Enum.map(@elixir_apps, &Atom.to_string/1)
@@ -324,7 +338,7 @@ defmodule Roux.Code do
   # A digest kept as a verifying trace over what computing it read (see
   # "Kept across VMs").
   defp kept_digest(store, key, roots, exclude, follow?) do
-    name = {__MODULE__, key, runtime_version()}
+    name = {__MODULE__, @trace_format, key, runtime_version()}
 
     case Blob.Trace.find(store, name, &observe/1) do
       {:ok, digest} ->
@@ -334,10 +348,27 @@ defmodule Roux.Code do
         with {:ok, seen} <- walk(roots, %{}, exclude, follow?) do
           digest = digest_of(seen)
           deps = seen |> Enum.flat_map(&trace_deps/1) |> Enum.uniq()
+          deps = [resolution_dep(seen) | deps]
           if Enum.all?(deps, &trustworthy?/1), do: _ = Blob.Trace.put(store, name, deps, digest)
           {:ok, digest}
         end
     end
+  end
+
+  # Where every module the walk met resolves, as `:code.which/1` says —
+  # what `where/1` classified and read it by — observed as one digest:
+  # a module found in another build's files now, or shadowed by a new
+  # one, fails the trace though every file it read is unchanged.
+  defp resolution_dep(seen) do
+    modules = seen |> Map.keys() |> Enum.sort()
+    {{:resolved, modules}, resolution(modules)}
+  end
+
+  defp resolution(modules) do
+    :crypto.hash(
+      :sha256,
+      :erlang.term_to_binary(Enum.map(modules, &:code.which/1), [:deterministic])
+    )
   end
 
   # What the walk read of each module it met: the file of one it read
@@ -386,7 +417,9 @@ defmodule Roux.Code do
     do: mtime < System.os_time(:second) - @recent_seconds
 
   defp trustworthy?({{:absent, _mod}, true}), do: true
+  defp trustworthy?({{:resolved, _modules}, _resolution}), do: true
 
+  defp observe({:resolved, modules}), do: resolution(modules)
   defp observe({:file, file}), do: stamp(file)
   defp observe({:absent, mod}), do: :code.which(mod) == :non_existing
 

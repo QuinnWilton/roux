@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.1 (unreleased)
+
+### Fixed
+
+- **A code digest kept in a store no longer verifies in another build**
+  (D32). `Roux.Code.digest/2` with `store:` kept a digest as a trace over
+  the stat stamps of the beams its walk read, and verified that those
+  files were unchanged — not that a walk now would read them. Builds
+  that share a store each leave their files in place: two checkouts or
+  worktrees of a project, an application renamed with its old `ebin`
+  still in `_build`, an escript beside a Mix project. A trace kept over
+  one build's beams verified in the other and served the first build's
+  digest as the second's code version, so every result keyed on it was
+  reused across code it was not computed by. **0.2.0 can serve stale
+  results**: argus, whose extracted facts are keyed on these digests,
+  reused facts extracted by another build's extractors — after the
+  `panoptes` → `argus_beam` rename, facts of an older schema that the
+  new rules cannot parse, degrading analyses. A kept digest now also
+  observes where every module the walk met resolves (`:code.which/1`,
+  one observation of them all), and a module found in other files fails
+  it. Traces 0.2.0 kept are never consulted (the trace name carries a
+  format). Upgrade; and a store 0.2.0 wrote may hold results filed under
+  another build's code version, so if analyses came out degraded, clear
+  it — for argus, `argus gc`, or delete the store directory (a
+  collection removes only what went unused).
+
 ## 0.2.0 — 2026-09-27
 
 0.2 makes roux the whole incremental backend of a tool like argus: code

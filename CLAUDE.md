@@ -44,12 +44,12 @@ Roux.Stamp           — values kept while files' stat stamps hold
 Roux.QueryLog        — one database's recompute set, from telemetry
 ```
 
-Design decisions D18–D31 (code versions, persistence policy, fan-out
+Design decisions D18–D32 (code versions, persistence policy, fan-out
 groups, the blob store, values held by digest, optional inputs, sessions,
 telemetry's database, optional gen_lsp, the blob store's trust model,
 bounded trace history, raw store I/O, never replacing a CAS entry, the
-definition format and the compiler's wait for `:elixir`) are in
-docs/decisions.md.
+definition format and the compiler's wait for `:elixir`, kept code digests
+that observe where modules resolve) are in docs/decisions.md.
 
 ### Subsystem docs
 

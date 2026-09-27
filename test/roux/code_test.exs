@@ -282,11 +282,9 @@ defmodule Roux.CodeTest do
       assert {:ok, ^digest} = RouxCode.digest([a])
       :ok = RouxCode.forget()
 
-      # Found by its trace: no beam is read, so none need be on the path.
-      ebin = paths |> Map.fetch!(a) |> Path.dirname() |> String.to_charlist()
-      :code.del_path(ebin)
-      assert {:ok, ^digest} = RouxCode.digest([a], store: store)
-      :code.add_patha(ebin)
+      # Found by its trace: no object code is read.
+      assert {{:ok, ^digest}, 0} =
+               object_code_reads(fn -> RouxCode.digest([a], store: store) end)
 
       # A module rebuilt moves its stamp, and the digest is computed again.
       :ok = RouxCode.forget()
@@ -300,12 +298,110 @@ defmodule Roux.CodeTest do
       assert moved != digest
     end
 
+    # Two builds sharing a store, the first one's files left in place (an
+    # application renamed, its old ebin still in `_build`): the trace kept
+    # against the first must not verify once the module resolves to the
+    # second, though every file it read is unchanged.
+    test "a digest kept against one build does not verify once a module resolves to another",
+         %{tmp_dir: tmp} do
+      leaf = name("Leaf")
+      store = Roux.Blob.open!(Path.join(tmp, "store"))
+      past = System.os_time(:second) - 60
+
+      old = build(Path.join(tmp, "old"), "defmodule #{inspect(leaf)}, do: def(v, do: :old)")
+      new = build(Path.join(tmp, "new"), "defmodule #{inspect(leaf)}, do: def(v, do: :new)")
+
+      for path <- Map.values(old) ++ Map.values(new), do: File.touch!(path, past)
+
+      old_ebin = old |> Map.fetch!(leaf) |> Path.dirname() |> String.to_charlist()
+      new_ebin = new |> Map.fetch!(leaf) |> Path.dirname() |> String.to_charlist()
+
+      on_exit(fn ->
+        :code.del_path(old_ebin)
+        :code.del_path(new_ebin)
+      end)
+
+      true = :code.add_patha(old_ebin)
+      {:ok, kept} = RouxCode.digest([leaf], store: store)
+      :ok = RouxCode.forget()
+
+      :code.del_path(old_ebin)
+      true = :code.add_patha(new_ebin)
+      {:ok, walked} = RouxCode.digest([leaf])
+      assert walked != kept
+      :ok = RouxCode.forget()
+
+      assert {:ok, ^walked} = RouxCode.digest([leaf], store: store)
+
+      # And the first build finds its own again, both traces kept.
+      :ok = RouxCode.forget()
+      :code.del_path(new_ebin)
+      true = :code.add_patha(old_ebin)
+
+      assert {{:ok, ^kept}, 0} =
+               object_code_reads(fn -> RouxCode.digest([leaf], store: store) end)
+    end
+
+    # What 0.2.0 kept verified stamps alone, and may name another build's
+    # code: it is never consulted.
+    test "a trace of 0.2.0's is not consulted", %{tmp_dir: tmp} do
+      %{a: a, paths: paths} = chain!(tmp)
+      store = Roux.Blob.open!(Path.join(tmp, "store"))
+      past = System.os_time(:second) - 60
+      for {_mod, path} <- paths, do: File.touch!(path, past)
+
+      deps = for {_mod, path} <- paths, do: {{:file, path}, stamp(path)}
+      name = {RouxCode, {:digest, [a], [], true}, RouxCode.runtime_version()}
+      :ok = Roux.Blob.Trace.put(store, name, deps, String.duplicate("0", 64))
+
+      {:ok, walked} = RouxCode.digest([a])
+      :ok = RouxCode.forget()
+      assert {:ok, ^walked} = RouxCode.digest([a], store: store)
+    end
+
     test "keeps no trace over a file written moments ago", %{tmp_dir: tmp} do
       %{a: a} = chain!(tmp)
       store = Roux.Blob.open!(Path.join(tmp, "store"))
 
       assert {:ok, _digest} = RouxCode.digest([a], store: store)
       assert Path.wildcard(Path.join([store.root, "traces", "*", "*"])) == []
+    end
+  end
+
+  defp stamp(path) do
+    %File.Stat{size: size, mtime: mtime, inode: inode, ctime: ctime} =
+      File.stat!(path, time: :posix)
+
+    {size, mtime, inode, ctime}
+  end
+
+  # How many times the calling process read object code during `fun`
+  # (`:code.get_object_code/1`, which the walk reads every module by),
+  # traced for this process alone and counted by a tracer of its own (a
+  # process cannot be its own tracer).
+  defp object_code_reads(fun) do
+    collector = spawn_link(fn -> count_reads(0) end)
+    :erlang.trace_pattern({:code, :get_object_code, 1}, true, [])
+    :erlang.trace(self(), true, [:call, {:tracer, collector}])
+
+    result =
+      try do
+        fun.()
+      after
+        :erlang.trace(self(), false, [:call])
+      end
+
+    ref = :erlang.trace_delivered(self())
+    assert_receive {:trace_delivered, _pid, ^ref}
+    send(collector, {:count, self()})
+    assert_receive {:reads, reads}
+    {result, reads}
+  end
+
+  defp count_reads(n) do
+    receive do
+      {:trace, _pid, :call, {:code, :get_object_code, _args}} -> count_reads(n + 1)
+      {:count, from} -> send(from, {:reads, n})
     end
   end
 
