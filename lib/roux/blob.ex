@@ -23,8 +23,10 @@ defmodule Roux.Blob do
       (`Roux.Blob.Trace`);
     * `roots/<owner digest>` — the digests an owner keeps alive
       (`retain/3`), a manifest's among them;
-    * `scratch/<os pid>-<n>/` — a directory per use (`scratch/2`);
-    * `tmp/` — files being written; `trash/` — entries being removed.
+    * `scratch/<os pid>.<token>-<n>/` — a directory per use (`scratch/2`),
+      named after the OS process and a token of its VM's own;
+    * `tmp/` — files being written; `trash/` — entries being removed, a
+      CAS entry under a name that begins with its digest.
 
   ## Entries
 
@@ -45,7 +47,8 @@ defmodule Roux.Blob do
   only when their bytes change (an equal write refreshes the file
   instead). Their readers take a name missing for that moment for a
   miss, never an error: a recall misses, a trace lookup passes over the
-  trace. A reader that finds an entry gone, or not holding what its name
+  trace, and a collection that cannot read a root it listed sweeps
+  nothing. A reader that finds an entry gone, or not holding what its name
   says, takes it for a miss (and a corrupt one is taken out of its name,
   so the next write replaces it).
 
@@ -82,6 +85,14 @@ defmodule Roux.Blob do
   interval).
 
   ## Collection
+
+  An entry is swept by renaming it aside — into `trash/`, under a name
+  that begins with its digest — then looking at it again: one touched
+  meanwhile is linked back under its name. For that moment the name is
+  missing, so a reader of a missing entry looks for its aside copy too
+  (`get/2`, `link/3`): the inode is always under one of the two names,
+  and a process that found an entry present (a `put/2`, whose finding
+  marks it used) can always link it.
 
   `gc/2` marks from the live roots — every owner's retained digests
   (`retain/3`), and the digests named by action-cache entries and
@@ -445,9 +456,38 @@ defmodule Roux.Blob do
           :miss
         end
 
+      {:error, :enoent} ->
+        # Aside for a moment (a collection sweeping it), or not there.
+        store |> asides(digest) |> Enum.find_value(:miss, &verified_read(&1, digest))
+
       {:error, _} ->
         :miss
     end
+  end
+
+  defp verified_read(path, digest) do
+    case RawIO.read(path) do
+      {:ok, data} -> if digest(data) == digest, do: {:ok, data}
+      {:error, _} -> nil
+    end
+  end
+
+  # The copies of an entry a collection has renamed aside while it
+  # decides whether the entry is in use (`sweep/4`): the same inode as the
+  # entry's, under a name that begins with its digest.
+  defp asides(%__MODULE__{root: root}, digest) do
+    dir = Path.join(root, "trash")
+    prefix = digest <> "."
+
+    for name <- RawIO.ls(dir), String.starts_with?(name, prefix), do: Path.join(dir, name)
+  end
+
+  defp link_aside(store, digest, dest) do
+    store
+    |> asides(digest)
+    |> Enum.find_value({:error, :missing}, fn aside ->
+      if RawIO.link(aside, dest) == :ok, do: :ok
+    end)
   end
 
   @doc """
@@ -493,7 +533,13 @@ defmodule Roux.Blob do
         :ok
 
       {:error, :enoent} ->
-        if match?({:ok, _}, RawIO.stat(source)), do: {:error, :enoent}, else: {:error, :missing}
+        # Not there, or aside for a moment (a collection sweeping it: see
+        # "Collection"): linked from the aside copy, or from its name again
+        # once put back.
+        with {:error, _} <- link_aside(store, digest, dest),
+             {:error, :enoent} <- RawIO.link(source, dest) do
+          if match?({:ok, _}, RawIO.stat(source)), do: {:error, :enoent}, else: {:error, :missing}
+        end
 
       {:error, reason} when reason in [:exdev, :eperm, :enotsup] ->
         case File.cp(source, dest) do
@@ -579,16 +625,37 @@ defmodule Roux.Blob do
   system: what `fun` writes there can be `adopt/2`ed, and entries
   `link/3`ed in), removed when `fun` returns or raises. A directory
   whose owner died without removing it is collected after a day.
+
+  The directory is new: made exclusively, under a name no other process
+  of the store uses (`Roux.Blob.IO.ospid/0`: the OS pid and a token of
+  the VM's own), and another name tried should it be there anyway. A
+  directory that was there already would be a dead process's leftover,
+  which a collection that found it a day old removes, contents and all.
   """
   @spec scratch(t(), (Path.t() -> result)) :: result when result: var
   def scratch(%__MODULE__{root: root}, fun) when is_function(fun, 1) do
-    dir = Path.join([root, "scratch", "#{RawIO.ospid()}-#{RawIO.unique()}"])
-    :ok = mkdir(dir)
+    :ok = mkdir(Path.join(root, "scratch"))
+    dir = fresh_dir(Path.join(root, "scratch"))
 
     try do
       fun.(dir)
     after
       RawIO.rm_rf(dir)
+    end
+  end
+
+  defp fresh_dir(parent) do
+    dir = Path.join(parent, "#{RawIO.ospid()}-#{RawIO.unique()}")
+
+    case RawIO.mkdir(dir) do
+      :ok ->
+        dir
+
+      {:error, :eexist} ->
+        fresh_dir(parent)
+
+      {:error, reason} ->
+        raise File.Error, reason: reason, action: "make scratch directory", path: dir
     end
   end
 
@@ -652,15 +719,26 @@ defmodule Roux.Blob do
 
     {pointers, stale_pointers} = pointers(store, now - keep)
 
-    marked = MapSet.union(root_digests(store), pointers)
+    # A root that could not be read — being replaced as it was looked at,
+    # say — might name any entry: nothing is swept on a partial mark.
+    {marked, removed} =
+      case root_digests(store, now - grace) do
+        {:ok, roots} ->
+          marked = MapSet.union(roots, pointers)
 
-    removed =
-      for aa <- ls(Path.join(root, "cas")),
-          name <- ls(Path.join([root, "cas", aa])),
-          not MapSet.member?(marked, name),
-          path = Path.join([root, "cas", aa, name]),
-          {:ok, size} <- [sweep(store, path, now - grace)],
-          do: size
+          removed =
+            for aa <- ls(Path.join(root, "cas")),
+                name <- ls(Path.join([root, "cas", aa])),
+                not MapSet.member?(marked, name),
+                path = Path.join([root, "cas", aa, name]),
+                {:ok, size} <- [sweep(store, path, now - grace, name <> ".")],
+                do: size
+
+          {marked, removed}
+
+        :unreadable ->
+          {pointers, []}
+      end
 
     swept_pointers =
       for path <- stale_pointers, {:ok, size} <- [sweep(store, path, now - keep)], do: size
@@ -716,31 +794,75 @@ defmodule Roux.Blob do
     end
   end
 
-  # The digests every live owner retains; an owner that is a path with
-  # nothing at it is dead, and its roots go.
-  defp root_digests(%__MODULE__{root: root}) do
+  # The digests every live owner retains, or `:unreadable` when a root
+  # listed could not be read: a replacing rename (`retain/3`) can leave its
+  # name missing for a moment, so a root is read again before it counts
+  # as gone. An owner that is a path with nothing at it is dead, and its
+  # roots go — but only a root not retained since `since`: a manifest
+  # being rewritten is missing for the same moment (`Roux.Lang.Manifest`
+  # renames it into place), and its owner retains its roots again right
+  # after.
+  defp root_digests(%__MODULE__{root: root}, since) do
     dir = Path.join(root, "roots")
 
-    for name <- ls(dir),
-        path = Path.join(dir, name),
-        {:ok, data} <- [RawIO.read(path)],
-        {:ok, {owner, digests}} <- [decode(data)],
-        live_owner?(owner, path),
-        digest <- digests,
-        into: MapSet.new(),
-        do: digest
+    Enum.reduce_while(ls(dir), {:ok, MapSet.new()}, fn name, {:ok, marked} ->
+      path = Path.join(dir, name)
+
+      case read_root(path, 3) do
+        {:ok, {owner, digests}} ->
+          if live_owner?(owner, path, since),
+            do: {:cont, {:ok, MapSet.union(marked, MapSet.new(digests))}},
+            else: {:cont, {:ok, marked}}
+
+        :gone ->
+          {:cont, {:ok, marked}}
+
+        :unreadable ->
+          {:halt, :unreadable}
+      end
+    end)
   end
 
-  defp live_owner?(owner, path) when is_binary(owner) do
-    if File.exists?(owner) do
-      true
+  # A root's owner and digests; `:gone` when it was released (not there
+  # on a second look), `:unreadable` when it is there and does not read.
+  defp read_root(path, attempts) do
+    with {:ok, data} <- RawIO.read(path),
+         {:ok, {_owner, digests} = root} when is_list(digests) <- decode(data) do
+      {:ok, root}
     else
-      RawIO.delete(path)
-      false
+      _ when attempts > 1 ->
+        Process.sleep(2)
+        read_root(path, attempts - 1)
+
+      _ ->
+        if match?({:error, :enoent}, RawIO.lstat(path)), do: :gone, else: :unreadable
     end
   end
 
-  defp live_owner?(_owner, _path), do: true
+  defp live_owner?(owner, path, since) when is_binary(owner) do
+    cond do
+      File.exists?(owner) ->
+        true
+
+      not older_than?(path, since) ->
+        true
+
+      reappears?(owner) ->
+        true
+
+      true ->
+        RawIO.delete(path)
+        false
+    end
+  end
+
+  defp live_owner?(_owner, _path, _since), do: true
+
+  # A second look, past a replacing rename's moment.
+  defp reappears?(owner) do
+    Process.sleep(10)
+    File.exists?(owner)
+  end
 
   # The digests named by the action-cache entries and traces used since
   # `since`, and the ones unused since then.
@@ -791,10 +913,14 @@ defmodule Roux.Blob do
   # Removes `path` unless it was written or touched since `since`:
   # renamed aside first, so a reader finds it whole or not at all, and
   # put back when a touch came between the look and the rename.
-  defp sweep(%__MODULE__{root: root}, path, since) do
+  # A CAS entry goes aside under a name that begins with its digest, so
+  # a reader that finds its name missing meanwhile reads or links the
+  # aside copy (`get/2`, `link/3`): at every moment of a sweep, one of the
+  # two names holds the entry's inode.
+  defp sweep(%__MODULE__{root: root}, path, since, aside_prefix \\ "") do
     with true <- older_than?(path, since),
          {:ok, %File.Stat{size: size}} <- RawIO.stat(path),
-         aside = staging(root, "trash"),
+         aside = Path.join([root, "trash", aside_prefix <> "#{RawIO.ospid()}-#{RawIO.unique()}"]),
          :ok <- mkdir(Path.dirname(aside)),
          :ok <- RawIO.rename(path, aside) do
       if older_than?(aside, since) do

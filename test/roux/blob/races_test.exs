@@ -190,6 +190,27 @@ defmodule Roux.Blob.RacesTest do
       assert {:ok, "rewritten"} = Blob.get(store, digest)
     end
 
+    test "a reader of an entry it holds aside still links and reads it", %{tmp_dir: tmp} do
+      store = store!(tmp)
+      {digest, path} = old_entry!(store, "aside for a moment")
+      dest = Path.join(tmp, "in.facts")
+
+      # The moment the entry is renamed aside, before the collection looks
+      # at it again: a link and a read of it.
+      reader = %{
+        name: :reader,
+        ops: [:rename],
+        path: path,
+        action: {Roux.Test.BlobStress, :link_and_get, [store, digest, dest]}
+      }
+
+      {_stats, %{reader: {linked, read}}} = gated(peer!(), [reader], {Blob, :gc, [store]})
+
+      assert linked == :ok
+      assert read == {:ok, "aside for a moment"}
+      assert File.read!(dest) == "aside for a moment"
+    end
+
     test "takes an entry whole: a reader sees all of it or none of it", %{tmp_dir: tmp} do
       store = store!(tmp)
       bytes = :binary.copy("y", 100_000)

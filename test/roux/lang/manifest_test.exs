@@ -857,7 +857,13 @@ defmodule Roux.Lang.ManifestTest do
       Blob.gc(store)
       assert Enum.all?(digests, &Blob.member?(store, &1))
 
+      # Gone, and not retained for the grace period: its roots go.
       File.rm!(path)
+      old = System.os_time(:second) - 3 * 24 * 60 * 60
+
+      for root <- Path.wildcard(Path.join([store.root, "roots", "*"])),
+          do: File.touch!(root, old)
+
       Blob.gc(store)
       refute Enum.any?(digests, &Blob.member?(store, &1))
     end

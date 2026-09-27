@@ -393,6 +393,16 @@ defmodule Roux.BlobTest do
       :ok = Blob.remember(store, :k, :w)
       assert {:ok, :w} = Blob.recall(store, :k)
     end
+
+    test "a collection that cannot read a root it listed sweeps nothing", %{store: store} do
+      {:ok, digest} = Blob.put(store, "unnamed and old")
+      age!(Blob.path(store, digest), 2 * @day)
+      File.mkdir_p!(Path.join(store.root, "roots"))
+      File.write!(Path.join([store.root, "roots", "unreadable"]), "not a root")
+
+      assert %{removed: 0} = Blob.gc(store)
+      assert Blob.member?(store, digest)
+    end
   end
 
   describe "scratch/2" do
@@ -449,9 +459,14 @@ defmodule Roux.BlobTest do
       assert {:ok, _} = Blob.recall(store, :recent)
       assert stats.removed == 3
 
-      # The owner gone, its roots go with it.
+      # The owner gone, its roots go with it — once not retained for the
+      # grace period (a manifest being rewritten is missing for a moment).
       File.rm!(owner)
       age!(Blob.path(store, kept), 2 * @day)
+      Blob.gc(store)
+      assert Blob.member?(store, kept)
+
+      for root <- Path.wildcard(Path.join([store.root, "roots", "*"])), do: age!(root, 2 * @day)
       Blob.gc(store)
       refute Blob.member?(store, kept)
     end

@@ -63,6 +63,19 @@ groups, and a session that ties them to a manifest.
   sweep the rest after a grace period, renaming aside first). Entries are
   immutable and installed by rename; a vanished or corrupt entry is a
   miss. `Roux.Blob.MissingError`, `Roux.Blob.FormatError`.
+- **A CAS entry is never replaced** (D30): `Roux.Blob.put/2` and
+  `adopt/2` hard-link an entry into place, a name already there being
+  the same bytes, where they renamed over it. On APFS a replacing rename
+  leaves the name missing for a moment, and a concurrent `link/3` of the
+  empty relation entry every solve links failed with `{:error, :enoent}`
+  (on three OS processes over 1.5 s: 633 of 2,192 links before, none of
+  2,699 after). A collection's aside copy is named after the entry's
+  digest and `link/3`/`get/2` use it while the name is missing; action
+  cache entries, traces and roots are replaced only when their bytes
+  change; a collection that cannot read a root sweeps nothing; scratch
+  directories are made exclusively under a name with a per-VM token;
+  manifest and sidecar reads retry an `ENOENT` twice. Concuerror scenarios
+  over a model file system (`Roux.Test.ModelFS`) cover each.
 - **The store's file I/O is raw, and a hit refreshes an entry at most
   once an hour** (D29): `Roux.Blob`, `Roux.Blob.Trace`, `Roux.Stamp` and
   `Roux.Code`'s stamps no longer go through the VM's file server, which

@@ -95,3 +95,143 @@ defmodule Roux.Concurrency.BlobAdoptLinkTest do
     :ok
   end
 end
+
+defmodule Roux.Concurrency.BlobGcLinkTest do
+  @moduledoc """
+  A collection sweeps an old entry nothing retains while a process puts
+  those bytes (finding them there, which marks them used) and links the
+  entry into its scratch directory, and another adopts an output with
+  the same bytes. The put and the link must succeed, the adopted output
+  must not be lost, and the entry must be there afterwards.
+  """
+
+  alias Roux.Blob
+  alias Roux.Blob.IO, as: RawIO
+  alias Roux.Test.{BlobFixture, ModelFS}
+
+  def concuerror_options do
+    [treat_as_normal: [:shutdown], depth_bound: 5_000, dpor: :source, scheduling_bound: 4]
+  end
+
+  def test do
+    {fs, store} = BlobFixture.store()
+    digest = BlobFixture.empty()
+    {:ok, ^digest} = Blob.put(store, "")
+    :ok = RawIO.utime(Blob.path(store, digest), 0)
+    dest = Path.join(BlobFixture.scratch_dir("1-1"), "in.facts")
+    output = Path.join(BlobFixture.scratch_dir("1-2"), "out.csv")
+    :ok = RawIO.write(output, "")
+    parent = self()
+
+    spawn(fn ->
+      ModelFS.enter(fs, "2")
+      send(parent, {:gc, Blob.gc(store)})
+    end)
+
+    spawn(fn ->
+      ModelFS.enter(fs, "1")
+      {:ok, ^digest} = Blob.put(store, "")
+      send(parent, {:linked, Blob.link(store, digest, dest)})
+    end)
+
+    spawn(fn ->
+      ModelFS.enter(fs, "1")
+      send(parent, {:adopted, Blob.adopt(store, output)})
+    end)
+
+    %{} = receive(do: ({:gc, stats} -> stats))
+    :ok = receive(do: ({:linked, result} -> result))
+    {:ok, ^digest} = receive(do: ({:adopted, result} -> result))
+    {:ok, ""} = RawIO.read(dest)
+    {:ok, ""} = Blob.get(store, digest)
+    :ok
+  end
+end
+
+defmodule Roux.Concurrency.BlobTracePruneTest do
+  @moduledoc """
+  A put under a trace name, keeping one trace, prunes the old trace
+  while another process looks the name up: the lookup is a hit on the
+  old value or a miss, never a crash, and the new trace is kept.
+  """
+
+  alias Roux.Blob.Trace
+  alias Roux.Test.{BlobFixture, ModelFS}
+
+  def concuerror_options do
+    [treat_as_normal: [:shutdown], depth_bound: 5_000, dpor: :source, scheduling_bound: 6]
+  end
+
+  def test do
+    {fs, store} = BlobFixture.store()
+    :ok = Trace.put(store, :t, [{:v, 1}], :old)
+    parent = self()
+
+    spawn(fn ->
+      ModelFS.enter(fs, "1")
+      send(parent, {:put, Trace.put(store, :t, [{:v, 2}], :new, keep: 1)})
+    end)
+
+    spawn(fn ->
+      ModelFS.enter(fs, "2")
+      send(parent, {:found, Trace.find(store, :t, fn :v -> 1 end, limit: 8)})
+    end)
+
+    :ok = receive(do: ({:put, result} -> result))
+    found = receive(do: ({:found, result} -> result))
+    true = found in [:miss, {:ok, :old}]
+    [%{value: :new}] = Trace.fetch(store, :t)
+    :ok
+  end
+end
+
+defmodule Roux.Concurrency.BlobScratchReuseTest do
+  @moduledoc """
+  A VM that died in a scratch directory left it behind, and a new VM is
+  given the dead one's OS pid: its first scratch directory would bear
+  the same name. A collection that finds the leftover a day old removes
+  it, contents and all. The new owner links an input into its scratch
+  directory and reads it: the read must succeed.
+  """
+
+  alias Roux.Blob
+  alias Roux.Blob.IO, as: RawIO
+  alias Roux.Test.{BlobFixture, ModelFS}
+
+  def concuerror_options do
+    [treat_as_normal: [:shutdown], depth_bound: 5_000, dpor: :source, scheduling_bound: 6]
+  end
+
+  def test do
+    {fs, store} = BlobFixture.store()
+    digest = BlobFixture.empty()
+    {:ok, ^digest} = Blob.put(store, "")
+    # Model OS process "7" once made scratch "7-1", and died in it.
+    leftover = BlobFixture.scratch_dir("7-1")
+    :ok = RawIO.utime(leftover, 0)
+    parent = self()
+
+    spawn(fn ->
+      ModelFS.enter(fs, "2")
+      send(parent, {:gc, Blob.gc(store)})
+    end)
+
+    spawn(fn ->
+      # The new VM with the reused pid: its unique integers start at 1.
+      ModelFS.enter(fs, "7")
+
+      result =
+        Blob.scratch(store, fn dir ->
+          input = Path.join(dir, "in.facts")
+          :ok = Blob.link(store, digest, input)
+          RawIO.read(input)
+        end)
+
+      send(parent, {:read, result})
+    end)
+
+    %{} = receive(do: ({:gc, stats} -> stats))
+    {:ok, ""} = receive(do: ({:read, result} -> result))
+    :ok
+  end
+end

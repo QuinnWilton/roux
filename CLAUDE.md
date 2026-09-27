@@ -44,10 +44,11 @@ Roux.Stamp           — values kept while files' stat stamps hold
 Roux.QueryLog        — one database's recompute set, from telemetry
 ```
 
-Design decisions D18–D29 (code versions, persistence policy, fan-out
+Design decisions D18–D30 (code versions, persistence policy, fan-out
 groups, the blob store, values held by digest, optional inputs, sessions,
 telemetry's database, optional gen_lsp, the blob store's trust model,
-bounded trace history, raw store I/O) are in docs/decisions.md.
+bounded trace history, raw store I/O, never replacing a CAS entry) are
+in docs/decisions.md.
 
 ### Subsystem docs
 
@@ -100,7 +101,7 @@ Component names match subsystem names: `intern`, `revision`, `telemetry`, `datab
 
 ## Concurrency tests
 
-`mix concuerror --all` runs every `Roux.Concurrency.*` module's `test/0` (CI's Concuerror job). A scenario too large to explore whole sets `dpor: :source` and `scheduling_bound:` in `concuerror_options/0`; one longer than 500 events sets `depth_bound:`. Fixtures shared by scenarios live in `test/support`, outside the namespace.
+`mix concuerror --all` runs every `Roux.Concurrency.*` module's `test/0` (CI's Concuerror job). The blob store's scenarios (`test/concurrency/blob_test.ex`) run its own code over a model file system (`Roux.Test.ModelFS`, entered per process through `Roux.Blob.IO`'s backend): keep every model operation on one name one atomic step, except the replacing rename, which APFS does in two. A scenario too large to explore whole sets `dpor: :source` and `scheduling_bound:` in `concuerror_options/0`; one longer than 500 events sets `depth_bound:`. Fixtures shared by scenarios live in `test/support`, outside the namespace.
 
 ## Testing conventions
 
