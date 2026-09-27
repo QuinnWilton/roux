@@ -23,7 +23,8 @@ defmodule Roux.Blob do
       (`Roux.Blob.Trace`);
     * `roots/<owner digest>` — the digests an owner keeps alive
       (`retain/3`), a manifest's among them;
-    * `scratch/<os pid>-<n>/` — a directory per use (`scratch/2`);
+    * `scratch/<os pid>.<token>-<n>/` — a directory per use (`scratch/2`),
+      named after the OS process and a token of its VM's own;
     * `tmp/` — files being written; `trash/` — entries being removed.
 
   ## Entries
@@ -344,7 +345,7 @@ defmodule Roux.Blob do
   """
   @spec adopt(t(), Path.t()) :: {:ok, digest()} | {:error, File.posix()}
   def adopt(%__MODULE__{} = store, path) do
-    with {:ok, digest} <- file_digest(path),
+    with {:ok, digest} <- RawIO.hash_file(path),
          target = path(store, digest),
          :ok <- mkdir(Path.dirname(target)),
          :ok <- RawIO.chmod(path, 0o444),
@@ -527,13 +528,13 @@ defmodule Roux.Blob do
   """
   @spec scratch(t(), (Path.t() -> result)) :: result when result: var
   def scratch(%__MODULE__{root: root}, fun) when is_function(fun, 1) do
-    dir = Path.join([root, "scratch", "#{:os.getpid()}-#{System.unique_integer([:positive])}"])
+    dir = Path.join([root, "scratch", "#{RawIO.ospid()}-#{RawIO.unique()}"])
     :ok = mkdir(dir)
 
     try do
       fun.(dir)
     after
-      File.rm_rf(dir)
+      RawIO.rm_rf(dir)
     end
   end
 
@@ -615,7 +616,7 @@ defmodule Roux.Blob do
         name <- ls(Path.join(root, dir)),
         path = Path.join([root, dir, name]),
         older_than?(path, now - @day),
-        do: File.rm_rf(path)
+        do: RawIO.rm_rf(path)
 
     %{
       removed: length(removed) + length(swept_pointers),
@@ -780,29 +781,6 @@ defmodule Roux.Blob do
     ArgumentError -> :miss
   end
 
-  defp file_digest(path) do
-    case File.open(path, [:read, :raw, :binary, {:read_ahead, 1_048_576}]) do
-      {:ok, device} ->
-        try do
-          {:ok, device |> hash_device(:crypto.hash_init(:sha256)) |> hex()}
-        after
-          File.close(device)
-        end
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  defp hash_device(device, hash) do
-    case :file.read(device, 1_048_576) do
-      {:ok, data} -> hash_device(device, :crypto.hash_update(hash, data))
-      :eof -> :crypto.hash_final(hash)
-    end
-  end
-
-  defp hex(bin), do: Base.encode16(bin, case: :lower)
-
   # Whether `path` holds `size` bytes, refreshing it: a present entry is
   # one a collection must now keep.
   defp present?(store, path, size) do
@@ -869,7 +847,7 @@ defmodule Roux.Blob do
   end
 
   defp staging(root, dir \\ "tmp"),
-    do: Path.join([root, dir, "#{:os.getpid()}-#{System.unique_integer([:positive])}"])
+    do: Path.join([root, dir, "#{RawIO.ospid()}-#{RawIO.unique()}"])
 
   defp older_than?(path, since) do
     case RawIO.lstat(path) do

@@ -16,9 +16,10 @@ defmodule Roux.Test.RawGate do
 
     * `:name` — what `uninstall/0` reports its action's result under;
     * `:ops` — the operations it watches (`:read_file`, `:write_file`,
-      `:read_file_info`, `:read_link_info`, `:write_file_info`,
+      `:read_file_info`, `:read_link_info`, `:chmod`, `:utime`,
       `:list_dir`, `:rename` (named by its source), `:delete`,
-      `:make_dir`, `:make_link` (named by the existing file));
+      `:make_dir`, `:del_dir`, `:make_link` (named by the existing
+      file), `:hash_file`);
     * `:path` — the path they name;
     * `:prefix` — true to watch every path under `:path` as well;
     * `:nth` — which of the watched operations it acts at (default 1);

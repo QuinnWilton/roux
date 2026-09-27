@@ -82,7 +82,7 @@ defmodule Roux.Blob.Trace do
     dir = dir(root, name)
     path = Path.join(dir, Blob.term_digest(deps))
     data = :erlang.term_to_binary({name, deps, value}, [:deterministic, {:compressed, 1}])
-    staging = Path.join([root, "tmp", "#{:os.getpid()}-#{System.unique_integer([:positive])}"])
+    staging = Path.join([root, "tmp", "#{RawIO.ospid()}-#{RawIO.unique()}"])
 
     with :ok <- RawIO.mkdir_p(dir),
          :ok <- RawIO.mkdir_p(Path.dirname(staging)),
