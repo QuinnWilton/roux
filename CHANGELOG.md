@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Elixir `~> 1.19` is now required (was `~> 1.18`); OTP 28 remains
+  required. CI tests Elixir 1.19.4 only.
+
 ## 0.2.1 — 2026-09-27
 
 ### Fixed
