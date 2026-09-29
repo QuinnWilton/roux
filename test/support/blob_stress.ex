@@ -1,8 +1,8 @@
 defmodule Roux.Test.BlobStress do
   @moduledoc """
   Loops run in peer VMs (separate OS processes) against one store, for
-  `Roux.Blob.ReplaceTest`: each runs for `ms` milliseconds and reports
-  what it saw.
+  `Roux.Blob.ReplaceTest` and `Roux.Blob.VersionsTest`: each runs for
+  `ms` milliseconds and reports what it saw.
   """
 
   alias Roux.Blob
@@ -53,6 +53,36 @@ defmodule Roux.Test.BlobStress do
           {:cont, acc}
         end
       end)
+    end)
+  end
+
+  @doc """
+  Puts a new value in the trace `:cell` (no observations) and remembers
+  one under `:key`, over and over, each value `{tag, n}`: the count.
+  """
+  def rewrite_loop(store, tag, ms) do
+    loop(ms, 0, fn n ->
+      :ok = Blob.Trace.put(store, :cell, [], {tag, n}, keep: 1)
+      :ok = Blob.remember(store, :key, {tag, n})
+    end)
+  end
+
+  @doc """
+  Looks up the trace `:cell` and recalls `:key`, over and over:
+  `%{lookups: n, misses: n}`.
+  """
+  def lookup_loop(store, ms) do
+    deadline = System.monotonic_time(:millisecond) + ms
+
+    Stream.repeatedly(fn -> :look end)
+    |> Enum.reduce_while(%{lookups: 0, misses: 0}, fn :look, acc ->
+      if System.monotonic_time(:millisecond) > deadline do
+        {:halt, acc}
+      else
+        found = [Blob.Trace.find(store, :cell, fn _ -> nil end), Blob.recall(store, :key)]
+        misses = Enum.count(found, &(&1 == :miss))
+        {:cont, %{lookups: acc.lookups + 2, misses: acc.misses + misses}}
+      end
     end)
   end
 

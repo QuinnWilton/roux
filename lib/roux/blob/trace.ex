@@ -16,9 +16,27 @@ defmodule Roux.Blob.Trace do
   `find/4` tries the most recently used first, observing each dependency
   at most once, and refreshes the trace it returns (`Roux.Blob`'s "Raw
   I/O, and touches that refresh": within the store's refresh interval,
-  it is left alone), so "recently used" means used, not only written —
-  and a collection (`Roux.Blob.gc/2`) keeps traces in use, and the
-  entries their values name. Recency is known to within that interval.
+  it is left alone), so "recently used" means used,
+  not only written — and a collection (`Roux.Blob.gc/2`) keeps traces in
+  use, and the entries their values name.
+
+  ## Versions
+
+  A trace is never replaced in place: a rename onto a name is not atomic
+  everywhere, and a reader that meets its moment finds no trace at all.
+  Each value a trace holds is a version, a file of its own named by the
+  digest of its observations, the time it was written and the digest of
+  its bytes, linked into place and never changed — the store's CAS
+  entries' rule (`Roux.Blob`'s "Entries"). A put of another value under
+  the same observations adds a version, then removes the versions it
+  found there that were written more than a second before it: a reader
+  that listed one a moment ago can still read it. A lookup reads each
+  set of observations' newest version, by the time in its name (a
+  modification time, in whole seconds, cannot order two versions of one
+  second); one removed between its listing and its read is looked for
+  again. So a reader always finds a complete version, and after a put,
+  the one it wrote. Putting the bytes of the newest version again writes
+  nothing, and marks it used.
 
   ## Bounded history
 
@@ -60,16 +78,24 @@ defmodule Roux.Blob.Trace do
 
   @default_keep 8
 
+  # How many times a lookup looks again for a trace removed as it read
+  # it: each is another process's put, prune or collection meanwhile.
+  @attempts 3
+
+  # How long a superseded version stays, in microseconds: a reader that
+  # listed it before the put that superseded it can still read it.
+  @superseded_grace 1_000_000
+
   @doc """
   Keeps `value` under `name`, with the observations `deps` it was
-  computed from. Replaces a trace of the same name and observations,
-  and removes all but the `keep:` most recently used traces of the name
-  (this one among them).
+  computed from: a new version of the trace of those observations (see
+  "Versions"), and the only one once this returns, unless another
+  process put one meanwhile. Keeps the `keep:` most recently used traces
+  of the name (see "Bounded history").
 
   ## Options
 
-    * `:keep` — how many traces the name keeps: a positive integer (default
-      #{@default_keep}), or `:infinity`.
+    * `:keep` — how many traces the name keeps: a positive integer (default #{@default_keep}), or `:infinity`.
   """
   @spec put(Blob.t(), term(), [dep()], term(), keyword()) :: :ok | {:error, File.posix()}
   def put(%Blob{root: root} = store, name, deps, value, opts \\ []) when is_list(deps) do
@@ -80,55 +106,82 @@ defmodule Roux.Blob.Trace do
     end
 
     dir = dir(root, name)
-    path = Path.join(dir, Blob.term_digest(deps))
+    group = Blob.term_digest(deps)
     data = :erlang.term_to_binary({name, deps, value}, [:deterministic, {:compressed, 1}])
-    staging = Path.join([root, "tmp", "#{RawIO.ospid()}-#{RawIO.unique()}"])
+    digest = Blob.digest(data)
+    now = System.os_time(:microsecond)
 
-    with :ok <- RawIO.mkdir_p(dir),
-         :ok <- place(store, path, staging, data) do
-      prune(store, dir, path, keep)
+    with :ok <- RawIO.mkdir_p(dir) do
+      # The versions there before this write, oldest first: the newest
+      # holding these bytes already is used, not written again.
+      before = dir |> RawIO.ls() |> Enum.filter(&(group_of(&1) == group)) |> Enum.sort()
+
+      file =
+        case List.last(before) do
+          nil ->
+            version_name(group, now, digest)
+
+          newest ->
+            if digest_of(newest) == digest, do: newest, else: version_name(group, now, digest)
+        end
+
+      with :ok <- Blob.install(store, Path.join(dir, file), data) do
+        superseded = time(now - @superseded_grace)
+
+        for other <- before,
+            other != file,
+            written_at(other) < superseded,
+            do: Blob.discard(store, Path.join(dir, other))
+
+        prune(store, dir, group, keep)
+      end
     end
   end
 
-  # Renamed into place, replacing a trace of the same observations — only
-  # when its bytes change: an equal one is marked used instead, so a
-  # lookup meets a replacing rename's missing name (`Roux.Blob`'s
-  # "Entries") only when there is a new value to find.
-  defp place(store, path, staging, data) do
-    with {:ok, ^data} <- RawIO.read(path),
-         {:ok, %File.Stat{mtime: mtime}} <- RawIO.stat(path) do
-      touch(%{path: path, mtime: mtime, refresh: Blob.refresh_interval(store)})
-    else
-      _new_or_changed ->
-        with :ok <- RawIO.mkdir_p(Path.dirname(staging)),
-             :ok <- RawIO.write(staging, data) do
-          case RawIO.rename(staging, path) do
-            :ok ->
-              :ok
+  # A version's name: its observations' digest, the time it was written
+  # (microseconds, as 16 hexadecimal digits, so names sort by it), and its
+  # bytes' digest. A trace roux 0.2.1 kept is named by its observations'
+  # digest alone, and sorts before every version.
+  defp version_name(group, microseconds, digest),
+    do: Enum.join([group, time(microseconds), digest], ".")
 
-            {:error, _} = error ->
-              RawIO.delete(staging)
-              error
-          end
-        end
+  defp time(microseconds),
+    do: microseconds |> Integer.to_string(16) |> String.pad_leading(16, "0")
+
+  defp group_of(file), do: file |> String.split(".", parts: 2) |> hd()
+
+  # When a version was written, as its name says — compared as written:
+  # the digits are fixed in number — and "" for a trace of 0.2.1's.
+  defp written_at(file) do
+    case String.split(file, ".") do
+      [_group, time, _digest] -> time
+      _kept_by_0_2_1 -> ""
+    end
+  end
+
+  defp digest_of(file) do
+    case String.split(file, ".") do
+      [_group, _time, digest] -> digest
+      _kept_by_0_2_1 -> nil
     end
   end
 
   # All but the `keep` most recently used traces of a directory go; the
   # one just written always stays.
-  defp prune(_store, _dir, _written, :infinity), do: :ok
+  defp prune(_store, _dir, _group, :infinity), do: :ok
 
-  defp prune(store, dir, written, keep) do
+  defp prune(store, dir, group, keep) do
     dir
-    |> by_recency()
-    |> Enum.map(&elem(&1, 1))
-    |> Enum.reject(&(&1 == written))
+    |> traces()
+    |> elem(0)
+    |> Enum.reject(&(&1.group == group))
     |> Enum.drop(keep - 1)
-    |> Enum.each(&Blob.discard(store, &1))
+    |> Enum.each(fn trace -> for path <- trace.versions, do: Blob.discard(store, path) end)
   end
 
   @doc """
-  The traces kept under `name`, the most recently used first.
+  The traces kept under `name`, the most recently used first: each set
+  of observations' newest version.
 
   ## Options
 
@@ -137,36 +190,75 @@ defmodule Roux.Blob.Trace do
       each.
   """
   @spec fetch(Blob.t(), term(), keyword()) :: [t()]
-  def fetch(%Blob{root: root} = store, name, opts \\ []) do
+  def fetch(%Blob{} = store, name, opts \\ []) do
     limit = opts |> Keyword.validate!(limit: :all) |> Keyword.fetch!(:limit)
 
     unless limit == :all or (is_integer(limit) and limit >= 0) do
       raise ArgumentError, ":limit must be a non-negative integer or :all, got: #{inspect(limit)}"
     end
 
-    stamped = by_recency(dir(root, name))
-    stamped = if limit == :all, do: stamped, else: Enum.take(stamped, limit)
+    fetch(store, name, limit, @attempts)
+  end
+
+  defp fetch(%Blob{root: root} = store, name, limit, attempts) do
+    {listed, vanished?} = traces(dir(root, name))
+    listed = if limit == :all, do: listed, else: Enum.take(listed, limit)
     refresh = Blob.refresh_interval(store)
 
-    # A trace removed since the listing (by a prune, a collection) is not
-    # there to read, and is passed over.
-    for {mtime, path} <- stamped,
-        {:ok, data} <- [RawIO.read(path)],
-        {:ok, {^name, deps, value}} <- [Blob.decode(data)] do
-      %{name: name, deps: deps, value: value, path: path, mtime: mtime, refresh: refresh}
+    read =
+      for trace <- listed do
+        with {:ok, data} <- RawIO.read(trace.path),
+             {:ok, {^name, deps, value}} <- Blob.decode(data) do
+          %{name: name, deps: deps, value: value, path: trace.path, mtime: trace.mtime}
+          |> Map.put(:refresh, refresh)
+        else
+          {:error, :enoent} -> :vanished
+          _undecodable -> nil
+        end
+      end
+
+    # A version gone between the listing and its read was superseded, or
+    # taken: another look finds what took its place, if anything did.
+    if (vanished? or :vanished in read) and attempts > 1 do
+      fetch(store, name, limit, attempts - 1)
+    else
+      Enum.filter(read, &is_map/1)
     end
   end
 
-  # A directory's trace files as `{mtime, path}`, the most recently used
-  # (modified) first: a file gone between the listing and its stat is
-  # left out.
-  defp by_recency(dir) do
-    for file <- RawIO.ls(dir),
-        path = Path.join(dir, file),
-        {:ok, %File.Stat{mtime: mtime}} <- [RawIO.stat(path)] do
-      {mtime, path}
-    end
-    |> Enum.sort(:desc)
+  # A directory's traces, one per set of observations: the newest
+  # version's path (by its name), the group's most recent modification
+  # time, and every version's path, the most recently used first. And
+  # whether a file listed was gone at its stat.
+  defp traces(dir) do
+    stamped =
+      for file <- RawIO.ls(dir) do
+        path = Path.join(dir, file)
+
+        case RawIO.stat(path) do
+          {:ok, %File.Stat{mtime: mtime}} -> {mtime, file, path}
+          {:error, _} -> :vanished
+        end
+      end
+
+    traces =
+      stamped
+      |> Enum.reject(&(&1 == :vanished))
+      |> Enum.group_by(fn {_mtime, file, _path} -> group_of(file) end)
+      |> Enum.map(fn {group, versions} ->
+        {_mtime, file, path} = Enum.max_by(versions, &elem(&1, 1))
+
+        %{
+          group: group,
+          mtime: versions |> Enum.map(&elem(&1, 0)) |> Enum.max(),
+          file: file,
+          path: path,
+          versions: Enum.map(versions, &elem(&1, 2))
+        }
+      end)
+      |> Enum.sort_by(&{&1.mtime, &1.file}, :desc)
+
+    {traces, :vanished in stamped}
   end
 
   @doc """
@@ -183,24 +275,32 @@ defmodule Roux.Blob.Trace do
   @spec find(Blob.t() | [t()], term(), (term() -> term()), keyword()) :: {:ok, term()} | :miss
   def find(source, name, observe, opts \\ [])
 
-  def find(%Blob{} = store, name, observe, opts),
+  def find(%Blob{} = store, name, observe, opts) when is_function(observe, 1),
     do: find(fetch(store, name, opts), name, observe, [])
 
   def find(traces, name, observe, _opts) when is_list(traces) and is_function(observe, 1) do
+    case holding(traces, name, observe) do
+      {:found, trace} ->
+        touch(trace)
+        {:ok, trace.value}
+
+      :miss ->
+        :miss
+    end
+  end
+
+  # The first trace whose observations all hold.
+  defp holding(traces, name, observe) do
     traces
     |> Enum.filter(&(&1.name === name))
     |> Enum.reduce_while(%{}, fn trace, seen ->
       case holds(trace.deps, observe, seen) do
-        {:ok, _seen} ->
-          touch(trace)
-          {:halt, {:found, trace.value}}
-
-        {:changed, seen} ->
-          {:cont, seen}
+        {:ok, _seen} -> {:halt, {:found, trace}}
+        {:changed, seen} -> {:cont, seen}
       end
     end)
     |> case do
-      {:found, value} -> {:ok, value}
+      {:found, trace} -> {:found, trace}
       _seen -> :miss
     end
   end

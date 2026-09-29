@@ -61,7 +61,7 @@ defmodule Roux.Blob.RacesTest do
     test "never makes the action-cache entry a collection takes as it looks", %{tmp_dir: tmp} do
       store = store!(tmp)
       :ok = Blob.remember(store, :key, :value)
-      [path] = Path.wildcard(Path.join([store.root, "ac", "*", "*"]))
+      [path] = Path.wildcard(Path.join([store.root, "traces", "*", "*"]))
       # Used longer ago than the store's refresh interval: a hit touches it.
       File.touch!(path, System.os_time(:second) - 2 * @day)
 
@@ -89,12 +89,13 @@ defmodule Roux.Blob.RacesTest do
   end
 
   describe "a trace lookup" do
-    # A trace last used two hours ago (longer than the store's refresh
+    # A trace last used three hours ago (longer than the store's refresh
     # interval: a hit touches it), and its file.
     defp old_trace!(store, name, n) do
       :ok = Trace.put(store, name, [{n, n}], {:value, n})
-      path = Path.join([store.root, "traces", Blob.term_digest(name), Blob.term_digest([{n, n}])])
-      File.touch!(path, System.os_time(:second) - 2 * 60 * 60)
+      dir = Path.join([store.root, "traces", Blob.term_digest(name)])
+      [path] = Path.wildcard(Path.join(dir, Blob.term_digest([{n, n}]) <> ".*"))
+      File.touch!(path, System.os_time(:second) - 3 * 60 * 60)
       path
     end
 
@@ -105,7 +106,10 @@ defmodule Roux.Blob.RacesTest do
     defp lookup(store, name),
       do: {Trace, :find, [store, name, &Function.identity/1, [limit: 8]]}
 
-    test "misses a trace a put prunes between its listing and its read", %{tmp_dir: tmp} do
+    # The lookup's observer holds for every trace: the one put in place
+    # of the pruned one is a hit, once the lookup looks again.
+    test "looks again for a trace a put prunes between its listing and its read",
+         %{tmp_dir: tmp} do
       store = store!(tmp)
       path = old_trace!(store, :raced, 1)
 
@@ -113,7 +117,7 @@ defmodule Roux.Blob.RacesTest do
       gate = %{name: :put, ops: [:read_file_info], path: path, action: pruning_put(store, :raced)}
       {found, %{put: :ok}} = gated(peer!(), [gate], lookup(store, :raced))
 
-      assert found == :miss
+      assert found == {:ok, {:value, 2}}
       refute File.exists?(path)
       assert [%{value: {:value, 2}}] = Trace.fetch(store, :raced)
     end

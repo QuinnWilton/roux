@@ -154,6 +154,27 @@ defmodule Roux.BlobTest do
       assert Blob.cached(store, :err_key, compute.(:fine)) == :fine
       assert :counters.get(counter, 1) == 4
     end
+
+    test "a value remembered again is recalled from then on", %{store: store} do
+      :ok = Blob.remember(store, :k, :old)
+      :ok = Blob.remember(store, :k, :new)
+      assert {:ok, :new} = Blob.recall(store, :k)
+      :ok = Blob.remember(store, :k, :old)
+      assert {:ok, :old} = Blob.recall(store, :k)
+    end
+
+    # What roux 0.2.1 remembered, where it kept it: still recalled, and
+    # superseded by the next write.
+    test "an entry of 0.2.1's layout is recalled", %{store: store} do
+      <<aa::binary-size(2), _::binary>> = name = Blob.term_digest(:kept_key)
+      dir = Path.join([store.root, "ac", aa])
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, name), :erlang.term_to_binary({:kept_key, :legacy}))
+
+      assert {:ok, :legacy} = Blob.recall(store, :kept_key)
+      :ok = Blob.remember(store, :kept_key, :new)
+      assert {:ok, :new} = Blob.recall(store, :kept_key)
+    end
   end
 
   describe "traces" do
@@ -194,9 +215,12 @@ defmodule Roux.BlobTest do
       Path.wildcard(Path.join([store.root, "traces", Blob.term_digest(name), "*"]))
     end
 
+    # Every version of the trace of `deps` under `name`, last used `age`
+    # seconds ago.
     defp backdate!(store, name, deps, age) do
-      path = Path.join([store.root, "traces", Blob.term_digest(name), Blob.term_digest(deps)])
-      File.touch!(path, System.os_time(:second) - age)
+      dir = Path.join([store.root, "traces", Blob.term_digest(name)])
+      [_ | _] = paths = Path.wildcard(Path.join(dir, Blob.term_digest(deps) <> ".*"))
+      for path <- paths, do: File.touch!(path, System.os_time(:second) - age)
     end
 
     # How many files the calling process read during `fun`: its raw calls
@@ -230,11 +254,17 @@ defmodule Roux.BlobTest do
       end
     end
 
-    test "a name keeps its most recent traces, however many are put", %{store: store} do
-      for n <- 1..30, do: :ok = Trace.put(store, :bounded, [{:n, n}], n)
+    # Each put, then made hours older: unused.
+    defp put_unused!(store, name, n, opts \\ []) do
+      :ok = Trace.put(store, name, [{:n, n}], n, opts)
+      backdate!(store, name, [{:n, n}], 3 * 3600 - n)
+    end
+
+    test "a name keeps its most recently used traces, however many are put", %{store: store} do
+      for n <- 1..30, do: put_unused!(store, :bounded, n)
       assert length(trace_files(store, :bounded)) == 8
 
-      for n <- 1..5, do: :ok = Trace.put(store, :three, [{:n, n}], n, keep: 3)
+      for n <- 1..5, do: put_unused!(store, :three, n, keep: 3)
       assert length(trace_files(store, :three)) == 3
       assert {:ok, 5} = Trace.find(store, :three, fn :n -> 5 end)
 
@@ -244,11 +274,49 @@ defmodule Roux.BlobTest do
       assert_raise ArgumentError, fn -> Trace.put(store, :bad, [], 1, keep: 0) end
     end
 
+    test "a new value of the same observations is a new version, found from then on",
+         %{store: store} do
+      :ok = Trace.put(store, :cell, [], :old, keep: 1)
+      [old] = trace_files(store, :cell)
+      :ok = Trace.put(store, :cell, [], :new, keep: 1)
+      assert {:ok, :new} = Trace.find(store, :cell, fn _ -> :never end)
+
+      # The old version stays for a second: a reader that listed it can
+      # still read it.
+      assert old in trace_files(store, :cell)
+
+      # Put again as it was: the value it was, found again.
+      :ok = Trace.put(store, :cell, [], :old, keep: 1)
+      assert {:ok, :old} = Trace.find(store, :cell, fn _ -> :never end)
+    end
+
+    test "a superseded version goes with the first put more than a second after it",
+         %{store: store} do
+      :ok = Trace.put(store, :cell, [], :a, keep: 1)
+      Process.sleep(1_100)
+      :ok = Trace.put(store, :cell, [], :b, keep: 1)
+      assert [_b] = trace_files(store, :cell)
+      assert {:ok, :b} = Trace.find(store, :cell, fn _ -> :never end)
+    end
+
+    # What roux 0.2.1 kept: a trace named by its observations alone.
+    test "a trace of 0.2.1's layout is found, and a new version supersedes it", %{store: store} do
+      dir = Path.join([store.root, "traces", Blob.term_digest(:kept)])
+      File.mkdir_p!(dir)
+      legacy = Path.join(dir, Blob.term_digest([{:n, 1}]))
+      File.write!(legacy, :erlang.term_to_binary({:kept, [{:n, 1}], :legacy}))
+
+      assert {:ok, :legacy} = Trace.find(store, :kept, fn :n -> 1 end)
+      :ok = Trace.put(store, :kept, [{:n, 1}], :versioned)
+      refute File.exists?(legacy)
+      assert {:ok, :versioned} = Trace.find(store, :kept, fn :n -> 1 end)
+    end
+
     test "most recently used means used: a trace found survives the next prune", %{
       store: store
     } do
       # Last used hours ago: longer than the store's refresh interval.
-      for {n, age} <- [{1, 4 * 3600}, {2, 3 * 3600}, {3, 2 * 3600}] do
+      for {n, age} <- [{1, 5 * 3600}, {2, 4 * 3600}, {3, 3 * 3600}] do
         :ok = Trace.put(store, :lru, [{:n, n}], n, keep: 3)
         backdate!(store, :lru, [{:n, n}], age)
       end
@@ -296,6 +364,17 @@ defmodule Roux.BlobTest do
   describe "refreshing on a hit" do
     defp mtime(path), do: File.stat!(path, time: :posix).mtime
 
+    # The file of the action-cache entry of `key`: a trace of no
+    # observations, named after the key.
+    defp ac_file(store, key) do
+      [path] =
+        Path.wildcard(
+          Path.join([store.root, "traces", Blob.term_digest({Roux.Blob, :ac, key}), "*"])
+        )
+
+      path
+    end
+
     defp age!(path, seconds), do: File.touch!(path, System.os_time(:second) - seconds)
 
     test "leaves an entry used within the refresh interval alone, and marks an older one",
@@ -304,8 +383,8 @@ defmodule Roux.BlobTest do
       :ok = Blob.remember(store, :key, :value)
       :ok = Trace.put(store, :name, [{:n, 1}], :traced)
       cas = Blob.path(store, digest)
-      [ac] = Path.wildcard(Path.join([store.root, "ac", "*", "*"]))
-      [trace] = Path.wildcard(Path.join([store.root, "traces", "*", "*"]))
+      ac = ac_file(store, :key)
+      [trace] = Path.wildcard(Path.join([store.root, "traces", Blob.term_digest(:name), "*"]))
 
       hit = fn ->
         {:ok, ^digest} = Blob.put(store, "bytes")
@@ -329,7 +408,7 @@ defmodule Roux.BlobTest do
     test "with refresh: 0, every hit marks", %{tmp_dir: tmp} do
       store = Blob.open!(Path.join(tmp, "eager"), refresh: 0)
       :ok = Blob.remember(store, :key, :value)
-      [ac] = Path.wildcard(Path.join([store.root, "ac", "*", "*"]))
+      ac = ac_file(store, :key)
       age!(ac, 30)
       {:ok, :value} = Blob.recall(store, :key)
       assert System.os_time(:second) - mtime(ac) < 30
@@ -435,15 +514,7 @@ defmodule Roux.BlobTest do
       :ok = Blob.retain(store, owner, [kept])
       :ok = Blob.remember(store, :recent, %{outputs: [pointed]})
       :ok = Blob.remember(store, :stale, [old_pointed])
-      ac = Path.join([store.root, "ac"])
-
-      stale =
-        for aa <- File.ls!(ac), name <- File.ls!(Path.join(ac, aa)), do: Path.join([ac, aa, name])
-
-      stale_ac =
-        Enum.find(stale, &(Blob.decode(File.read!(&1)) == {:ok, {:stale, [old_pointed]}}))
-
-      age!(stale_ac, 8 * @day)
+      age!(ac_file(store, :stale), 8 * @day)
 
       for digest <- [kept, pointed, old_pointed, old],
           do: age!(Blob.path(store, digest), 2 * @day)

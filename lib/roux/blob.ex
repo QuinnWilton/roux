@@ -17,10 +17,12 @@ defmodule Roux.Blob do
     * `cas/<aa>/<digest>` — content-addressed entries (`put/2`,
       `adopt/2`, `get/2`, `link/3`), named by the SHA-256 of their bytes
       in lowercase hex, `aa` its first two digits;
-    * `ac/<aa>/<key digest>` — the action cache (`remember/3`,
-      `recall/2`): a term stored under any key;
-    * `traces/<name digest>/<trace digest>` — verifying traces
-      (`Roux.Blob.Trace`);
+    * `traces/<name digest>/<observations digest>.<bytes digest>` —
+      verifying traces (`Roux.Blob.Trace`), each version a file of its
+      own; the action cache (`remember/3`, `recall/2`: a term stored under
+      any key) keeps each entry as a trace of no observations;
+    * `ac/<aa>/<key digest>` — action-cache entries roux 0.2.1 kept,
+      still read;
     * `roots/<owner digest>` — the digests an owner keeps alive
       (`retain/3`), a manifest's among them;
     * `scratch/<os pid>.<token>-<n>/` — a directory per use (`scratch/2`),
@@ -42,15 +44,17 @@ defmodule Roux.Blob do
   hard link to one (`link/3`) shares its inode, and a program writing
   into the link would write into the store.
 
-  The names that are replaced on purpose — an action-cache entry, a
-  trace, a root, whose value can change — are renamed into place, and
-  only when their bytes change (an equal write refreshes the file
-  instead). Their readers take a name missing for that moment for a
-  miss, never an error: a recall misses, a trace lookup passes over the
-  trace, and a collection that cannot read a root it listed sweeps
-  nothing. A reader that finds an entry gone, or not holding what its name
-  says, takes it for a miss (and a corrupt one is taken out of its name,
-  so the next write replaces it).
+  A trace or action-cache entry whose value changes is never replaced
+  either: each value is a version of its own, named by its bytes' digest
+  and linked into place, and a write removes the versions it found
+  before it (`Roux.Blob.Trace`'s "Versions"). A reader always finds a
+  complete version, and after a write, the one it wrote. A root, whose
+  owner rewrites it, is renamed into place, and only when its bytes
+  change (an equal write refreshes the file instead); a collection that
+  cannot read a root it listed sweeps nothing. A reader that finds an
+  entry gone, or not holding what its name says, takes it for a miss
+  (and a corrupt one is taken out of its name, so the next write
+  replaces it).
 
   ## Trust
 
@@ -75,14 +79,14 @@ defmodule Roux.Blob do
   (`Roux.Runtime.parallel/3`) runs side by side.
 
   A lookup that finds an entry — a `put/2` of bytes already there, a
-  `recall/2` hit, a trace found (`Roux.Blob.Trace`) — refreshes its
-  modification time, which is what a collection and a trace prune read
-  as "in use". It does so only when that time is older than the store's
-  `refresh:` interval (an hour by default, `open/2`): a warm run that
-  reads the same entries again writes nothing. Recency is therefore
-  known to within the interval, which is why a collection's grace and
-  keep periods are never shorter than it (a shorter one is taken as the
-  interval).
+  `recall/2` hit, a trace found or put again (`Roux.Blob.Trace`) —
+  refreshes its modification time, which is what a collection and a
+  trace prune read as "in use". It does so only when that time is older
+  than the store's `refresh:` interval (an hour by default, `open/2`): a
+  warm run that reads the same entries again writes nothing. Recency is
+  therefore known to within the interval, which is why a collection's
+  grace and keep periods are never shorter than it (a shorter one is
+  taken as the interval).
 
   ## Collection
 
@@ -105,6 +109,7 @@ defmodule Roux.Blob do
   """
 
   alias Roux.Blob.IO, as: RawIO
+  alias Roux.Blob.Trace
 
   @refresh 60 * 60
 
@@ -328,6 +333,30 @@ defmodule Roux.Blob do
            :ok <- install_entry(store, path, &RawIO.write(&1, data)) do
         {:ok, digest}
       end
+    end
+  end
+
+  @doc false
+  # Installs `data` as `path`, a trace's version: a name no other bytes
+  # ever take (it carries their digest and the time they were written),
+  # so a rename into place never replaces anything, and is atomic —
+  # where a hard link would do too, but leaves a file APFS reads more
+  # slowly. Bytes already there are not written again, and are marked
+  # used.
+  @spec install(t(), Path.t(), binary()) :: :ok | {:error, File.posix()}
+  def install(%__MODULE__{root: root} = store, path, data) do
+    if present?(store, path, byte_size(data)) do
+      :ok
+    else
+      staging = staging(root)
+
+      result =
+        with :ok <- RawIO.write(staging, data) do
+          RawIO.rename(staging, path)
+        end
+
+      if result != :ok, do: RawIO.delete(staging)
+      result
     end
   end
 
@@ -567,6 +596,14 @@ defmodule Roux.Blob do
   """
   @spec recall(t(), term()) :: {:ok, term()} | :miss
   def recall(%__MODULE__{} = store, key) do
+    case Trace.find(store, ac_name(key), fn _no_observations -> nil end) do
+      {:ok, value} -> {:ok, value}
+      :miss -> recall_kept(store, key)
+    end
+  end
+
+  # An entry roux 0.2.1 remembered, in the layout it kept them in.
+  defp recall_kept(store, key) do
     path = ac_path(store, key)
 
     with {:ok, %File.Stat{mtime: mtime}} <- RawIO.stat(path),
@@ -579,15 +616,17 @@ defmodule Roux.Blob do
     end
   end
 
-  @doc "Remembers `value` under `key` (replacing what was there)."
+  @doc """
+  Remembers `value` under `key`: a new version of the entry, which
+  replaces the one there for every lookup once this returns — never by
+  writing over it (see "Entries").
+  """
   @spec remember(t(), term(), term()) :: :ok | {:error, File.posix()}
-  def remember(%__MODULE__{} = store, key, value) do
-    path = ac_path(store, key)
+  def remember(%__MODULE__{} = store, key, value),
+    do: Trace.put(store, ac_name(key), [], value, keep: :infinity)
 
-    with :ok <- mkdir(Path.dirname(path)) do
-      replace_file(store, path, :erlang.term_to_binary({key, value}, @term_opts))
-    end
-  end
+  # An action-cache entry is a trace of no observations (`Roux.Blob.Trace`).
+  defp ac_name(key), do: {__MODULE__, :ac, key}
 
   @doc """
   The value remembered under `key`, or `fun`'s, remembered — unless it
