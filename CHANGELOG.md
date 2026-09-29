@@ -2,10 +2,57 @@
 
 ## Unreleased
 
+Five races in the blob store a Concuerror model found, each a spurious
+miss under concurrent use — a lookup finding nothing, or a value's
+blob, while it was there to find — and so work done again, or, for a
+consumer that takes a named blob's absence as an error, an error. None
+returned a value other than one that was put: the model checks every
+lookup against the values written.
+
+### Fixed
+
+- **A trace written or used within the window is never pruned** (D34).
+  A put kept a name's `keep:` most recently used traces by modification
+  time, but a hit marks a trace only when it is older than the store's
+  refresh interval, so a trace in use could be pruned by count; writers
+  racing under one name pruned each other's new traces (three writers
+  with `keep: 2` could leave one). A put now keeps every trace written
+  or used within the store's window (`Roux.Blob.window/1`, twice the
+  refresh interval), and `keep:` bounds only the older ones.
+- **A trace given a new value is never missing while it is replaced**
+  (D33). Its file was renamed over, and a replacing rename is not atomic
+  everywhere (APFS): a lookup in its moment found no trace. Argus writes
+  its one trace per module this way on every rebuild.
+- **An action-cache entry remembered again is never missing while it is
+  replaced** (D33): the same rename, under `recall/2`.
+- **A trace a collection puts back keeps what it names** (D35). A
+  collection marked from the traces it found used, swept the CAS, then
+  swept the old traces, putting back one a lookup had marked used
+  meanwhile — which then named a blob already swept, for good: every
+  later lookup found the trace and missed the blob.
+- **A trace put again unchanged is marked used** (D34), so a prune by
+  another process keeps it: a second VM re-putting an old trace could
+  see it pruned right after.
+
 ### Changed
 
 - Elixir `~> 1.19` is now required (was `~> 1.18`); OTP 28 remains
   required. CI tests Elixir 1.19.4 only.
+- Traces and action-cache entries are versions: `traces/<name
+  digest>/<observations digest>.<time>.<bytes digest>`, each renamed into
+  a name nothing else takes, and the action cache keeps each entry as a
+  trace of no observations. Traces and entries in 0.2.1's layout are
+  still read, and superseded by the next write. A put of a trace's
+  newest bytes writes nothing (D33).
+- `Roux.Blob.Trace.find/4` and `Roux.Blob.recall/2` miss a trace or
+  entry that went between their read and their touch, rather than
+  return a value a collection may be taking the blobs of; a lookup
+  looks again for a version superseded as it read. New:
+  `Roux.Blob.Trace.mark_used/1` (`:gone` for such a trace), for a
+  caller that fetches traces itself.
+- A collection sweeps the traces and action-cache entries unused for
+  its keep period before it marks and sweeps the CAS, and its grace and
+  keep periods are never shorter than the window (D35).
 
 ## 0.2.1 — 2026-09-27
 
