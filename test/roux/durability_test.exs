@@ -56,6 +56,36 @@ defmodule Roux.DurabilityTest do
     end
   end
 
+  describe "validation" do
+    # An input's level is the one it was set at. A walk that met it as a
+    # dependency took it for a query of no dependencies — the minimum
+    # over nothing, :high — and wrote that over it: its readers then took
+    # :high too, and the next write at :low advanced the revision at
+    # :high, which no durability check skips.
+    test "leaves an input's level as it was set", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "read", "a")
+      Input.set(db, :source, "other", "b")
+      reader = fn db, key -> Runtime.input(db, :source, key) end
+      Runtime.execute(db, :read, "read", reader)
+
+      # An edit elsewhere at :low, then the reader again: its walk
+      # validates the input it read.
+      Input.set(db, :source, "other", "c")
+      Runtime.execute(db, :read, "read", reader)
+
+      assert {:ok, %{durability: :low}} = Memo.get(db, {:input, :source, "read"})
+      assert {:ok, %{durability: :low}} = Memo.get(db, {:read, "read"})
+
+      # So the next write at :low moves only :low: a reader of nothing
+      # lower than :medium skips its walk.
+      medium = Roux.Revision.last_changed_at_or_above(db.revision, :medium)
+      Input.set(db, :source, "read", "d")
+      assert Roux.Revision.last_changed_at_or_above(db.revision, :medium) == medium
+      assert Runtime.execute(db, :read, "read", reader) == "d"
+    end
+  end
+
   describe "soundness" do
     test "lowering a key's durability still invalidates its readers", %{db: db} do
       # A reader recorded at :medium checks only :medium and above. If

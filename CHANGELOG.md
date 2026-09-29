@@ -12,6 +12,17 @@
   26 MB; argus on aeromancy: 3,719 edges, 79 repeats, 0.4% smaller); a
   repeated edge cost about 0.45 µs of each walk.
 
+### Fixed
+
+- **Validation leaves an input's durability as it was set.** A walk that
+  met an input as a dependency took it for a query of no dependencies
+  and wrote the minimum over nothing, `:high`, over its level. Its
+  readers then took `:high` too, and the next write at the input's own
+  level advanced the revision at `:high` (`Roux.Input.set/5` advances
+  at a key's old level), which no durability check skips: after the
+  first edit, every edit at `:low` walked every entry. No value was
+  stale.
+
 ## 0.2.2 — 2026-09-29
 
 Five races in the blob store a Concuerror model found, each a spurious

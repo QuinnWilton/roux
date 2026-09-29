@@ -115,6 +115,16 @@ defmodule Roux.Validation do
     end
   end
 
+  # An input depends on nothing, and its durability is its own — the
+  # level it was set at (`Roux.Input.set/5`) — not a minimum over
+  # dependencies: an empty walk's `:high` would raise it, and every later
+  # write at its level would then advance the revision at `:high`, where
+  # nothing skips its walk.
+  defp walk_dependencies(db, {:input, _name, _key} = query_key, [], _verified, current_rev, _fn) do
+    Memo.update_verified(db, query_key, current_rev)
+    :valid
+  end
+
   defp walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn) do
     case check_deps(db, deps, verified_at, ensure_fn, :high) do
       {:clean, durability} ->
