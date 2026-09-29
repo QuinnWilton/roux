@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 — 2026-09-29
 
 Five races in the blob store a Concuerror model found, each a spurious
 miss under concurrent use — a lookup finding nothing, or a value's
