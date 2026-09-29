@@ -14,9 +14,9 @@ defmodule Roux.Blob.Trace do
   A name keeps several traces, one per distinct set of observations: a
   value computed before an edit is found again once the edit is undone.
   `find/4` tries the most recently used first, observing each dependency
-  at most once, and refreshes the trace it returns (`Roux.Blob`'s "Raw
-  I/O, and touches that refresh": within the store's refresh interval,
-  it is left alone), so "recently used" means used,
+  at most once, and marks the trace it returns used (`mark_used/1`:
+  within the store's refresh interval, it is left alone — `Roux.Blob`'s
+  "Raw I/O, and touches that refresh"), so "recently used" means used,
   not only written — and a collection (`Roux.Blob.gc/2`) keeps traces in
   use, and the entries their values name.
 
@@ -265,7 +265,10 @@ defmodule Roux.Blob.Trace do
   The value of a trace under `name` whose observations all still hold —
   `observe.(what)` equal (`===`) to what was observed — or `:miss`.
   `source` is a store, or traces already fetched from one (`fetch/3`).
-  The trace found is touched: it is now the name's most recently used.
+  The trace found is marked used (`mark_used/1`): it is now the name's
+  most recently used. One removed as it was found — taken by a
+  collection, or superseded — is not returned: with a store, it is
+  looked for again.
 
   ## Options
 
@@ -276,16 +279,24 @@ defmodule Roux.Blob.Trace do
   def find(source, name, observe, opts \\ [])
 
   def find(%Blob{} = store, name, observe, opts) when is_function(observe, 1),
-    do: find(fetch(store, name, opts), name, observe, [])
+    do: find_in(store, name, observe, opts, @attempts)
 
   def find(traces, name, observe, _opts) when is_list(traces) and is_function(observe, 1) do
-    case holding(traces, name, observe) do
-      {:found, trace} ->
-        touch(trace)
-        {:ok, trace.value}
+    with {:found, trace} <- holding(traces, name, observe),
+         :ok <- mark_used(trace) do
+      {:ok, trace.value}
+    else
+      _miss_or_gone -> :miss
+    end
+  end
 
-      :miss ->
-        :miss
+  defp find_in(store, name, observe, opts, attempts) do
+    with {:found, trace} <- holding(fetch(store, name, opts), name, observe),
+         :ok <- mark_used(trace) do
+      {:ok, trace.value}
+    else
+      :gone when attempts > 1 -> find_in(store, name, observe, opts, attempts - 1)
+      _miss_or_gone -> :miss
     end
   end
 
@@ -321,11 +332,24 @@ defmodule Roux.Blob.Trace do
     if now === observed, do: holds(rest, observe, seen), else: {:changed, seen}
   end
 
-  # Marks a trace used, unless it was within its store's refresh interval.
-  # A trace removed since it was read cannot be touched, and need not be.
-  defp touch(%{path: path, mtime: mtime, refresh: refresh}) do
-    if System.os_time(:second) - mtime >= refresh, do: _ = Blob.touch(path)
-    :ok
+  @doc """
+  Marks a trace fetched (`fetch/3`) used, as `find/4` marks the one it
+  returns: its modification time set to now, unless that is within its
+  store's refresh interval. `:gone` when the trace was removed since it
+  was read, which can happen only to one unused for longer than the
+  interval: a collection may be taking the entries its value names, so
+  that value is not to be used.
+  """
+  @spec mark_used(t()) :: :ok | :gone
+  def mark_used(%{path: path, mtime: mtime, refresh: refresh}) do
+    if System.os_time(:second) - mtime >= refresh do
+      case Blob.touch(path) do
+        :ok -> :ok
+        {:error, _} -> :gone
+      end
+    else
+      :ok
+    end
   end
 
   defp dir(root, name), do: Path.join([root, "traces", Blob.term_digest(name)])

@@ -58,7 +58,10 @@ defmodule Roux.Blob.RacesTest do
   end
 
   describe "a lookup" do
-    test "never makes the action-cache entry a collection takes as it looks", %{tmp_dir: tmp} do
+    # Taken between its read and its touch, the entry may name what the
+    # collection taking it takes too: its value is not used.
+    test "misses the action-cache entry a collection takes as it looks, and never makes it again",
+         %{tmp_dir: tmp} do
       store = store!(tmp)
       :ok = Blob.remember(store, :key, :value)
       [path] = Path.wildcard(Path.join([store.root, "traces", "*", "*"]))
@@ -69,7 +72,7 @@ defmodule Roux.Blob.RacesTest do
       gate = %{name: :gc, ops: [:read_file], path: path, action: {File, :rm, [path]}}
       {recalled, %{gc: :ok}} = gated(peer!(), [gate], {Blob, :recall, [store, :key]})
 
-      assert recalled == {:ok, :value}
+      assert recalled == :miss
       assert File.lstat(path) == {:error, :enoent}
       assert Blob.recall(store, :key) == :miss
     end
@@ -122,18 +125,63 @@ defmodule Roux.Blob.RacesTest do
       assert [%{value: {:value, 2}}] = Trace.fetch(store, :raced)
     end
 
-    test "hits a trace a put prunes after its read, and touches nothing back", %{tmp_dir: tmp} do
+    test "passes over a trace a put prunes after its read, and touches nothing back",
+         %{tmp_dir: tmp} do
       store = store!(tmp)
       path = old_trace!(store, :raced, 1)
 
-      # Pruned the moment its bytes are read: the lookup has them, and
-      # its touch finds the file gone.
+      # Pruned the moment its bytes are read: the lookup has them, but its
+      # touch finds the file gone, and it looks again.
       gate = %{name: :put, ops: [:read_file], path: path, action: pruning_put(store, :raced)}
       {found, %{put: :ok}} = gated(peer!(), [gate], lookup(store, :raced))
 
-      assert found == {:ok, {:value, 1}}
+      assert found == {:ok, {:value, 2}}
       refute File.exists?(path)
       assert [%{value: {:value, 2}}] = Trace.fetch(store, :raced)
+    end
+
+    # A trace unused for longer than the collection's keep period, naming
+    # a segment as old: a lookup that marks it used as the collection
+    # looks at it keeps it, and the segment it names.
+    test "a trace used as a collection looks at it keeps what it names", %{tmp_dir: tmp} do
+      store = store!(tmp)
+      {segment, segment_path} = old_entry!(store, "rows")
+      :ok = Trace.put(store, :stale, [], %{segment: segment}, keep: 1)
+      [trace] = Path.wildcard(Path.join([store.root, "traces", Blob.term_digest(:stale), "*"]))
+      File.touch!(trace, System.os_time(:second) - 8 * @day)
+      File.touch!(segment_path, System.os_time(:second) - 8 * @day)
+
+      # The collection has found the trace old; a lookup finds it and
+      # marks it used before the collection takes it.
+      reader = %{
+        name: :reader,
+        ops: [:read_link_info],
+        path: trace,
+        action: {Trace, :find, [store, :stale, &Function.identity/1]}
+      }
+
+      {_stats, %{reader: {:ok, %{segment: ^segment}}}} =
+        gated(peer!(), [reader], {Blob, :gc, [store]})
+
+      assert {:ok, %{segment: ^segment}} = Trace.find(store, :stale, &Function.identity/1)
+      assert {:ok, "rows"} = Blob.get(store, segment)
+    end
+
+    test "misses a trace a collection takes after the lookup read it", %{tmp_dir: tmp} do
+      store = store!(tmp)
+      {segment, segment_path} = old_entry!(store, "rows")
+      :ok = Trace.put(store, :stale, [], %{segment: segment}, keep: 1)
+      [trace] = Path.wildcard(Path.join([store.root, "traces", Blob.term_digest(:stale), "*"]))
+      File.touch!(trace, System.os_time(:second) - 8 * @day)
+      File.touch!(segment_path, System.os_time(:second) - 8 * @day)
+
+      # The collection runs whole between the lookup's read of the trace
+      # and its touch: it takes the trace and the segment it names.
+      gc = %{name: :gc, ops: [:read_file], path: trace, action: {Blob, :gc, [store]}}
+      {found, %{gc: %{removed: 2}}} = gated(peer!(), [gc], lookup(store, :stale))
+
+      assert found == :miss
+      assert Blob.get(store, segment) == :miss
     end
   end
 

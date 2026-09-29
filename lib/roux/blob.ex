@@ -98,14 +98,20 @@ defmodule Roux.Blob do
   and a process that found an entry present (a `put/2`, whose finding
   marks it used) can always link it.
 
-  `gc/2` marks from the live roots — every owner's retained digests
-  (`retain/3`), and the digests named by action-cache entries and
-  traces used recently — and sweeps what is left and older than a grace
-  period. An entry is renamed aside before it is deleted, and put back
-  when it was touched meanwhile: a `put/2` of bytes already there, or a
-  `recall/2`, touches the entry it finds. The grace period must be
-  longer than the longest run between writing an entry and retaining
-  it: a run's own entries are young until it retains them.
+  `gc/2` first sweeps the action-cache entries and traces unused for
+  longer than its keep period, then marks from the live roots — every
+  owner's retained digests (`retain/3`), and the digests named by the
+  action-cache entries and traces left — and sweeps what is left and
+  older than a grace period. An entry is renamed aside before it is
+  deleted, and put back when it was touched meanwhile: a `put/2` of
+  bytes already there, a `recall/2` or a trace lookup touches the entry
+  it finds. The pointers' fate is decided first so that one put back —
+  used as it was being taken — finds what it names still there; and a
+  lookup that finds its entry taken between its read and its touch
+  misses rather than use a value naming entries the collection is
+  taking. The grace period must be longer than the longest run between
+  writing an entry and retaining it: a run's own entries are young until
+  it retains them.
   """
 
   alias Roux.Blob.IO, as: RawIO
@@ -592,7 +598,8 @@ defmodule Roux.Blob do
   @doc """
   The value remembered under `key` (any term), or `:miss`. A hit
   refreshes the entry (see "Raw I/O, and touches that refresh"): a
-  collection keeps what recently used entries name.
+  collection keeps what recently used entries name. An entry taken as
+  it was read is a miss: a collection may be taking what it names.
   """
   @spec recall(t(), term()) :: {:ok, term()} | :miss
   def recall(%__MODULE__{} = store, key) do
@@ -608,8 +615,8 @@ defmodule Roux.Blob do
 
     with {:ok, %File.Stat{mtime: mtime}} <- RawIO.stat(path),
          {:ok, data} <- RawIO.read(path),
-         {:ok, {^key, value}} <- decode(data) do
-      refresh(store, path, mtime)
+         {:ok, {^key, value}} <- decode(data),
+         :ok <- refresh(store, path, mtime) do
       {:ok, value}
     else
       _ -> :miss
@@ -743,12 +750,12 @@ defmodule Roux.Blob do
         }
 
   @doc """
-  Collects the store: marks what the live roots name (see the
+  Collects the store: removes every action-cache entry and trace unused
+  for longer than `keep:`, marks what the live roots name (see the
   moduledoc), and removes every other entry older than the grace period,
-  every action-cache entry and trace unused for longer than `keep:`, and
-  scratch directories and writes a dead process left behind. A grace or
-  keep period shorter than the store's refresh interval is taken as the
-  interval: an entry in use may look that much older than it is.
+  and scratch directories and writes a dead process left behind. A grace
+  or keep period shorter than the store's refresh interval is taken as
+  the interval: an entry in use may look that much older than it is.
   """
   @spec gc(t(), [gc_option()]) :: gc_stats()
   def gc(%__MODULE__{root: root, refresh: refresh} = store, opts \\ []) do
@@ -756,14 +763,18 @@ defmodule Roux.Blob do
     keep = max(Keyword.get(opts, :keep, 7 * @day), refresh)
     now = System.os_time(:second)
 
-    {pointers, stale_pointers} = pointers(store, now - keep)
+    # The pointers' fate first, then what they name: a pointer used as it
+    # was being taken is put back, and must find what it names still
+    # there.
+    {pointers, swept_pointers} = pointers(store, now - keep)
 
-    # A root that could not be read — being replaced as it was looked at,
-    # say — might name any entry: nothing is swept on a partial mark.
+    # A root or pointer that could not be read — being replaced as it was
+    # looked at, say — might name any entry: nothing is swept on a
+    # partial mark.
     {marked, removed} =
-      case root_digests(store, now - grace) do
-        {:ok, roots} ->
-          marked = MapSet.union(roots, pointers)
+      case {pointers, root_digests(store, now - grace)} do
+        {{:ok, pointed}, {:ok, roots}} ->
+          marked = MapSet.union(roots, pointed)
 
           removed =
             for aa <- ls(Path.join(root, "cas")),
@@ -775,12 +786,9 @@ defmodule Roux.Blob do
 
           {marked, removed}
 
-        :unreadable ->
-          {pointers, []}
+        {pointed, _roots} ->
+          {with({:ok, marked} <- pointed, do: marked), []}
       end
-
-    swept_pointers =
-      for path <- stale_pointers, {:ok, size} <- [sweep(store, path, now - keep)], do: size
 
     # What a process that died left behind: its scratch directories, its
     # writes in flight, its removals half done.
@@ -903,25 +911,75 @@ defmodule Roux.Blob do
     File.exists?(owner)
   end
 
-  # The digests named by the action-cache entries and traces used since
-  # `since`, and the ones unused since then.
-  defp pointers(%__MODULE__{root: root}, since) do
-    files =
-      for kind <- ["ac", "traces"],
-          dir <- ls(Path.join(root, kind)),
-          name <- ls(Path.join([root, kind, dir])),
-          do: Path.join([root, kind, dir, name])
+  # The action-cache entries and traces: each unused since `since` swept
+  # (or put back, used meanwhile), and the digests the others name —
+  # `{:ok, digests}`, or `:partial` when one could not be read — with the
+  # sizes of those swept.
+  defp pointers(%__MODULE__{root: root} = store, since) do
+    for kind <- ["ac", "traces"],
+        dir <- ls(Path.join(root, kind)),
+        reduce: {{:ok, MapSet.new()}, []} do
+      {marked, swept} ->
+        {dir_marked, dir_swept} = pointer_dir(store, Path.join([root, kind, dir]), since, 3)
 
-    Enum.reduce(files, {MapSet.new(), []}, fn path, {marked, stale} ->
-      if older_than?(path, since) do
-        {marked, [path | stale]}
-      else
-        case RawIO.read(path) do
-          {:ok, data} -> {digests_in(data, marked), stale}
-          {:error, _} -> {marked, stale}
+        marked =
+          case {marked, dir_marked} do
+            {{:ok, a}, {:ok, b}} -> {:ok, MapSet.union(a, b)}
+            _partial -> :partial
+          end
+
+        {marked, dir_swept ++ swept}
+    end
+  end
+
+  # A directory of pointers. One gone before it could be read was
+  # superseded — a new version is linked before the old one goes — or
+  # taken: the directory is looked at again for what took its place, and
+  # a pointer still vanishing after `attempts` looks leaves the mark
+  # partial.
+  defp pointer_dir(store, dir, since, attempts) do
+    results = for name <- ls(dir), do: pointer(store, Path.join(dir, name), since)
+
+    marked =
+      for {:marked, digests} <- results,
+          reduce: MapSet.new(),
+          do: (acc -> MapSet.union(acc, digests))
+
+    swept = for {:swept, size} <- results, do: size
+
+    cond do
+      :vanished not in results ->
+        {{:ok, marked}, swept}
+
+      attempts > 1 ->
+        case pointer_dir(store, dir, since, attempts - 1) do
+          {{:ok, again}, swept_again} ->
+            {{:ok, MapSet.union(marked, again)}, swept ++ swept_again}
+
+          {:partial, swept_again} ->
+            {:partial, swept ++ swept_again}
         end
-      end
-    end)
+
+      true ->
+        {:partial, swept}
+    end
+  end
+
+  defp pointer(store, path, since) do
+    case older_than?(path, since) and sweep(store, path, since) do
+      {:ok, size} -> {:swept, size}
+      {:kept, {:ok, data}} -> {:marked, digests_in(data, MapSet.new())}
+      {:kept, {:error, _}} -> :vanished
+      :vanished -> :vanished
+      _in_use -> read_pointer(path)
+    end
+  end
+
+  defp read_pointer(path) do
+    case RawIO.read(path) do
+      {:ok, data} -> {:marked, digests_in(data, MapSet.new())}
+      {:error, _} -> :vanished
+    end
   end
 
   # Every binary in a stored term that has a digest's shape: a pointer
@@ -951,13 +1009,15 @@ defmodule Roux.Blob do
 
   # Removes `path` unless it was written or touched since `since`:
   # renamed aside first, so a reader finds it whole or not at all, and
-  # put back when a touch came between the look and the rename.
+  # put back when a touch came between the look and the rename —
+  # `{:kept, read}`, with what was read of it. `{:ok, size}` when it
+  # went, `:in_use` when it was not old, `:vanished` when it was gone.
   # A CAS entry goes aside under a name that begins with its digest, so
   # a reader that finds its name missing meanwhile reads or links the
   # aside copy (`get/2`, `link/3`): at every moment of a sweep, one of the
   # two names holds the entry's inode.
   defp sweep(%__MODULE__{root: root}, path, since, aside_prefix \\ "") do
-    with true <- older_than?(path, since),
+    with true <- older_than?(path, since) || :in_use,
          {:ok, %File.Stat{size: size}} <- RawIO.stat(path),
          aside = Path.join([root, "trash", aside_prefix <> "#{RawIO.ospid()}-#{RawIO.unique()}"]),
          :ok <- mkdir(Path.dirname(aside)),
@@ -968,12 +1028,14 @@ defmodule Roux.Blob do
       else
         # Touched meanwhile: back under its name, unless a writer put the
         # same bytes there again (then this copy goes).
+        read = RawIO.read(aside)
         _ = RawIO.link(aside, path)
         RawIO.delete(aside)
-        :kept
+        {:kept, read}
       end
     else
-      _ -> :kept
+      :in_use -> :in_use
+      {:error, _} -> :vanished
     end
   end
 
