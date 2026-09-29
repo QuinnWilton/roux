@@ -92,8 +92,8 @@ defmodule Roux.Blob.RacesTest do
   end
 
   describe "a trace lookup" do
-    # A trace last used three hours ago (longer than the store's refresh
-    # interval: a hit touches it), and its file.
+    # A trace last used three hours ago (longer than the store's window:
+    # a hit touches it, and a prune may take it), and its file.
     defp old_trace!(store, name, n) do
       :ok = Trace.put(store, name, [{n, n}], {:value, n})
       dir = Path.join([store.root, "traces", Blob.term_digest(name)])

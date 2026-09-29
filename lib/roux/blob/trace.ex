@@ -45,9 +45,12 @@ defmodule Roux.Blob.Trace do
   bounded at both ends:
 
     * `put/5` keeps a name's `keep:` most recently used traces (8 by
-      default) and removes the rest, each renamed aside and then
-      unlinked, so a reader finds a trace whole or not at all: what a
-      lookup costs never grows with how long a name has been in use.
+      default), and every trace written or used within the store's
+      window (`Roux.Blob.window/1`, twice its refresh interval: a trace
+      used within the interval was marked within the window), however
+      many: an older one goes, renamed aside and then removed (or put
+      back, if a lookup marked it used meanwhile), so a reader finds a
+      trace whole or not at all.
     * `fetch/3` and `find/4` take `limit:`: they stat a name's traces
       and read and decode only the `limit` most recently used.
 
@@ -91,11 +94,13 @@ defmodule Roux.Blob.Trace do
   computed from: a new version of the trace of those observations (see
   "Versions"), and the only one once this returns, unless another
   process put one meanwhile. Keeps the `keep:` most recently used traces
-  of the name (see "Bounded history").
+  of the name, and every one used within the window (see "Bounded
+  history").
 
   ## Options
 
-    * `:keep` — how many traces the name keeps: a positive integer (default #{@default_keep}), or `:infinity`.
+    * `:keep` — how many traces the name keeps beyond the window: a
+      positive integer (default #{@default_keep}), or `:infinity`.
   """
   @spec put(Blob.t(), term(), [dep()], term(), keyword()) :: :ok | {:error, File.posix()}
   def put(%Blob{root: root} = store, name, deps, value, opts \\ []) when is_list(deps) do
@@ -166,17 +171,21 @@ defmodule Roux.Blob.Trace do
     end
   end
 
-  # All but the `keep` most recently used traces of a directory go; the
-  # one just written always stays.
+  # The traces of other observations beyond `keep`, unused for longer
+  # than the window, the least recently used first; the one just written
+  # always stays.
   defp prune(_store, _dir, _group, :infinity), do: :ok
 
   defp prune(store, dir, group, keep) do
-    dir
-    |> traces()
-    |> elem(0)
-    |> Enum.reject(&(&1.group == group))
-    |> Enum.drop(keep - 1)
-    |> Enum.each(fn trace -> for path <- trace.versions, do: Blob.discard(store, path) end)
+    since = System.os_time(:second) - Blob.window(store)
+    others = dir |> traces() |> elem(0) |> Enum.reject(&(&1.group == group))
+    {fresh, stale} = Enum.split_with(others, &(&1.mtime >= since))
+
+    stale
+    |> Enum.drop(max(keep - 1 - length(fresh), 0))
+    |> Enum.each(fn trace ->
+      for path <- trace.versions, do: Blob.sweep_entry(store, path, since)
+    end)
   end
 
   @doc """

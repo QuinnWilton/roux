@@ -254,7 +254,7 @@ defmodule Roux.BlobTest do
       end
     end
 
-    # Each put, then made hours older: unused.
+    # Each put, then made older than the window (two hours): unused.
     defp put_unused!(store, name, n, opts \\ []) do
       :ok = Trace.put(store, name, [{:n, n}], n, opts)
       backdate!(store, name, [{:n, n}], 3 * 3600 - n)
@@ -272,6 +272,41 @@ defmodule Roux.BlobTest do
       assert length(trace_files(store, :all)) == 12
 
       assert_raise ArgumentError, fn -> Trace.put(store, :bad, [], 1, keep: 0) end
+    end
+
+    # Recency is known to within the refresh interval (a hit marks only a
+    # trace older than it), so a count alone would take what is in use:
+    # every trace written or used within the window stays.
+    test "a trace written or used within the window is never pruned, however many are put",
+         %{store: store} do
+      for n <- 1..12, do: :ok = Trace.put(store, :fresh, [{:n, n}], n, keep: 3)
+      assert length(trace_files(store, :fresh)) == 12
+
+      # Written fifty minutes ago, used now: a hit leaves it alone (it is
+      # within the hour), and the traces put after it do not take it.
+      :ok = Trace.put(store, :hot, [{:n, 0}], :hot, keep: 1)
+      backdate!(store, :hot, [{:n, 0}], 50 * 60)
+      assert {:ok, :hot} = Trace.find(store, :hot, fn :n -> 0 end)
+      for n <- 1..3, do: :ok = Trace.put(store, :hot, [{:n, n}], n, keep: 1)
+      assert {:ok, :hot} = Trace.find(store, :hot, fn :n -> 0 end)
+
+      # Unused for longer than the window: the count applies.
+      backdate!(store, :hot, [{:n, 0}], 3 * 3600)
+      for n <- 1..3, do: backdate!(store, :hot, [{:n, n}], 3 * 3600 + n)
+      :ok = Trace.put(store, :hot, [{:n, 4}], 4, keep: 2)
+      assert store |> Trace.fetch(:hot) |> Enum.map(& &1.value) == [4, :hot]
+    end
+
+    test "putting a trace again unchanged marks it used: a prune keeps it", %{store: store} do
+      :ok = Trace.put(store, :again, [{:n, 0}], :zero)
+      backdate!(store, :again, [{:n, 0}], 3 * 3600)
+      [path] = trace_files(store, :again)
+      inode = File.stat!(path).inode
+
+      :ok = Trace.put(store, :again, [{:n, 0}], :zero)
+      assert File.stat!(path).inode == inode
+      :ok = Trace.put(store, :again, [{:n, 1}], :one, keep: 1)
+      assert {:ok, :zero} = Trace.find(store, :again, fn :n -> 0 end)
     end
 
     test "a new value of the same observations is a new version, found from then on",
@@ -315,7 +350,7 @@ defmodule Roux.BlobTest do
     test "most recently used means used: a trace found survives the next prune", %{
       store: store
     } do
-      # Last used hours ago: longer than the store's refresh interval.
+      # Last used hours ago: longer than the store's window.
       for {n, age} <- [{1, 5 * 3600}, {2, 4 * 3600}, {3, 3 * 3600}] do
         :ok = Trace.put(store, :lru, [{:n, n}], n, keep: 3)
         backdate!(store, :lru, [{:n, n}], age)
@@ -415,13 +450,17 @@ defmodule Roux.BlobTest do
       assert_raise ArgumentError, fn -> Blob.open(Path.join(tmp, "bad"), refresh: -1) end
     end
 
-    test "a collection's grace is never shorter than the refresh interval", %{store: store} do
-      # Twenty minutes old and named by nothing: a grace of zero would take
+    test "a collection's grace is never shorter than the window", %{store: store} do
+      # Ninety minutes old and named by nothing: a grace of zero would take
       # it, though a hit within the hour may have left its time alone.
       {:ok, digest} = Blob.put(store, "recent enough")
-      age!(Blob.path(store, digest), 1200)
+      age!(Blob.path(store, digest), 90 * 60)
       Blob.gc(store, grace: 0, keep: 0)
       assert Blob.member?(store, digest)
+
+      age!(Blob.path(store, digest), 3 * 3600)
+      Blob.gc(store, grace: 0, keep: 0)
+      refute Blob.member?(store, digest)
     end
   end
 

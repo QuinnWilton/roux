@@ -83,10 +83,12 @@ defmodule Roux.Blob do
   refreshes its modification time, which is what a collection and a
   trace prune read as "in use". It does so only when that time is older
   than the store's `refresh:` interval (an hour by default, `open/2`): a
-  warm run that reads the same entries again writes nothing. Recency is
-  therefore known to within the interval, which is why a collection's
-  grace and keep periods are never shorter than it (a shorter one is
-  taken as the interval).
+  warm run that reads the same entries again writes nothing. An entry
+  used within the interval has therefore been marked within twice it,
+  the store's window (`window/1`), and nothing takes an entry for unused
+  within the window: a collection's grace and keep periods are never
+  shorter (a shorter one is taken as the window), and a trace's prune
+  leaves every trace marked within it, however many.
 
   ## Collection
 
@@ -754,13 +756,13 @@ defmodule Roux.Blob do
   for longer than `keep:`, marks what the live roots name (see the
   moduledoc), and removes every other entry older than the grace period,
   and scratch directories and writes a dead process left behind. A grace
-  or keep period shorter than the store's refresh interval is taken as
-  the interval: an entry in use may look that much older than it is.
+  or keep period shorter than the store's window (`window/1`) is taken as
+  the window: an entry in use may look that much older than it is.
   """
   @spec gc(t(), [gc_option()]) :: gc_stats()
-  def gc(%__MODULE__{root: root, refresh: refresh} = store, opts \\ []) do
-    grace = max(Keyword.get(opts, :grace, @day), refresh)
-    keep = max(Keyword.get(opts, :keep, 7 * @day), refresh)
+  def gc(%__MODULE__{root: root} = store, opts \\ []) do
+    grace = max(Keyword.get(opts, :grace, @day), window(store))
+    keep = max(Keyword.get(opts, :keep, 7 * @day), window(store))
     now = System.os_time(:second)
 
     # The pointers' fate first, then what they name: a pointer used as it
@@ -1007,6 +1009,12 @@ defmodule Roux.Blob do
 
   defp hex?(bin), do: bin |> :binary.bin_to_list() |> Enum.all?(&(&1 in ?0..?9 or &1 in ?a..?f))
 
+  @doc false
+  # Removes the entry `path` unless it was written or used since `since`
+  # (`sweep/4`): a trace's prune.
+  @spec sweep_entry(t(), Path.t(), integer()) :: {:ok, non_neg_integer()} | term()
+  def sweep_entry(%__MODULE__{} = store, path, since), do: sweep(store, path, since)
+
   # Removes `path` unless it was written or touched since `since`:
   # renamed aside first, so a reader finds it whole or not at all, and
   # put back when a touch came between the look and the rename —
@@ -1088,6 +1096,16 @@ defmodule Roux.Blob do
   @spec refresh_interval(t() | nil) :: non_neg_integer()
   def refresh_interval(%__MODULE__{refresh: interval}), do: interval
   def refresh_interval(nil), do: @refresh
+
+  @doc """
+  The store's window, in seconds: twice its refresh interval. An entry
+  used within the interval was marked within the window (a hit marks
+  only an entry older than the interval), so nothing written or used
+  within the window is taken for unused: not by a collection (`gc/2`),
+  not by a trace's prune (`Roux.Blob.Trace.put/5`).
+  """
+  @spec window(t()) :: non_neg_integer()
+  def window(%__MODULE__{refresh: interval}), do: 2 * interval
 
   @doc false
   # One change of the entry's times: it finds the entry or fails, and

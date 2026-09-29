@@ -150,11 +150,16 @@ end
 
 defmodule Roux.Concurrency.BlobTracePruneTest do
   @moduledoc """
-  A put under a trace name, keeping one trace, prunes the old trace
-  while another process looks the name up: the lookup is a hit on the
-  old value or a miss, never a crash, and the new trace is kept.
+  A put under a trace name, keeping one trace, prunes an old trace —
+  unused for longer than the store's window — while another process
+  looks the name up and finds it: the lookup is a hit on the old value
+  or a miss, never a crash. The new trace is kept, and the old one
+  whenever the lookup marked it used, a hit. (A miss may leave it kept
+  too: the model's touch reports a name moved as it changed the inode
+  as gone, where the system call would have succeeded.)
   """
 
+  alias Roux.Blob.IO, as: RawIO
   alias Roux.Blob.Trace
   alias Roux.Test.{BlobFixture, ModelFS}
 
@@ -165,6 +170,8 @@ defmodule Roux.Concurrency.BlobTracePruneTest do
   def test do
     {fs, store} = BlobFixture.store()
     :ok = Trace.put(store, :t, [{:v, 1}], :old)
+    [%{path: old}] = Trace.fetch(store, :t)
+    :ok = RawIO.utime(old, System.os_time(:second) - 3 * 60 * 60)
     parent = self()
 
     spawn(fn ->
@@ -179,8 +186,13 @@ defmodule Roux.Concurrency.BlobTracePruneTest do
 
     :ok = receive(do: ({:put, result} -> result))
     found = receive(do: ({:found, result} -> result))
-    true = found in [:miss, {:ok, :old}]
-    [%{value: :new}] = Trace.fetch(store, :t)
+    kept = store |> Trace.fetch(:t) |> Enum.map(& &1.value) |> Enum.sort()
+
+    case found do
+      {:ok, :old} -> [:new, :old] = kept
+      :miss -> true = kept in [[:new], [:new, :old]]
+    end
+
     :ok
   end
 end
