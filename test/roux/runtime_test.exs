@@ -538,6 +538,61 @@ defmodule Roux.RuntimeTest do
 
   # -- Untracked --
 
+  describe "dependency edges" do
+    test "a query demanding the same input or query three times records each once",
+         %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", 1)
+      Input.set(db, :source, "b", 2)
+      leaf = fn db, key -> Runtime.input(db, :source, key) end
+
+      fun = fn db, _key ->
+        for _ <- 1..3 do
+          Runtime.input(db, :source, "a")
+          Runtime.execute(db, :edge_leaf, "b", leaf)
+        end
+
+        Runtime.input(db, :source, "b")
+        :done
+      end
+
+      assert Runtime.execute(db, :reads_thrice, :k, fun) == :done
+
+      # In the order each was first demanded.
+      assert {:ok, [{:input, :source, "a"}, {:edge_leaf, "b"}, {:input, :source, "b"}]} =
+               Memo.dependencies(db, {:reads_thrice, :k})
+
+      # One edge is enough: a change to what was read three times still
+      # re-executes the query.
+      Input.set(db, :source, "a", 10)
+      counter = :counters.new(1, [])
+
+      again = fn db, key ->
+        :counters.add(counter, 1, 1)
+        fun.(db, key)
+      end
+
+      assert Runtime.execute(db, :reads_thrice, :k, again) == :done
+      assert :counters.get(counter, 1) == 1
+    end
+
+    test "a read inside untracked/1 and again outside it is recorded once", %{db: db} do
+      register_input(db, :source, durability: :low)
+      Input.set(db, :source, "a", 1)
+
+      fun = fn db, _key ->
+        Runtime.untracked(fn -> Runtime.input(db, :source, "a") end)
+        Runtime.input(db, :source, "a")
+        Runtime.input(db, :source, "a")
+      end
+
+      assert Runtime.execute(db, :untracked_then_read, :k, fun) == 1
+
+      assert {:ok, [{:input, :source, "a"}]} =
+               Memo.dependencies(db, {:untracked_then_read, :k})
+    end
+  end
+
   describe "untracked/1" do
     test "discards deps recorded inside the block, keeps deps outside it", %{db: db} do
       register_input(db, :source, durability: :low)

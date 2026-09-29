@@ -18,7 +18,11 @@ defmodule Roux.Runtime.Context do
   - `query_stack` — stack of active queries from outermost to innermost.
     Used for cycle detection.
   - `recorded_deps` — dependencies accumulated during the current query's
-    execution. Flushed to the memo entry on completion.
+    execution, each once, the most recent first (the entry keeps them in
+    the order they were first demanded). Flushed to the memo entry on
+    completion.
+  - `seen_deps` — the dependencies in `recorded_deps`, as a map's keys:
+    a query demanding the same thing again records nothing.
   - `created_entities` — entities created during the current query's
     execution. Flushed to the memo entry on completion.
   - `min_durability` — the minimum durability level seen across all inputs
@@ -35,6 +39,7 @@ defmodule Roux.Runtime.Context do
           active_query: Roux.Memo.query_key() | nil,
           query_stack: [Roux.Memo.query_key()],
           recorded_deps: [Roux.Memo.dependency()],
+          seen_deps: %{optional(Roux.Memo.dependency()) => true},
           created_entities: [{module(), Roux.Entity.entity_id()}],
           min_durability: Roux.Revision.durability(),
           code_version: binary() | nil,
@@ -47,6 +52,7 @@ defmodule Roux.Runtime.Context do
     active_query: nil,
     query_stack: [],
     recorded_deps: [],
+    seen_deps: %{},
     created_entities: [],
     min_durability: :high,
     code_version: nil,

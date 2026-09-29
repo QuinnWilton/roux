@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed (performance)
+
+- **A query records each dependency once**, in the order it first
+  demanded it, however often it demands it (`Roux.Runtime.Context`'s
+  `seen_deps`). An entry could hold the same read two or three times,
+  and validation walked each copy. Real manifests held 1–2% repeats
+  (realtime's scry manifest: 26,489 edges, 316 repeats, 0.1% of its
+  26 MB; argus on aeromancy: 3,719 edges, 79 repeats, 0.4% smaller); a
+  repeated edge cost about 0.45 µs of each walk.
+
 ## 0.2.2 — 2026-09-29
 
 Five races in the blob store a Concuerror model found, each a spurious

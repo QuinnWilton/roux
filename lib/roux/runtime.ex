@@ -270,17 +270,25 @@ defmodule Roux.Runtime do
       nil ->
         fun.()
 
-      %Context{recorded_deps: deps, min_durability: durability} ->
+      %Context{recorded_deps: deps, seen_deps: seen, min_durability: durability} ->
         try do
           fun.()
         after
           # Re-read: nested execution replaces the context struct, and the
           # parent's is restored by the time we get here. Rolling back these
-          # two fields discards everything recorded inside the block while
+          # fields discards everything recorded inside the block while
           # leaving query_stack (cycle detection) alone.
           case get_context() do
-            nil -> :ok
-            ctx -> put_context(%{ctx | recorded_deps: deps, min_durability: durability})
+            nil ->
+              :ok
+
+            ctx ->
+              put_context(%{
+                ctx
+                | recorded_deps: deps,
+                  seen_deps: seen,
+                  min_durability: durability
+              })
           end
         end
     end
@@ -511,11 +519,20 @@ defmodule Roux.Runtime do
   Records that the current query depends on another query.
 
   Pure function that returns an updated context. Called internally
-  by `query/3` and `input/3` via the process-dictionary helper.
+  by `query/3` and `input/3` via the process-dictionary helper. A
+  dependency already recorded is not recorded again: an entry keeps each
+  of its dependencies once, in the order they were first demanded, and
+  validation walks each once.
   """
   @spec record_dependency(Context.t(), Memo.dependency()) :: Context.t()
-  def record_dependency(%Context{} = ctx, query_key) do
-    %{ctx | recorded_deps: [query_key | ctx.recorded_deps]}
+  def record_dependency(%Context{recorded_deps: deps, seen_deps: seen} = ctx, dependency) do
+    case seen do
+      %{^dependency => true} ->
+        ctx
+
+      %{} ->
+        %{ctx | recorded_deps: [dependency | deps], seen_deps: Map.put(seen, dependency, true)}
+    end
   end
 
   # -- Private: ensure_up_to_date callback for Validation (D13) --
@@ -637,6 +654,7 @@ defmodule Roux.Runtime do
       active_query: query_key,
       query_stack: parent_stack ++ [query_key],
       recorded_deps: [],
+      seen_deps: %{},
       created_entities: [],
       min_durability: :high,
       code_version: definition && Map.get(definition, :code_version)
