@@ -31,7 +31,11 @@ defmodule Roux.Code do
 
   A closure and its digest are computed once per VM for each set of
   roots and options: a VM that loads new code mid-run keeps the digest
-  of the code it started with (`forget/0` drops them).
+  of the code it started with (`forget/0` drops them). A digest the memo
+  serves for a call with a store is kept in that store too, once per
+  store in the VM (see "Kept across VMs"): a VM that opens a second store
+  — a peer's, another project's — leaves it the trace a fresh VM there
+  finds.
 
   ## Kept across VMs
 
@@ -321,39 +325,93 @@ defmodule Roux.Code do
     {exclude, follow?} = exclusion(opts)
     key = {:digest, Enum.sort(roots), exclude, follow?}
 
-    memo(key, fn ->
-      case store do
-        nil -> compute_digest(roots, exclude, follow?)
-        %Blob{} = store -> kept_digest(store, key, roots, exclude, follow?)
-      end
-    end)
+    case {memo(key, fn -> computed_digest(store, key, roots, exclude, follow?) end), store} do
+      {{result, _observed}, nil} ->
+        result
+
+      {{result, observed}, %Blob{} = store} ->
+        keep_in(store, key, result, observed, fn ->
+          computed_digest(store, key, roots, exclude, follow?)
+        end)
+    end
   end
 
-  defp compute_digest(roots, exclude, follow?) do
-    with {:ok, seen} <- walk(roots, %{}, exclude, follow?) do
-      {:ok, digest_of(seen)}
+  # The digest, and what computing it observed when a trace can be kept
+  # over it (nil otherwise): the walk's, or the trace's it was found by.
+  defp computed_digest(nil, _key, roots, exclude, follow?) do
+    case walk(roots, %{}, exclude, follow?) do
+      {:ok, seen} -> {{:ok, digest_of(seen)}, nil}
+      {:error, _} = error -> {error, nil}
     end
   end
 
   # A digest kept as a verifying trace over what computing it read (see
   # "Kept across VMs").
-  defp kept_digest(store, key, roots, exclude, follow?) do
-    name = {__MODULE__, @trace_format, key, runtime_version()}
+  defp computed_digest(%Blob{} = store, key, roots, exclude, follow?) do
+    name = trace_name(key)
 
-    case Blob.Trace.find(store, name, &observe/1) do
-      {:ok, digest} ->
-        {:ok, digest}
+    result =
+      case Blob.Trace.find_trace(store, name, &observe/1) do
+        {:ok, trace} ->
+          {{:ok, trace.value}, trace.deps}
 
-      :miss ->
-        with {:ok, seen} <- walk(roots, %{}, exclude, follow?) do
-          digest = digest_of(seen)
-          deps = seen |> Enum.flat_map(&trace_deps/1) |> Enum.uniq()
-          deps = [resolution_dep(seen) | deps]
-          if Enum.all?(deps, &trustworthy?/1), do: _ = Blob.Trace.put(store, name, deps, digest)
-          {:ok, digest}
-        end
+        :miss ->
+          case walk(roots, %{}, exclude, follow?) do
+            {:ok, seen} ->
+              digest = digest_of(seen)
+              deps = seen |> Enum.flat_map(&trace_deps/1) |> Enum.uniq()
+              deps = [resolution_dep(seen) | deps]
+
+              if Enum.all?(deps, &trustworthy?/1) do
+                _ = Blob.Trace.put(store, name, deps, digest)
+                {{:ok, digest}, deps}
+              else
+                {{:ok, digest}, nil}
+              end
+
+            {:error, _} = error ->
+              {error, nil}
+          end
+      end
+
+    kept(store, key)
+    result
+  end
+
+  # A digest this VM memoized, served for a call with a store: the store
+  # is made to hold its trace — once per store and root set in a VM —
+  # so a VM that opens a second store (a peer's, another project's)
+  # does not leave it to compute every code version again. What the
+  # memoized digest observed then is put there as it was: where each
+  # module resolved and each file's stamp when it was computed, so the
+  # trace verifies only where those still hold (D32). A digest computed
+  # with no store observed nothing: it is computed again for this one,
+  # which keeps a trace of what it finds, and the VM keeps the digest it
+  # memoized.
+  defp keep_in(store, key, result, observed, compute) do
+    cond do
+      kept?(store, key) ->
+        result
+
+      observed == nil ->
+        _ = compute.()
+        result
+
+      true ->
+        {:ok, digest} = result
+        _ = Blob.Trace.put(store, trace_name(key), observed, digest)
+        kept(store, key)
+        result
     end
   end
+
+  defp trace_name(key), do: {__MODULE__, @trace_format, key, runtime_version()}
+
+  defp kept?(%Blob{root: root}, key),
+    do: :persistent_term.get({__MODULE__, {:kept, root, key}}, false)
+
+  defp kept(%Blob{root: root}, key),
+    do: :persistent_term.put({__MODULE__, {:kept, root, key}}, true)
 
   # Where every module the walk met resolves, as `:code.which/1` says —
   # what `where/1` classified and read it by — observed as one digest:

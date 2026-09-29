@@ -359,6 +359,45 @@ defmodule Roux.CodeTest do
       assert {:ok, ^walked} = RouxCode.digest([a], store: store)
     end
 
+    # A peer, or another project with a store of its own, opened after
+    # the VM computed the digest: the memo serves it, and the second store
+    # keeps it too, so a fresh VM reading that store alone finds it.
+    test "a digest memoized with one store is kept in a second store it is served for",
+         %{tmp_dir: tmp} do
+      %{a: a, paths: paths} = chain!(tmp)
+      past = System.os_time(:second) - 60
+      for {_mod, path} <- paths, do: File.touch!(path, past)
+      first = Roux.Blob.open!(Path.join(tmp, "first"))
+      second = Roux.Blob.open!(Path.join(tmp, "second"))
+
+      {:ok, digest} = RouxCode.digest([a], store: first)
+
+      assert {{:ok, ^digest}, 0} =
+               object_code_reads(fn -> RouxCode.digest([a], store: second) end)
+
+      assert [_trace] = Path.wildcard(Path.join([second.root, "traces", "*", "*"]))
+
+      :ok = RouxCode.forget()
+
+      assert {{:ok, ^digest}, 0} =
+               object_code_reads(fn -> RouxCode.digest([a], store: second) end)
+    end
+
+    test "a digest memoized with no store is kept in the store a later call gives",
+         %{tmp_dir: tmp} do
+      %{a: a, paths: paths} = chain!(tmp)
+      past = System.os_time(:second) - 60
+      for {_mod, path} <- paths, do: File.touch!(path, past)
+      store = Roux.Blob.open!(Path.join(tmp, "store"))
+
+      {:ok, digest} = RouxCode.digest([a])
+      assert {:ok, ^digest} = RouxCode.digest([a], store: store)
+      :ok = RouxCode.forget()
+
+      assert {{:ok, ^digest}, 0} =
+               object_code_reads(fn -> RouxCode.digest([a], store: store) end)
+    end
+
     test "keeps no trace over a file written moments ago", %{tmp_dir: tmp} do
       %{a: a} = chain!(tmp)
       store = Roux.Blob.open!(Path.join(tmp, "store"))

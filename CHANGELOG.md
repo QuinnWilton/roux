@@ -11,6 +11,21 @@
   (realtime's scry manifest: 26,489 edges, 316 repeats, 0.1% of its
   26 MB; argus on aeromancy: 3,719 edges, 79 repeats, 0.4% smaller); a
   repeated edge cost about 0.45 µs of each walk.
+- **A code digest the VM memoized is kept in every store it is served
+  for.** `Roux.Code.digest/2` memoized per VM without regard to the
+  store, so a VM that opened a second store (a peer's, another
+  project's) left it empty, and a fresh VM there walked every closure
+  again. The memo now keeps what the digest observed, and the first call
+  with each store puts that trace there — once per store in a VM — so it
+  verifies only where those observations still hold (D32). On an
+  822-module closure a fresh VM reading the second store took 320–620 ms
+  to walk it, and takes 31 ms to verify the trace; the first VM spends
+  2 ms putting it.
+
+### Added
+
+- `Roux.Blob.Trace.find_trace/4`: the trace `find/4` returns the value
+  of, observations and all.
 
 ### Fixed
 

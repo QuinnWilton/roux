@@ -285,15 +285,28 @@ defmodule Roux.Blob.Trace do
       used traces of `name` (`fetch/3`).
   """
   @spec find(Blob.t() | [t()], term(), (term() -> term()), keyword()) :: {:ok, term()} | :miss
-  def find(source, name, observe, opts \\ [])
+  def find(source, name, observe, opts \\ []) do
+    case find_trace(source, name, observe, opts) do
+      {:ok, trace} -> {:ok, trace.value}
+      :miss -> :miss
+    end
+  end
 
-  def find(%Blob{} = store, name, observe, opts) when is_function(observe, 1),
+  @doc """
+  The trace whose value `find/4` returns, observations and all: for a
+  caller that keeps what a trace observed, to put it elsewhere.
+  """
+  @spec find_trace(Blob.t() | [t()], term(), (term() -> term()), keyword()) ::
+          {:ok, t()} | :miss
+  def find_trace(source, name, observe, opts \\ [])
+
+  def find_trace(%Blob{} = store, name, observe, opts) when is_function(observe, 1),
     do: find_in(store, name, observe, opts, @attempts)
 
-  def find(traces, name, observe, _opts) when is_list(traces) and is_function(observe, 1) do
+  def find_trace(traces, name, observe, _opts) when is_list(traces) and is_function(observe, 1) do
     with {:found, trace} <- holding(traces, name, observe),
          :ok <- mark_used(trace) do
-      {:ok, trace.value}
+      {:ok, trace}
     else
       _miss_or_gone -> :miss
     end
@@ -302,7 +315,7 @@ defmodule Roux.Blob.Trace do
   defp find_in(store, name, observe, opts, attempts) do
     with {:found, trace} <- holding(fetch(store, name, opts), name, observe),
          :ok <- mark_used(trace) do
-      {:ok, trace.value}
+      {:ok, trace}
     else
       :gone when attempts > 1 -> find_in(store, name, observe, opts, attempts - 1)
       _miss_or_gone -> :miss
