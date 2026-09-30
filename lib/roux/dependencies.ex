@@ -1,6 +1,6 @@
 defmodule Roux.Dependencies do
   @moduledoc """
-  Optional reverse edges for skipping validation of unaffected queries.
+  Reverse edges for skipping validation of unaffected queries.
 
   Inputs mark transitive readers as potentially stale; ordinary ordered
   validation still decides whether they need to execute. Clean certificates
@@ -97,13 +97,44 @@ defmodule Roux.Dependencies do
   def mutate(%Database{dependencies: nil}, _key, run), do: run.()
 
   def mutate(%Database{dependencies: index} = db, key, run) do
+    mutate_with(
+      db,
+      fn epoch ->
+        if key == :all, do: :atomics.add(index.clock, 2, 1), else: mark(db, [key], epoch, %{})
+      end,
+      run
+    )
+  end
+
+  @doc false
+  @spec change_code(Database.t(), atom(), (-> result)) :: result when result: term()
+  def change_code(%Database{dependencies: nil}, _name, run), do: run.()
+
+  def change_code(db, name, run) do
+    mutate_with(
+      db,
+      fn epoch ->
+        keys =
+          Memo.reduce_dependencies(db, [], fn
+            {^name, _argument} = key, _deps, keys -> [key | keys]
+            _key, _deps, keys -> keys
+          end)
+
+        # A cached aggregate can observe code without executing that query.
+        mark(db, [{:query_code, name} | keys], epoch, %{})
+      end,
+      run
+    )
+  end
+
+  defp mutate_with(%Database{dependencies: index}, invalidate, run) do
     if available?(index) do
       writer = {make_ref(), self()}
       :ets.insert(index.writers, writer)
 
       try do
         epoch = :atomics.add_get(index.clock, 1, 1)
-        if key == :all, do: :atomics.add(index.clock, 2, 1), else: mark(db, [key], epoch, %{})
+        invalidate.(epoch)
         run.()
       after
         :ets.delete_object(index.writers, writer)
@@ -277,6 +308,7 @@ defmodule Roux.Dependencies do
   end
 
   defp keys({:input_absent, name, key}), do: [{:input, name, key}]
+  defp keys({:query_code, name, _version}), do: [{:query_code, name}]
   defp keys({:parallel, _max, members}), do: Enum.flat_map(members, &keys/1)
   defp keys(key), do: [key]
 end

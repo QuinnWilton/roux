@@ -32,7 +32,7 @@ Roux.GC              — garbage collection of stale entries
 Roux.Lang            — language behaviour
 Roux.Lang.Compiler   — Mix compiler integration (waits for :elixir when languages are not ready)
 Roux.Lang.LSP        — generic LSP adapter (gen_lsp, optional)
-Roux.Lang.Manifest   — manifest read/write (format 5)
+Roux.Lang.Manifest   — manifest read/write (writes format 6; reads 5 and 6)
 Roux.Code            — code closures and digests; per-query code versions
 Roux.Code.Verify     — call tracing for closure tests
 Roux.Blob            — content-addressed store: CAS, action cache, scratch, GC

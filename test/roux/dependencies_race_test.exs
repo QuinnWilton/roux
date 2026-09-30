@@ -19,7 +19,7 @@ defmodule Roux.DependenciesRaceTest do
   alias Roux.Test.PersistQueries
 
   setup do
-    db = Database.new(reverse_dependencies: true)
+    db = Database.new()
     Input.register(db, Input.define(:source))
 
     on_exit(fn ->
@@ -124,6 +124,7 @@ defmodule Roux.DependenciesRaceTest do
     assert Runtime.execute(db, :versioned_parent, :a, parent) == 1
     Database.register_query(db, :versioned_leaf, %{code_version: "registered"})
     leaf = fn _, _ -> 2 end
+    Process.put({Runtime, :query_fun, :versioned_leaf}, leaf)
     parent = fn db, key -> Runtime.execute(db, :versioned_leaf, key, leaf) end
     assert Runtime.execute(db, :versioned_parent, :a, parent) == 2
   end
@@ -149,8 +150,7 @@ defmodule Roux.DependenciesRaceTest do
     opts = [
       modules: [PersistQueries],
       blob: Path.join(dir, "blobs"),
-      manifest: Path.join(dir, "manifest"),
-      reverse_dependencies: true
+      manifest: Path.join(dir, "manifest")
     ]
 
     first = Session.open(opts)
@@ -309,11 +309,14 @@ defmodule Roux.DependenciesRaceTest do
     send(child.pid, :read_after_write)
     assert Task.await(child) == 2
     assert Dependencies.status(db, {:repair_leaf, :a}) == :stale
+    Database.register_query(db, :repair_leaf, %{code_version: "new code"})
+    assert Dependencies.status(db, {:repair_leaf, :a}) == :stale
     # The interrupted computation began at revision 1. Its replacement must
-    # record revision 2 even though executing again returns the same value.
+    # record the current revision even though executing again returns the same
+    # value. Registering new code cannot turn that mixed result into a proof.
     assert Memo.changed_at(db, {:repair_leaf, :a}) == {:ok, 1}
     assert Runtime.execute(db, :repair_parent, :a, parent) == 2
-    assert Memo.changed_at(db, {:repair_leaf, :a}) == {:ok, 2}
+    assert Memo.changed_at(db, {:repair_leaf, :a}) == {:ok, Revision.current(db.revision)}
   end
 
   test "edits collect edges left by a killed publisher", %{db: db} do
@@ -361,13 +364,38 @@ defmodule Roux.DependenciesRaceTest do
     for _ <- 1..50, do: Roux.Test.ReverseDependencyRace.test()
   end
 
+  test "a code observation changed during computation cannot be certified", %{db: db} do
+    Database.register_query(db, :skipped, %{code_version: "one"})
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        Runtime.execute(db, :observer, :all, fn db, _ ->
+          version = Runtime.query_code(db, :skipped)
+          send(parent, :code_observed)
+
+          receive do
+            :finish -> version
+          end
+        end)
+      end)
+
+    assert_receive :code_observed
+    Database.register_query(db, :skipped, %{code_version: "two"})
+    send(task.pid, :finish)
+    assert Task.await(task) == "one"
+    assert Dependencies.status(db, {:observer, :all}) == :stale
+
+    assert Runtime.execute(db, :observer, :all, fn db, _ -> Runtime.query_code(db, :skipped) end) ==
+             "two"
+  end
+
   @tag :tmp_dir
   test "a manifest cannot turn an uncertified value into a restored proof", %{tmp_dir: dir} do
     opts = [
       modules: [PersistQueries],
       blob: Path.join(dir, "blobs"),
-      manifest: Path.join(dir, "manifest"),
-      reverse_dependencies: true
+      manifest: Path.join(dir, "manifest")
     ]
 
     first = Session.open(opts)
@@ -409,15 +437,13 @@ defmodule Roux.DependenciesRaceTest do
     assert {:written, _} = Session.commit(first, %{})
     Session.close(first)
 
-    for reverse? <- [true, false] do
-      second = Session.open(Keyword.put(opts, :reverse_dependencies, reverse?))
+    second = Session.open(opts)
 
-      try do
-        assert second.restored?
-        assert PersistQueries.p_top(second.db, :a) == {:top, {:read, {:ok, 2}}}
-      after
-        Session.close(second)
-      end
+    try do
+      assert second.restored?
+      assert PersistQueries.p_top(second.db, :a) == {:top, {:read, {:ok, 2}}}
+    after
+      Session.close(second)
     end
   end
 
@@ -452,7 +478,7 @@ defmodule Roux.DependenciesRaceTest do
     Manifest.write(db, %{}, manifest)
     {:ok, data} = Manifest.load(manifest)
     refute Enum.any?(data.memo_entries, &(elem(&1, 0) == {:held_parent, :a}))
-    second = Database.new(reverse_dependencies: true, blob: store)
+    second = Database.new(blob: store)
 
     try do
       Database.register_query(second, :held_child, %{})

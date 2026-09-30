@@ -309,7 +309,7 @@ defmodule Roux.Lang.ManifestTest do
     end
   end
 
-  # -- format 5 --
+  # -- persisted metadata --
 
   # A database with every kind of state a manifest carries: inputs,
   # derived entries with structured values, an intern table, entity rows
@@ -358,7 +358,7 @@ defmodule Roux.Lang.ManifestTest do
     :ets.tab2list(tid)
   end
 
-  describe "format 5" do
+  describe "persisted metadata" do
     test "a restored database holds what the written one held", %{db: db, tmp_dir: tmp_dir} do
       path = Path.join(tmp_dir, "compile.roux")
       Manifest.write(populate(db), %{}, path)
@@ -956,6 +956,12 @@ defmodule Roux.Lang.ManifestTest do
     @header_size 16
 
     test "the manifest it writes loads", %{path: path} do
+      assert {:ok, %{vsn: 6}} = Manifest.load(path)
+    end
+
+    test "format 5 remains readable", %{path: path, bytes: bytes} do
+      <<"ROUXMNFT", 6::32, rest::binary>> = bytes
+      File.write!(path, ["ROUXMNFT", <<5::32>>, rest])
       assert {:ok, %{vsn: 5}} = Manifest.load(path)
     end
 
@@ -985,14 +991,14 @@ defmodule Roux.Lang.ManifestTest do
     end
 
     test "refuses another format, even with a good checksum", %{path: path, bytes: bytes} do
-      <<magic::binary-size(8), 5::32, rest::binary>> = bytes
+      <<magic::binary-size(8), 6::32, rest::binary>> = bytes
 
-      for format <- [3, 4, 6] do
+      for format <- [3, 4, 7] do
         File.write!(path, [magic, <<format::32>>, rest])
         assert Manifest.load(path) == :error
       end
 
-      File.write!(path, ["ROUXMNFX", <<5::32>>, rest])
+      File.write!(path, ["ROUXMNFX", <<6::32>>, rest])
       assert Manifest.load(path) == :error
     end
 
@@ -1013,7 +1019,7 @@ defmodule Roux.Lang.ManifestTest do
             %{good | revision: %{counter: -1, high: 0, medium: 0, low: 0}}
           ] do
         payload = :erlang.term_to_binary(payload)
-        File.write!(path, ["ROUXMNFT", <<5::32, :erlang.crc32(payload)::32>>, payload])
+        File.write!(path, ["ROUXMNFT", <<6::32, :erlang.crc32(payload)::32>>, payload])
         assert Manifest.load(path) == :error, "read #{inspect(payload, limit: 3)}"
       end
     end

@@ -192,6 +192,12 @@ defmodule Roux.Validation do
 
   defp check_deps(_db, [], _verified_at, _ensure_fn, durability), do: {:clean, durability}
 
+  defp check_deps(db, [{:query_code, name, version} | rest], verified_at, ensure_fn, durability) do
+    if Database.code_version(db, name) == version,
+      do: check_deps(db, rest, verified_at, ensure_fn, durability),
+      else: :stale
+  end
+
   # Entity field dependencies are checked by reading the field's changed_at
   # directly from the entity table. No ensure_fn call needed — entities are
   # updated in place by the query that creates them.

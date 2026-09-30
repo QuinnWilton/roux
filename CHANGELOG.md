@@ -4,10 +4,12 @@
 
 ### Added
 
-- Opt-in reverse dependency tracking skips validation of unaffected queries.
-  Enable `reverse_dependencies: true` when opening a database or session.
+- Reverse dependency tracking skips validation of unaffected queries in every
+  database and session.
   It adds index memory and input-update work; restored entries validate once,
   and databases with entity types retain ordinary validation.
+- `Roux.Runtime.query_code/2` tracks a query's code version without demanding
+  its value, so cached aggregates can track computations they bypass.
 - Packed trace groups batch small cache records into indexed blobs. Records
   remain independently verifiable and readable without a session manifest;
   garbage collection retains and removes whole packs.
@@ -22,12 +24,16 @@
 
 - Entity fields use exact equality when checking for changes, so numerically
   equal values with different representations cannot leave stale field values.
+- Queries preserve early cutoff across registered code changes: a query whose
+  new code returns the same value does not force its readers to execute.
 
 ### Changed
 
 - Concurrent requests share cold code-closure and digest computations. Code
   walks also cache the OTP root, avoiding repeated calls to the code server.
 - Query definition format is now 2. Recompile query modules against this release.
+- Manifests now use format 6 to record query-code dependencies. Existing
+  format-5 manifests remain readable; older Roux versions reject format 6.
 
 - Validation skips recursive checks for input leaves and shared queries already
   checked in the current revision. Input changes and deletions still invalidate

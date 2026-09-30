@@ -49,15 +49,15 @@ defmodule Roux.Revision do
   @doc """
   Creates a new revision tracker. Initial revision is 0 (no inputs set yet).
   """
-  @spec new(keyword()) :: t()
-  def new(opts \\ []) do
+  @spec new() :: t()
+  def new do
     counter = :atomics.new(1, signed: false)
     durability = :atomics.new(3, signed: false)
 
     %__MODULE__{
       counter: counter,
       durability: durability,
-      untracked: if(opts[:track_unknown], do: :atomics.new(1, signed: false))
+      untracked: :atomics.new(1, signed: false)
     }
   end
 

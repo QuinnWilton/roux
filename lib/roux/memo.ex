@@ -48,7 +48,8 @@ defmodule Roux.Memo do
   @typedoc """
   What an entry read: a query or input, an entity field, the absence
   of an input (`{:input_absent, input_name, key}`, recorded by
-  `Roux.Runtime.input/4` with a default), or a fan-out's queries
+  `Roux.Runtime.input/4` with a default), a query code version
+  (`Roux.Runtime.query_code/2`), or a fan-out's queries
   (`{:parallel, max_concurrency, keys}`, recorded by
   `Roux.Runtime.parallel/3`).
   """
@@ -56,6 +57,7 @@ defmodule Roux.Memo do
           query_key()
           | {:entity_field, module(), term(), atom()}
           | {:input_absent, atom(), term()}
+          | {:query_code, atom(), binary() | nil}
           | {:parallel, pos_integer(), [query_key()]}
 
   @typedoc """
@@ -259,6 +261,20 @@ defmodule Roux.Memo do
     case :ets.lookup_element(table, key, 10, :missing) do
       :missing -> :miss
       version -> {:ok, version}
+    end
+  end
+
+  @doc "Reads dependencies, code version, persistence and generation atomically, without the value."
+  @spec trace_state(Database.t(), query_key()) ::
+          {:ok, [dependency()], binary() | nil, Entry.persist(), reference() | nil} | :miss
+  def trace_state(%Database{memo_table: table}, key) do
+    case :ets.select(table, [
+           {{literal_pattern(key), :_, :_, :_, :_, :"$1", :_, :_, :_, :"$2", :"$3", :_, :"$4"},
+            [{:"=:=", {:element, 1, :"$_"}, {:const, key}}],
+            [{{:ok, :"$1", :"$2", :"$3", :"$4"}}]}
+         ]) do
+      [state] -> state
+      [] -> :miss
     end
   end
 

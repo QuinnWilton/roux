@@ -22,7 +22,7 @@ defmodule Roux.RuntimeTest do
     Input.register(db, Input.define(name, opts))
   end
 
-  test "shared dependencies validate once per revision and inputs still invalidate", %{db: db} do
+  test "unrelated edits skip shared dependencies and inputs still invalidate", %{db: db} do
     register_input(db, :source, durability: :medium)
     Input.set(db, :source, :used, 1)
     Input.set(db, :source, :unrelated, 0)
@@ -55,10 +55,6 @@ defmodule Roux.RuntimeTest do
 
     try do
       assert Runtime.execute(db, :root, :used, root) == 32
-
-      for name <- [:root, :left, :right, :shared] do
-        assert_received {^handler, ^name}
-      end
 
       refute_received {^handler, _}
     after

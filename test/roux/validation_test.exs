@@ -413,6 +413,8 @@ defmodule Roux.ValidationTest do
               dep_changed_ats <- list_of(integer(1..10), length: num_deps)
             ) do
         db = Database.new()
+        # Entity databases retain the ordinary durability-based validator.
+        Database.register_entity(db, Roux.Test.SampleEntity)
 
         current_rev = query_verified_at + gap
 

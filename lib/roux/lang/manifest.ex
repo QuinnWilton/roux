@@ -21,7 +21,7 @@ defmodule Roux.Lang.Manifest do
   - Revision counter and durability tracking state.
   - Source file metadata (mtime, content hash) for staleness detection.
 
-  ## Layout (format 5)
+  ## Layout (format 6)
 
   A manifest is a header and a payload:
 
@@ -77,18 +77,17 @@ defmodule Roux.Lang.Manifest do
 
   ## Versioning
 
-  The format number in the header changes whenever the layout does; a
-  manifest of any other format — including formats 1 to 3, which were a
-  bare `term_to_binary/2` of the data with the version inside, and 4,
-  whose entries had no code version or blobs — is refused, and the
-  caller rebuilds from scratch.
+  Format 6 adds code-version observations to dependency lists. Format 5
+  remains readable; older Roux releases reject format 6 before interpreting
+  its new dependencies. Formats 1 to 4 are refused and rebuilt from scratch.
   """
 
-  alias Roux.{Blob, Database, Entity, Intern, Memo, Revision}
+  alias Roux.{Blob, Database, Dependencies, Entity, Intern, Memo, Revision}
   alias Roux.Memo.Entry
 
   @magic "ROUXMNFT"
-  @format 5
+  @format 6
+  @readable_formats [5, @format]
 
   @typedoc "Metadata for a single source file."
   @type source_meta :: %{mtime: term(), hash: integer()}
@@ -224,10 +223,11 @@ defmodule Roux.Lang.Manifest do
   @spec load(String.t()) :: {:ok, manifest_data()} | :error
   def load(path) when is_binary(path) do
     with {:ok, binary} <- read_settled(path),
-         <<@magic, @format::32, crc::32, payload::binary>> <- binary,
+         <<@magic, format::32, crc::32, payload::binary>> when format in @readable_formats <-
+           binary,
          ^crc <- :erlang.crc32(payload),
          {:ok, data} <- decode_payload(payload) do
-      {:ok, Map.put(data, :vsn, @format)}
+      {:ok, Map.put(data, :vsn, format)}
     else
       _ -> :error
     end
@@ -276,7 +276,9 @@ defmodule Roux.Lang.Manifest do
     Revision.restore(db.revision, data.revision)
     {entries, code_moved?} = registered(db, data.memo_entries)
     :ok = Memo.restore_persisted(db, entries)
-    if code_moved?, do: Revision.advance(db.revision, :high)
+    # Restored entries already require an ordered dependency walk, including
+    # code-version checks. Keep their old values proven for early cutoff.
+    if code_moved?, do: Dependencies.advance(db, :high)
     restore_entity_data(db, data.entity_data)
     restore_intern_data(db, data.intern_data)
     :ok
@@ -291,6 +293,12 @@ defmodule Roux.Lang.Manifest do
       Enum.map_reduce(entries, %{}, fn entry, registry ->
         {own, registry} = own_verdict(db, entry, registry)
         {dangling?, registry} = reads_unregistered?(db, elem(entry, 4), registry)
+
+        own =
+          if own == :keep and code_observations_changed?(db, elem(entry, 4)),
+            do: :moved,
+            else: own
+
         {{entry, own, dangling?}, registry}
       end)
 
@@ -319,6 +327,14 @@ defmodule Roux.Lang.Manifest do
       {{:ok, _other}, registry} -> {:moved, registry}
       {:unregistered, registry} -> {:drop, registry}
     end
+  end
+
+  defp code_observations_changed?(db, dependencies) do
+    Enum.any?(dependencies, fn
+      {:query_code, name, version} -> Database.code_version(db, name) != version
+      {:parallel, _, members} -> code_observations_changed?(db, members)
+      _ -> false
+    end)
   end
 
   # Whether any dependency names a query that is not registered.
@@ -446,6 +462,7 @@ defmodule Roux.Lang.Manifest do
 
   # The entries a dependency names.
   defp read_keys({:entity_field, _module, _id, _field}), do: []
+  defp read_keys({:query_code, _name, _version}), do: []
   defp read_keys({:input_absent, _input, _key}), do: []
   defp read_keys({:parallel, _max, members}), do: members
   defp read_keys(key), do: [key]

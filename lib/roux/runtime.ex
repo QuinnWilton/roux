@@ -267,6 +267,20 @@ defmodule Roux.Runtime do
   end
 
   @doc """
+  Reads a query's registered code version and records a dependency on it.
+
+  Returns nil when the query has no code version. A change invalidates the
+  caller even when it never requested the query's value. This lets a cached
+  aggregate depend on the code of computations it bypasses.
+  """
+  @spec query_code(Database.t(), atom()) :: binary() | nil
+  def query_code(%Database{} = db, name) when is_atom(name) do
+    version = Database.code_version(db, name)
+    record_dep({:query_code, name, version})
+    version
+  end
+
+  @doc """
   Calls a derived query, short-circuiting on errors.
 
   Like `query/3`, but if the result matches `{:error, reason}`, throws

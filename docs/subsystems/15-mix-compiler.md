@@ -146,11 +146,11 @@ The durability system (see [02-revision.md](02-revision.md)) provides a natural 
 
 ### Manifest format
 
-`Roux.Lang.Manifest` writes format 5: an 8-byte magic (`ROUXMNFT`), the format number, a CRC-32 of the payload, and the payload — one uncompressed `term_to_binary/1` of the manifest data. Inside it, each memo entry's value is a binary of its own (its external term format, compressed at level 1) or, for a `store: :blob` query with a `Roux.Blob` store, the digest of the blob holding it; each entry carries its code version and the blob digests it holds; each intern table's forward rows are one binary.
+`Roux.Lang.Manifest` writes format 6: an 8-byte magic (`ROUXMNFT`), the format number, a CRC-32 of the payload, and the payload — one uncompressed `term_to_binary/1` of the manifest data. Inside it, each memo entry's value is a binary of its own (its external term format, compressed at level 1) or, for a `store: :blob` query with a `Roux.Blob` store, the digest of the blob holding it; each entry carries its code version and the blob digests it holds; each intern table's forward rows are one binary. Format 6 adds query-code dependencies. The reader also accepts format 5.
 
 The compiler runs on a `Roux.Session` (open, sync, compile, commit, close): `Roux.Sources.sync/5` is the mtime pre-filter and the content check, and `Roux.Session.commit/3` writes the manifest only when the run changed something it holds. A touch without an edit is a `:noop` run whose moved stamps are kept.
 
-- **Load** reads the file, checks the magic, format and CRC, decodes the payload and checks its shape. Anything else — a missing file, formats 1 to 3 (a bare `term_to_binary/2` of the data), a truncated or corrupted file — is `:error`, and the compiler rebuilds from scratch. Nothing is ever partly read.
+- **Load** reads the file, checks the magic, format and CRC, decodes the payload and checks its shape. A missing file, unsupported format (including formats 1 to 4), or truncated or corrupted file returns `:error`, and the compiler rebuilds from scratch. Nothing is ever partly read.
 - **Restore** inserts the memo entries with their values still encoded (`Roux.Memo.restore_persisted/2`) and leaves the intern rows pending (`Roux.Intern.restore/2`). A value is decoded by the first read that needs it; an intern table loads on its first miss. Validation reads only metadata, so a warm run that changed nothing decodes a handful of values and loads no intern table.
 - **Write** encodes only what the run replaced: a restored value that was never replaced, or that re-execution found unchanged, goes out in the encoding it came in with, and so does an intern table nothing was interned into. The encoding runs in a process of its own, so its garbage never triggers collections of the caller's heap, and the file is written to a temporary name and renamed over the old one.
 
@@ -238,6 +238,6 @@ The data model already carries everything needed for serialization (values, hash
 - Edit one file between compiles — only affected queries re-execute
 - Delete a file between compiles — removed input triggers downstream cleanup
 - Corrupt manifest (any changed byte, any truncation) — falls back to full rebuild gracefully
-- Manifest of another format (including the bare-term formats 1 to 3, and format 4) — discarded, full rebuild
+- Manifest of an unsupported format (anything except 5 or 6) — discarded, full rebuild
 - A write that fails leaves the previous manifest in place
 - Touch a file without changing content — mtime changes but content hash matches, no recomputation

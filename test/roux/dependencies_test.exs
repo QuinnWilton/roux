@@ -2,11 +2,12 @@ defmodule Roux.DependenciesTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  alias Roux.{Database, Dependencies, Input, Memo, Revision, Runtime, Session}
+  alias Roux.{Database, Dependencies, GC, Input, Memo, QueryLog, Revision, Runtime, Session}
+  alias Roux.Lang.Manifest
   alias Roux.Test.PersistQueries
 
   setup do
-    db = Database.new(reverse_dependencies: true)
+    db = Database.new()
     Input.register(db, Input.define(:source))
 
     on_exit(fn ->
@@ -98,9 +99,86 @@ defmodule Roux.DependenciesTest do
     Database.register_query(db, :read, %{code_version: "one"})
     assert top(db, :a) == 2
     Database.register_query(db, :read, %{code_version: "two"})
-    assert Dependencies.status(db, {:top, :a}) == :stale
+    assert Dependencies.status(db, {:top, :a}) == :check
     assert top(db, :a) == 2
     assert Memo.code_version(db, {:read, :a}) == {:ok, "two"}
+  end
+
+  test "known code changes keep equal-value cutoff and unrelated queries clean", %{db: db} do
+    Input.set(db, :source, :a, 1)
+    Database.register_query(db, :read, %{code_version: "one"})
+    assert top(db, :a) == 2
+    assert Runtime.execute(db, :unrelated, :all, fn _, _ -> :unaffected end) == :unaffected
+    {:ok, changed_at} = Memo.changed_at(db, {:read, :a})
+    log = QueryLog.start(db)
+
+    try do
+      Database.register_query(db, :read, %{code_version: "two"})
+      assert Dependencies.status(db, {:read, :a}) == :check
+      assert Dependencies.status(db, {:top, :a}) == :check
+      assert Dependencies.status(db, {:unrelated, :all}) == :clean
+      assert top(db, :a) == 2
+
+      assert Runtime.execute(db, :unrelated, :all, fn _, _ -> flunk("unrelated query ran") end) ==
+               :unaffected
+
+      assert QueryLog.executions(log, :read) == [:a]
+      assert QueryLog.cutoffs(log, :read) == [:a]
+      assert QueryLog.executions(log, :top) == []
+      assert QueryLog.executions(log, :unrelated) == []
+      assert Memo.changed_at(db, {:read, :a}) == {:ok, changed_at}
+    after
+      QueryLog.stop(log)
+    end
+  end
+
+  test "code observations invalidate without a memo for the observed query", %{db: db} do
+    Database.register_query(db, :skipped, %{code_version: "one"})
+    observe = fn db, _ -> Runtime.query_code(db, :skipped) end
+    assert Runtime.execute(db, :observer, :all, observe) == "one"
+    assert Memo.get(db, {:skipped, :all}) == :miss
+    assert Memo.dependencies(db, {:observer, :all}) == {:ok, [{:query_code, :skipped, "one"}]}
+    assert GC.sweep(db).memo_entries_removed == 0
+    Database.register_query(db, :skipped, %{code_version: "two"})
+    assert Dependencies.status(db, {:observer, :all}) == :check
+    assert Runtime.execute(db, :observer, :all, observe) == "two"
+    assert GC.sweep(db).memo_entries_removed == 0
+  end
+
+  test "a code observation of an unregistered query notices its first version", %{db: db} do
+    observe = fn db, _ -> Runtime.query_code(db, :future_query) end
+    assert Runtime.execute(db, :observer, :all, observe) == nil
+    Database.register_query(db, :future_query, %{code_version: "first"})
+    assert Runtime.execute(db, :observer, :all, observe) == "first"
+  end
+
+  @tag :tmp_dir
+  test "restored code observations notice changed or missing registrations", %{
+    db: db,
+    tmp_dir: dir
+  } do
+    Database.register_query(db, :observer, %{})
+    Database.register_query(db, :skipped, %{code_version: "one"})
+    observe = fn db, _ -> Runtime.query_code(db, :skipped) end
+    assert Runtime.execute(db, :observer, :all, observe) == "one"
+    path = Path.join(dir, "codes.manifest")
+    Manifest.write(db, %{}, path)
+    {:ok, manifest} = Manifest.load(path)
+
+    for version <- ["one", "two", nil], entities? <- [false, true] do
+      restored = Database.new()
+
+      try do
+        Database.register_query(restored, :observer, %{})
+        if version, do: Database.register_query(restored, :skipped, %{code_version: version})
+        if entities?, do: Database.register_entity(restored, Roux.Test.SampleEntity)
+        Manifest.restore(restored, manifest)
+        assert Runtime.execute(restored, :observer, :all, observe) == version
+        assert Memo.get(restored, {:skipped, :all}) == :miss
+      after
+        Database.shutdown(restored)
+      end
+    end
   end
 
   test "a dead mutation owner leaves conservative recoverable state", %{db: db} do
@@ -211,8 +289,7 @@ defmodule Roux.DependenciesTest do
     opts = [
       modules: [PersistQueries],
       blob: Path.join(dir, "store"),
-      manifest: Path.join(dir, "manifest"),
-      reverse_dependencies: true
+      manifest: Path.join(dir, "manifest")
     ]
 
     first = Session.open(opts)
@@ -242,7 +319,7 @@ defmodule Roux.DependenciesTest do
               ),
             max_runs: 75
           ) do
-      db = Database.new(reverse_dependencies: true)
+      db = Database.new()
       Input.register(db, Input.define(:source))
 
       try do

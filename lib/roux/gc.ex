@@ -213,6 +213,9 @@ defmodule Roux.GC do
   # An edge to an input's absence points at nothing by design.
   defp orphaned_dep?(_db, {:input_absent, _input_name, _key}), do: false
 
+  # A code observation needs only the registry, not an executed query's memo.
+  defp orphaned_dep?(_db, {:query_code, _name, _version}), do: false
+
   # A fan-out is orphaned when any of its members is.
   defp orphaned_dep?(db, {:parallel, _max, members}),
     do: Enum.any?(members, &orphaned_dep?(db, &1))

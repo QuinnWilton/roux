@@ -10,18 +10,18 @@ defmodule Roux.Database.Supervisor do
   use Supervisor
 
   @doc false
-  @spec start_link(keyword()) :: Supervisor.on_start()
-  def start_link(opts \\ []) do
-    Supervisor.start_link(__MODULE__, opts)
+  @spec start_link() :: Supervisor.on_start()
+  def start_link do
+    Supervisor.start_link(__MODULE__, [])
   end
 
   @impl true
-  def init(opts) do
+  def init(_opts) do
     sup_pid = self()
 
     children = [
       {Roux.Database.Heir, sup_pid: sup_pid},
-      {Roux.Database.TableOwner, [sup_pid: sup_pid] ++ opts}
+      {Roux.Database.TableOwner, sup_pid: sup_pid}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)

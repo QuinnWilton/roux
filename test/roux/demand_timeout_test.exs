@@ -227,8 +227,8 @@ defmodule Roux.DemandTimeoutTest do
     missing = Blob.digest("missing value")
 
     Memo.restore_persisted(db, [
-      {key, :erlang.phash2(:success), revision, revision, [], :medium, [], {:blob, missing}, nil,
-       []}
+      {key, :erlang.phash2(:success), revision, revision, [{:input, :work, :file}], :medium, [],
+       {:blob, missing}, nil, []}
     ])
 
     assert catch_exit(Queries.bounded_blob(db, :file)) == {:timeout, key}

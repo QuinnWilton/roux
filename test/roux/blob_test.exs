@@ -410,8 +410,6 @@ defmodule Roux.BlobTest do
       path
     end
 
-    defp age!(path, seconds), do: File.touch!(path, System.os_time(:second) - seconds)
-
     test "leaves an entry used within the refresh interval alone, and marks an older one",
          %{store: store} do
       {:ok, digest} = Blob.put(store, "bytes")

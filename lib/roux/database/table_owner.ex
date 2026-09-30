@@ -70,7 +70,7 @@ defmodule Roux.Database.TableOwner do
           reclaimed
 
         {:ok, _empty} ->
-          create_tables(heir_pid, opts)
+          create_tables(heir_pid)
       end
 
     {:ok, %{tables: tables, heir: heir_pid}}
@@ -95,19 +95,8 @@ defmodule Roux.Database.TableOwner do
 
   # -- Private --
 
-  defp create_tables(heir_pid, owner_opts) do
-    specs =
-      if Keyword.get(owner_opts, :reverse_dependencies, false),
-        do: @table_specs,
-        else:
-          Map.drop(@table_specs, [
-            :dependency_edges,
-            :dependency_nodes,
-            :dependency_dirty,
-            :dependency_writers
-          ])
-
-    Map.new(specs, fn {tag, opts} ->
+  defp create_tables(heir_pid) do
+    Map.new(@table_specs, fn {tag, opts} ->
       # ETS heir option is a 3-tuple: {:heir, pid, heir_data}.
       tid = :ets.new(tag, [{:heir, heir_pid, tag} | opts])
       {tag, tid}

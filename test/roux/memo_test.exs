@@ -85,6 +85,21 @@ defmodule Roux.MemoTest do
     end
   end
 
+  describe "trace_state/2" do
+    test "reads metadata without loading a vanished value blob", %{db: db} do
+      key = {:trace, %{wildcard: :_, variable: :"$1"}}
+      deps = [{:input, :source, :fixture}]
+      entry = make_entry(%{dependencies: deps, code_version: "code", persist: :blob})
+      Memo.put(db, key, entry)
+      generation = Memo.generation(db, key)
+      :ets.update_element(db.memo_table, key, [{2, nil}, {9, {:blob, "missing"}}])
+
+      assert {:ok, ^deps, "code", :blob, ^generation} = Memo.trace_state(db, key)
+      assert :miss = Memo.trace_state(db, {:trace, %{wildcard: :different, variable: :"$1"}})
+      assert :miss = Memo.trace_state(db, {:trace, :missing})
+    end
+  end
+
   describe "update_verified/3" do
     test "changes only verified_at, all other fields preserved", %{db: db} do
       key = {:parse, "file.ex"}
@@ -473,9 +488,20 @@ defmodule Roux.MemoTest do
 
     defp keep_all(_key, _durability), do: true
 
+    # These storage fixtures supply their entries directly. Certify the batch
+    # after its manual writes so serialization can retain every asserted value.
+    defp certify_entries(db) do
+      token = Roux.Dependencies.snapshot(db)
+
+      Memo.reduce_dependencies(db, :ok, fn key, _deps, :ok ->
+        Roux.Dependencies.certify(db, key, Memo.generation(db, key), token)
+      end)
+    end
+
     test "restored entries read back as they were written", %{db: db} do
       Memo.put(db, {:q, :a}, make_entry(%{value: %{rows: [["a", 1]]}, changed_at: 3}))
       Memo.put(db, {:input, :src, "b"}, make_entry(%{value: "text", durability: :medium}))
+      certify_entries(db)
 
       restored = Database.new()
 
@@ -543,6 +569,7 @@ defmodule Roux.MemoTest do
       Memo.put(db, {:q, :low}, make_entry(%{durability: :low}))
       Memo.put(db, {:q, :high}, make_entry(%{durability: :high}))
       :ok = Memo.restore_persisted(db, [persisted_row({:q, :restored}, "not a term")])
+      certify_entries(db)
 
       kept = Memo.persisted(db, fn _key, durability -> durability != :low end)
 
@@ -609,6 +636,7 @@ defmodule Roux.MemoTest do
             )
           end
 
+          certify_entries(db)
           persisted = Memo.persisted(db, &keep_all/2)
           :ok = Memo.restore_persisted(restored, persisted)
 

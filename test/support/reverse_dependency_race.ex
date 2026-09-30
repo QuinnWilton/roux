@@ -75,7 +75,7 @@ defmodule Roux.Test.ReverseDependencyRace do
 
     db = %Database{
       memo_table: tables.memo,
-      revision: Revision.new(track_unknown: true),
+      revision: Revision.new(),
       query_registry: tables.registry,
       input_registry: tables.input_registry,
       task_registry: tables.task_registry,

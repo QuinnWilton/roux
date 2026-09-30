@@ -273,12 +273,13 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 5: Manifest" do
-    test "Roux.Lang.Manifest depends only on Database, Memo, Entity, Intern, Revision, and Blob",
+    test "Roux.Lang.Manifest stays within storage and invalidation dependencies",
          %{boundary: boundary} do
       assert_boundary(boundary,
         modules: [Roux.Lang.Manifest],
         allow: [
           under(Roux.Database),
+          under(Roux.Dependencies),
           under(Roux.Memo),
           under(Roux.Entity),
           under(Roux.Intern),

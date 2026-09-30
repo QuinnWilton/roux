@@ -169,7 +169,7 @@ defmodule Roux.SessionTest do
         use Roux.Query, code: [exclude: [Roux.Query, Roux.Runtime], follow_excluded: false]
         @compile {:no_warn_undefined, #{inspect(leaf)}}
 
-        defquery :leaf_value, key: _key do
+        defquery :leaf_value, key: key do
           #{inspect(leaf)}.v()
         end
       end
