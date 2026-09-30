@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Entity fields use exact equality when checking for changes, so numerically
+  equal values with different representations cannot leave stale field values.
+
 ## 0.2.3 — 2026-09-29
 
 ### Changed (performance)

@@ -309,7 +309,7 @@ defmodule Roux.Entity do
       new_hash = :erlang.phash2(new_value)
       old_entry = Map.fetch!(fields, field_name)
 
-      if new_hash == old_entry.hash and new_value == old_entry.value do
+      if new_hash == old_entry.hash and new_value === old_entry.value do
         # Unchanged — keep old entry with original changed_at.
         fields
       else

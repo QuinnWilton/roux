@@ -104,6 +104,32 @@ defmodule Roux.EntityTest do
       assert Entity.field_changed_at(db, @sample, id, :return_type) == 1
     end
 
+    test "update preserves numeric types and distinguishes signed zero", %{db: db} do
+      for {value, index} <- Enum.with_index([0, 0.0, -0.0, 1, 1.0], 1) do
+        revision = index * 2
+
+        id =
+          Entity.create(
+            db,
+            @sample,
+            %{name: :number, body: value, return_type: :number},
+            revision
+          )
+
+        assert Entity.field(db, @sample, id, :body) === value
+        assert Entity.field_changed_at(db, @sample, id, :body) == revision
+
+        Entity.create(
+          db,
+          @sample,
+          %{name: :number, body: value, return_type: :number},
+          revision + 1
+        )
+
+        assert Entity.field_changed_at(db, @sample, id, :body) == revision
+      end
+    end
+
     test "multi-field identity works", %{db: db} do
       id =
         Entity.create(db, @multi, %{module_name: MyMod, name: :foo, arity: 2}, 1)
@@ -342,7 +368,7 @@ defmodule Roux.EntityTest do
         # return_type never changed, so its changed_at stays at 1.
         assert Entity.field_changed_at(db, @sample, id, :return_type) == 1
 
-        if body1 == body2 do
+        if body1 === body2 do
           assert Entity.field_changed_at(db, @sample, id, :body) == 1
         else
           assert Entity.field_changed_at(db, @sample, id, :body) == 5
