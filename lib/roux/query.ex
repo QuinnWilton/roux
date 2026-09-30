@@ -187,6 +187,11 @@ defmodule Roux.Query do
       reads become dependencies. Pair with `:transient` to retry next session.
       Recovery of a value already verified this revision raises on timeout:
       replacing it could leave already-verified consumers with stale results.
+    * `:around_demand` — with `:timeout`, a `{module, function}` called with
+      `(db, name, key, run)` inside the deadline worker. It wraps validation
+      and execution for resource scopes such as batched cache writes. It must
+      call `run` once and return its result unchanged. Current-revision hits
+      and timeout fallbacks bypass it; its reads are not query dependencies.
     * `:do` — the query body block
 
   ## Example
@@ -218,6 +223,10 @@ defmodule Roux.Query do
     {on_timeout, opts} = Keyword.pop(opts, :on_timeout)
 
     {boundary_opts, boundary_ast} = boundary(name, timeout, on_timeout)
+
+    if Keyword.has_key?(opts, :around_demand) and timeout == nil do
+      raise ArgumentError, ":around_demand requires a query deadline"
+    end
 
     unless store in [:inline, :blob, :none] do
       raise ArgumentError,

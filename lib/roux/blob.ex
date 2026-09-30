@@ -509,6 +509,50 @@ defmodule Roux.Blob do
     end
   end
 
+  @doc """
+  Reads one independently hashed record from a packed blob. `record_digest`
+  must come from a verified index. A short or corrupt record is a miss and
+  evicts the damaged blob so a later write can repair it.
+  """
+  @spec get_slice(t(), digest(), non_neg_integer(), pos_integer(), digest()) ::
+          {:ok, binary()} | :miss
+  def get_slice(%__MODULE__{} = store, digest, offset, length, record_digest)
+      when is_integer(offset) and offset >= 0 and is_integer(length) and length > 0 do
+    path = path(store, digest)
+
+    case slice(path, offset, length, record_digest) do
+      {:ok, data} ->
+        {:ok, data}
+
+      :corrupt ->
+        evict(store, path)
+        :miss
+
+      :miss ->
+        Enum.find_value(asides(store, digest), :miss, fn aside ->
+          case slice(aside, offset, length, record_digest) do
+            {:ok, data} -> {:ok, data}
+            _ -> nil
+          end
+        end)
+    end
+  end
+
+  defp slice(path, offset, length, expected) do
+    case RawIO.read_slice(path, offset, length) do
+      {:ok, data} ->
+        if byte_size(data) == length and digest(data) == expected,
+          do: {:ok, data},
+          else: :corrupt
+
+      :eof ->
+        :corrupt
+
+      {:error, _} ->
+        :miss
+    end
+  end
+
   # The copies of an entry a collection has renamed aside while it
   # decides whether the entry is in use (`sweep/4`): the same inode as the
   # entry's, under a name that begins with its digest.
@@ -1006,6 +1050,10 @@ defmodule Roux.Blob do
     do: :maps.fold(fn k, v, acc -> collect_digests(v, collect_digests(k, acc)) end, acc, map)
 
   defp collect_digests(_other, acc), do: acc
+
+  @doc false
+  @spec referenced_digests(term()) :: [digest()]
+  def referenced_digests(term), do: term |> collect_digests(MapSet.new()) |> Enum.sort()
 
   defp hex?(bin), do: bin |> :binary.bin_to_list() |> Enum.all?(&(&1 in ?0..?9 or &1 in ?a..?f))
 

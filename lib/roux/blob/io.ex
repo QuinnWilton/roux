@@ -78,6 +78,24 @@ defmodule Roux.Blob.IO do
   @spec read(Path.t()) :: {:ok, binary()} | {:error, File.posix()}
   def read(path), do: dispatch(:read_file, [path], path, fn -> :file.read_file(path, [:raw]) end)
 
+  @spec read_slice(Path.t(), non_neg_integer(), pos_integer()) ::
+          {:ok, binary()} | :eof | {:error, File.posix()}
+  def read_slice(path, offset, length) do
+    dispatch(:read_slice, [path, offset, length], path, fn ->
+      case :file.open(path, [:read, :raw, :binary]) do
+        {:ok, file} ->
+          try do
+            :file.pread(file, offset, length)
+          after
+            :file.close(file)
+          end
+
+        error ->
+          error
+      end
+    end)
+  end
+
   @spec write(Path.t(), iodata()) :: :ok | {:error, File.posix()}
   def write(path, data),
     do: dispatch(:write_file, [path, data], path, fn -> :file.write_file(path, data, [:raw]) end)

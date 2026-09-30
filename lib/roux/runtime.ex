@@ -167,7 +167,14 @@ defmodule Roux.Runtime do
           Enum.each(functions, fn {k, v} -> Process.put(k, v) end)
           put_context(%Context{db: db, query_stack: stack})
           Process.put(@boundary_key, {db.memo_table, query_key})
-          resolve(db, name, key, fun)
+
+          case Database.query_definition(db, name) do
+            %{around_demand: {wrapper, function}} ->
+              apply(wrapper, function, [db, name, key, fn -> resolve(db, name, key, fun) end])
+
+            _ ->
+              resolve(db, name, key, fun)
+          end
         end)
         |> bounded_result(db, name, key, module, fallback)
     end

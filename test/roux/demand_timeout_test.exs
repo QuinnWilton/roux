@@ -23,6 +23,26 @@ defmodule Roux.DemandTimeoutTest do
       {:parent, Runtime.query(db, :bounded, key)}
     end
 
+    defquery :scoped,
+      key: key,
+      timeout: 1_000,
+      on_timeout: &__MODULE__.fallback/2,
+      around_demand: {__MODULE__, :scope} do
+      Runtime.query(db, :work, key)
+      send(Runtime.input(db, :observer, :all), :scoped_body)
+      :stable
+    end
+
+    def scope(_db, _name, _key, run) do
+      Process.put(:demand_scope_test, :inside)
+
+      try do
+        run.()
+      after
+        Process.delete(:demand_scope_test)
+      end
+    end
+
     defquery :bounded_blob,
       key: key,
       timeout: 1_000,
@@ -37,6 +57,10 @@ defmodule Roux.DemandTimeoutTest do
       case Runtime.input(db, :work, key) do
         {:value, value} ->
           value
+
+        {:scoped, _changed_input} ->
+          send(observer, {:scope_seen, Process.get(:demand_scope_test)})
+          :unchanged_child_result
 
         :hang ->
           send(observer, {:started, key, self()})
@@ -90,6 +114,24 @@ defmodule Roux.DemandTimeoutTest do
     assert_received {:started, :file, worker}
     refute Process.alive?(worker)
     assert {:ok, %{persist: :transient}} = Memo.get(db, {:bounded, :file})
+    assert_clean(db)
+  end
+
+  test "the demand scope covers child recomputation even when early cutoff skips the body", %{
+    db: db
+  } do
+    Input.set(db, :work, :file, {:scoped, :before})
+    assert Queries.scoped(db, :file) == :stable
+    assert_received {:scope_seen, :inside}
+    assert_received :scoped_body
+
+    Input.set(db, :work, :file, {:scoped, :after})
+    assert Queries.scoped(db, :file) == :stable
+    assert_received {:scope_seen, :inside}
+    refute_received :scoped_body
+
+    assert Queries.scoped(db, :file) == :stable
+    refute_received {:scope_seen, _}
     assert_clean(db)
   end
 

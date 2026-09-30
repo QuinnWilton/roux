@@ -90,6 +90,14 @@ defmodule Roux.Test.ModelFS do
     end
   end
 
+  def read_slice(path, offset, length) do
+    case read_file(path) do
+      {:ok, bytes} when offset >= byte_size(bytes) -> :eof
+      {:ok, bytes} -> {:ok, binary_part(bytes, offset, min(length, byte_size(bytes) - offset))}
+      error -> error
+    end
+  end
+
   def write_file(path, data) do
     if dir?(Path.dirname(path)) do
       ino = new_inode(IO.iodata_to_binary(data), 0o644)

@@ -4,6 +4,12 @@
 
 ### Added
 
+- Packed trace groups batch small cache records into indexed blobs. Records
+  remain independently verifiable and readable without a session manifest;
+  garbage collection retains and removes whole packs.
+- Query deadline scopes can wrap dependency validation as well as execution,
+  allowing cache batches to include work triggered by validation.
+
 - Query deadlines cover dependency validation, execution and missing-value
   recovery. Concurrent callers share one attempt; a timeout cancels its nested
   workers and can produce a transient fallback for retry in the next session.
