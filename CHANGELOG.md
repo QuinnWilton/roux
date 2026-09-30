@@ -7,6 +7,12 @@
 - Entity fields use exact equality when checking for changes, so numerically
   equal values with different representations cannot leave stale field values.
 
+### Changed
+
+- Validation skips recursive checks for input leaves and shared queries already
+  checked in the current revision. Input changes and deletions still invalidate
+  their readers, while graphs with many shared dependencies do less work.
+
 ## 0.2.3 — 2026-09-29
 
 ### Changed (performance)

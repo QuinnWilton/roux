@@ -22,6 +22,59 @@ defmodule Roux.RuntimeTest do
     Input.register(db, Input.define(name, opts))
   end
 
+  test "shared dependencies validate once per revision and inputs still invalidate", %{db: db} do
+    register_input(db, :source, durability: :medium)
+    Input.set(db, :source, :used, 1)
+    Input.set(db, :source, :unrelated, 0)
+
+    shared = fn db, key -> Runtime.input(db, :source, key, default: 0) end
+    left = fn db, key -> Runtime.execute(db, :shared, key, shared) + 10 end
+    right = fn db, key -> Runtime.execute(db, :shared, key, shared) + 20 end
+
+    root = fn db, key ->
+      Runtime.execute(db, :left, key, left) + Runtime.execute(db, :right, key, right)
+    end
+
+    assert Runtime.execute(db, :root, :used, root) == 32
+    Input.set(db, :source, :unrelated, 1)
+
+    caller = self()
+    database = Database.id(db)
+    handler = make_ref()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:roux, :validation, :start],
+        fn _, _, metadata, _ ->
+          if metadata.database == database,
+            do: send(caller, {handler, metadata.query_name})
+        end,
+        nil
+      )
+
+    try do
+      assert Runtime.execute(db, :root, :used, root) == 32
+
+      for name <- [:root, :left, :right, :shared] do
+        assert_received {^handler, ^name}
+      end
+
+      refute_received {^handler, _}
+    after
+      :telemetry.detach(handler)
+    end
+
+    Input.set(db, :source, :used, 2)
+    assert Runtime.execute(db, :root, :used, root) == 34
+    Input.delete(db, :source, :used)
+    assert Runtime.execute(db, :root, :used, root) == 30
+    Input.set(db, :source, :used, 7, durability: :low)
+    assert Runtime.execute(db, :root, :used, root) == 44
+    Input.set(db, :source, :used, 8)
+    assert Runtime.execute(db, :root, :used, root) == 46
+  end
+
   # -- Served values --
 
   describe "served values" do

@@ -555,17 +555,26 @@ defmodule Roux.Runtime do
     :ok
   end
 
-  defp ensure_up_to_date(db, query_key) do
-    case Validation.validate(db, query_key, &ensure_up_to_date/2) do
-      :valid -> :ok
-      :stale -> re_execute(db, query_key)
-    end
-  end
+  # Inputs have no computation to refresh. Validation reads their current
+  # changed_at and durability immediately after this callback, including a
+  # miss when an input was deleted.
+  defp ensure_up_to_date(_db, {:input, _name, _key}), do: :ok
 
-  defp re_execute(_db, {:input, _input_name, _key}) do
-    # Inputs are set externally and cannot be re-executed.
-    # Staleness will propagate to the parent query.
-    :ok
+  defp ensure_up_to_date(db, query_key) do
+    current_rev = Revision.current(db.revision)
+
+    # Shared dependencies occur once per incoming edge. As in execute/4,
+    # an entry already checked this revision needs no validation span.
+    case Memo.verification_state(db, query_key) do
+      {:ok, ^current_rev, _durability} ->
+        :ok
+
+      _not_verified ->
+        case Validation.validate(db, query_key, &ensure_up_to_date/2) do
+          :valid -> :ok
+          :stale -> re_execute(db, query_key)
+        end
+    end
   end
 
   defp re_execute(db, {query_name, key}) do

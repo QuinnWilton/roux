@@ -21,8 +21,8 @@ Notably, Validation does **not** depend on Runtime. See [D13](../decisions.md).
 @type ensure_fn :: (Roux.Database.t(), Roux.Memo.query_key() -> :ok)
 # Callback that ensures a dependency is up-to-date.
 # Provided by the caller (Runtime). May trigger re-execution of stale deps.
-# After this returns, the dep's memo entry is guaranteed to reflect the
-# current revision (either validated or re-executed with a fresh changed_at).
+# Derived dependencies are validated or re-executed. Inputs already hold
+# their current value; the caller checks changed_at, durability and absence.
 
 @spec validate(Roux.Database.t(), Roux.Memo.query_key(), ensure_fn()) :: :valid | :stale
 # Determine if a memo entry's cached value is still valid.
@@ -95,14 +95,24 @@ worst case is a spurious re-validation (correct, never incorrect).
 
 ## How Runtime provides the callback
 
-Runtime's `ensure_up_to_date/2` function is the natural `ensure_fn`:
+Runtime's `ensure_up_to_date/2` function is the natural `ensure_fn`. It skips
+input leaves and derived entries already verified in this revision, so shared
+dependencies do not emit another validation span for every incoming edge:
 
 ```elixir
 # In Roux.Runtime:
+defp ensure_up_to_date(_db, {:input, _name, _key}), do: :ok
+
 defp ensure_up_to_date(db, query_key) do
-  case Roux.Validation.validate(db, query_key, &ensure_up_to_date/2) do
-    :valid -> :ok
-    :stale -> re_execute(db, query_key)  # re-execute and store result
+  current_rev = Revision.current(db.revision)
+
+  case Memo.verification_state(db, query_key) do
+    {:ok, ^current_rev, _durability} -> :ok
+    _ ->
+      case Roux.Validation.validate(db, query_key, &ensure_up_to_date/2) do
+        :valid -> :ok
+        :stale -> re_execute(db, query_key)
+      end
   end
 end
 
