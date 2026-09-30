@@ -20,8 +20,8 @@ defmodule Roux.Input do
   """
 
   alias Roux.Database
+  alias Roux.{Dependencies, Memo, Revision, Telemetry}
   alias Roux.Input.{Definition, NotSetError}
-  alias Roux.{Memo, Revision, Telemetry}
   alias Roux.Memo.Entry
 
   @type definition :: Definition.t()
@@ -102,21 +102,23 @@ defmodule Roux.Input do
             :miss -> more_durable(durability, registered)
           end
 
-        new_rev = Revision.advance(db.revision, advance_at)
+        Dependencies.mutate(db, query_key, fn ->
+          new_rev = Dependencies.advance(db, advance_at)
 
-        entry = %Entry{
-          value: value,
-          hash: new_hash,
-          changed_at: new_rev,
-          verified_at: new_rev,
-          dependencies: [],
-          durability: durability,
-          output_entities: []
-        }
+          entry = %Entry{
+            value: value,
+            hash: new_hash,
+            changed_at: new_rev,
+            verified_at: new_rev,
+            dependencies: [],
+            durability: durability,
+            output_entities: []
+          }
 
-        Memo.put(db, query_key, entry)
-        Telemetry.input_set(Database.id(db), input_name, key, new_rev, durability)
-        :ok
+          Memo.put_input(db, query_key, entry)
+          Telemetry.input_set(Database.id(db), input_name, key, new_rev, durability)
+          :ok
+        end)
     end
   end
 
@@ -184,16 +186,20 @@ defmodule Roux.Input do
     durability = lookup_durability!(db, input_name)
     query_key = {:input, input_name, key}
 
-    case :ets.take(table, query_key) do
-      [_ | _] ->
-        new_rev = Revision.advance(db.revision, durability)
-        Telemetry.input_delete(Database.id(db), input_name, key, new_rev, durability)
+    Dependencies.mutate(db, query_key, fn ->
+      Dependencies.forget(db, query_key)
 
-      [] ->
-        :ok
-    end
+      case :ets.take(table, query_key) do
+        [_ | _] ->
+          new_rev = Dependencies.advance(db, durability)
+          Telemetry.input_delete(Database.id(db), input_name, key, new_rev, durability)
 
-    :ok
+        [] ->
+          :ok
+      end
+
+      :ok
+    end)
   end
 
   @doc """
@@ -203,9 +209,9 @@ defmodule Roux.Input do
   """
   @spec keys(Database.t(), atom()) :: [term()]
   def keys(%Database{memo_table: table}, input_name) when is_atom(input_name) do
-    # Match the 12-element ETS tuple (see `Roux.Memo`) with a 3-tuple key
+    # Match the 13-element ETS tuple (see `Roux.Memo`) with a 3-tuple key
     # prefix.
-    pattern = {{:input, input_name, :"$1"}, :_, :_, :_, :_, :_, :_, :_, :_, :_, :_, :_}
+    pattern = {{:input, input_name, :"$1"}, :_, :_, :_, :_, :_, :_, :_, :_, :_, :_, :_, :_}
 
     table
     |> :ets.match(pattern)

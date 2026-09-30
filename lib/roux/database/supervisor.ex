@@ -16,12 +16,12 @@ defmodule Roux.Database.Supervisor do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     sup_pid = self()
 
     children = [
       {Roux.Database.Heir, sup_pid: sup_pid},
-      {Roux.Database.TableOwner, sup_pid: sup_pid}
+      {Roux.Database.TableOwner, [sup_pid: sup_pid] ++ opts}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)

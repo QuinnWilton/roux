@@ -19,7 +19,7 @@ defmodule Roux.Database do
 
   """
 
-  alias Roux.{Blob, Intern, Revision}
+  alias Roux.{Blob, Dependencies, Intern, Revision}
   alias Roux.Database.{Supervisor, TableOwner}
 
   @type t :: %__MODULE__{
@@ -35,7 +35,8 @@ defmodule Roux.Database do
           table_owner: pid(),
           supervisor: pid(),
           blob: Blob.t() | nil,
-          writes: :atomics.atomics_ref() | nil
+          writes: :atomics.atomics_ref() | nil,
+          dependencies: Dependencies.t() | nil
         }
 
   @enforce_keys [
@@ -65,7 +66,8 @@ defmodule Roux.Database do
     :table_owner,
     :supervisor,
     blob: nil,
-    writes: nil
+    writes: nil,
+    dependencies: nil
   ]
 
   @doc """
@@ -79,18 +81,22 @@ defmodule Roux.Database do
     * `:blob` — a `Roux.Blob` store: where a manifest keeps the values of
       `store: :blob` queries and the database reads them back, and where
       code versions are kept across VMs (`Roux.Query`).
+    * `:reverse_dependencies` — defaults to false. Track reverse edges to
+      skip validation of unaffected queries. Input writes mark transitive
+      readers; affected queries still validate in dependency order. Adds
+      memory and write work. Registered entity types disable the shortcut.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
-    opts = Keyword.validate!(opts, blob: nil)
+    opts = Keyword.validate!(opts, blob: nil, reverse_dependencies: false)
 
-    {:ok, sup_pid} = Supervisor.start_link()
+    {:ok, sup_pid} = Supervisor.start_link(reverse_dependencies: opts[:reverse_dependencies])
     table_owner_pid = find_table_owner(sup_pid)
     tables = TableOwner.get_tables(table_owner_pid)
 
     %__MODULE__{
       memo_table: Map.fetch!(tables, :memo),
-      revision: Revision.new(),
+      revision: Revision.new(track_unknown: opts[:reverse_dependencies]),
       query_registry: Map.fetch!(tables, :query_registry),
       input_registry: Map.fetch!(tables, :input_registry),
       task_registry: Map.fetch!(tables, :task_registry),
@@ -101,7 +107,8 @@ defmodule Roux.Database do
       table_owner: table_owner_pid,
       supervisor: sup_pid,
       blob: Keyword.fetch!(opts, :blob),
-      writes: :atomics.new(1, signed: false)
+      writes: :atomics.new(1, signed: false),
+      dependencies: if(opts[:reverse_dependencies], do: Dependencies.new(tables))
     }
   end
 
@@ -153,17 +160,24 @@ defmodule Roux.Database do
   so that no durability check skips the entries that read them.
   """
   @spec register_query(t(), atom(), map()) :: :ok
-  def register_query(%__MODULE__{query_registry: reg, revision: revision}, name, definition)
+  def register_query(%__MODULE__{query_registry: reg, revision: revision} = db, name, definition)
       when is_atom(name) and is_map(definition) do
     version = Map.get(definition, :code_version)
 
     case :ets.lookup(reg, name) do
       [{^name, %{} = old}] ->
-        :ets.insert(reg, {name, definition})
-        if Map.get(old, :code_version) != version, do: Revision.advance(revision, :high)
+        if Map.get(old, :code_version) != version do
+          Dependencies.mutate(db, :all, fn ->
+            :ets.insert(reg, {name, definition})
+            Revision.advance(revision, :high)
+          end)
+        else
+          :ets.insert(reg, {name, definition})
+        end
 
       [] ->
-        :ets.insert(reg, {name, definition})
+        # Ad-hoc execute/4 calls may have cached this query before registration.
+        Dependencies.mutate(db, :all, fn -> :ets.insert(reg, {name, definition}) end)
     end
 
     :ok

@@ -27,7 +27,11 @@ defmodule Roux.Database.TableOwner do
     # all of them.
     dedup_waiters: [:duplicate_bag, :public, write_concurrency: true],
     intern_registry: [:set, :public],
-    entity_registry: [:set, :public]
+    entity_registry: [:set, :public],
+    dependency_edges: [:bag, :public, read_concurrency: true, write_concurrency: true],
+    dependency_nodes: [:set, :public, read_concurrency: true, write_concurrency: true],
+    dependency_dirty: [:set, :public, read_concurrency: true, write_concurrency: true],
+    dependency_writers: [:set, :public, read_concurrency: true, write_concurrency: true]
   }
 
   # -- Client API --
@@ -66,7 +70,7 @@ defmodule Roux.Database.TableOwner do
           reclaimed
 
         {:ok, _empty} ->
-          create_tables(heir_pid)
+          create_tables(heir_pid, opts)
       end
 
     {:ok, %{tables: tables, heir: heir_pid}}
@@ -91,8 +95,19 @@ defmodule Roux.Database.TableOwner do
 
   # -- Private --
 
-  defp create_tables(heir_pid) do
-    Map.new(@table_specs, fn {tag, opts} ->
+  defp create_tables(heir_pid, owner_opts) do
+    specs =
+      if Keyword.get(owner_opts, :reverse_dependencies, false),
+        do: @table_specs,
+        else:
+          Map.drop(@table_specs, [
+            :dependency_edges,
+            :dependency_nodes,
+            :dependency_dirty,
+            :dependency_writers
+          ])
+
+    Map.new(specs, fn {tag, opts} ->
       # ETS heir option is a 3-tuple: {:heir, pid, heir_data}.
       tid = :ets.new(tag, [{:heir, heir_pid, tag} | opts])
       {tag, tid}

@@ -34,11 +34,12 @@ defmodule Roux.Revision do
 
   @type t :: %__MODULE__{
           counter: :atomics.atomics_ref(),
-          durability: :atomics.atomics_ref()
+          durability: :atomics.atomics_ref(),
+          untracked: :atomics.atomics_ref() | nil
         }
 
   @enforce_keys [:counter, :durability]
-  defstruct [:counter, :durability]
+  defstruct [:counter, :durability, :untracked]
 
   # Durability level to atomics slot mapping.
   @high_slot 1
@@ -48,11 +49,16 @@ defmodule Roux.Revision do
   @doc """
   Creates a new revision tracker. Initial revision is 0 (no inputs set yet).
   """
-  @spec new() :: t()
-  def new do
+  @spec new(keyword()) :: t()
+  def new(opts \\ []) do
     counter = :atomics.new(1, signed: false)
     durability = :atomics.new(3, signed: false)
-    %__MODULE__{counter: counter, durability: durability}
+
+    %__MODULE__{
+      counter: counter,
+      durability: durability,
+      untracked: if(opts[:track_unknown], do: :atomics.new(1, signed: false))
+    }
   end
 
   @doc """
@@ -70,7 +76,14 @@ defmodule Roux.Revision do
   Called when an input is set or modified.
   """
   @spec advance(t(), durability()) :: revision()
-  def advance(%__MODULE__{counter: counter, durability: durability}, level)
+  def advance(%__MODULE__{} = revision, level) when level in [:high, :medium, :low] do
+    note_untracked(revision)
+    advance_tracked(revision, level)
+  end
+
+  @doc false
+  @spec advance_tracked(t(), durability()) :: revision()
+  def advance_tracked(%__MODULE__{counter: counter, durability: durability}, level)
       when level in [:high, :medium, :low] do
     new_revision = :atomics.add_get(counter, 1, 1)
     :atomics.put(durability, slot(level), new_revision)
@@ -146,13 +159,22 @@ defmodule Roux.Revision do
   """
   @spec restore(t(), %{counter: revision(), high: revision(), medium: revision(), low: revision()}) ::
           :ok
-  def restore(%__MODULE__{counter: counter, durability: durability}, state) do
+  def restore(%__MODULE__{counter: counter, durability: durability} = revision, state) do
+    note_untracked(revision)
     :atomics.put(counter, 1, state.counter)
     :atomics.put(durability, @high_slot, state.high)
     :atomics.put(durability, @medium_slot, state.medium)
     :atomics.put(durability, @low_slot, state.low)
     :ok
   end
+
+  @doc false
+  @spec untracked(t()) :: non_neg_integer()
+  def untracked(%__MODULE__{untracked: nil}), do: 0
+  def untracked(%__MODULE__{untracked: clock}), do: :atomics.get(clock, 1)
+
+  defp note_untracked(%__MODULE__{untracked: nil}), do: :ok
+  defp note_untracked(%__MODULE__{untracked: clock}), do: :atomics.add(clock, 1, 1)
 
   defp slot(:high), do: @high_slot
   defp slot(:medium), do: @medium_slot

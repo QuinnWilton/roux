@@ -8,6 +8,30 @@ Roux is a Salsa-inspired framework for incremental, demand-driven computation on
 
 A computation is modeled as a graph of **queries**. Queries are pure functions from keys to values. The framework memoizes results and tracks which queries read which other queries. When an input changes, only the affected subgraph recomputes — and even then, if a recomputed query produces the same result as before (**early cutoff**), its downstream dependents are not invalidated.
 
+## Optional reverse tracking
+
+`Roux.Session.open(reverse_dependencies: true)` keeps reverse edges alongside
+memos. An input write marks its transitive readers; demands outside that set
+reuse their values without walking dependencies. Affected demands still use
+ordered validation and early cutoff. This trades index memory and input-write
+work for less validation, so it is disabled by default.
+
+Certificates belong to an exact memo incarnation and mutation epoch. Pending
+writes prevent certification, dynamic dependency replacements install new edges
+before publishing their memo, and canceled publications are cleaned when those
+edges are visited. Code changes, manual memo writes, and untracked revision
+changes discard certificates conservatively. These resets may recompute equal
+values instead of applying early cutoff.
+
+The index survives table-owner restarts but is not persisted. Restore rebuilds
+edges and validates each demanded entry once. Checkpoints omit unproven entries
+and their readers, preserving both invalidation and held-blob ownership.
+Registered entity types disable
+the shortcut until field dependencies have producer ownership tracking.
+
+Database, Memo, and Dependencies form the storage/invalidation boundary;
+Dependencies does not invoke Runtime or query functions.
+
 ## System layers
 
 ```
@@ -40,6 +64,7 @@ Roux.Database        — central handle struct, ETS lifecycle
 Roux.Database.Heir   — ETS table preservation across crashes
 Roux.Database.TableOwner — ETS table ownership
 Roux.Memo            — memo entry storage (the cache)
+Roux.Dependencies    — optional reverse index and validation certificates
 Roux.Input           — input queries (external values)
 Roux.Query           — derived query definition + defquery macro
 Roux.Runtime         — query execution engine + dependency tracking

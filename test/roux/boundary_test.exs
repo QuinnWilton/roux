@@ -33,30 +33,47 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 1: Database" do
-    test "Roux.Database depends only on Intern, Revision, and Telemetry", %{boundary: boundary} do
+    test "Roux.Database depends only on Intern, Revision, Telemetry, and Dependencies", %{
+      boundary: boundary
+    } do
       assert_boundary(boundary,
         modules: under(Roux.Database),
-        allow: [under(Roux.Intern), under(Roux.Revision), under(Roux.Telemetry)]
+        allow: [
+          under(Roux.Dependencies),
+          under(Roux.Intern),
+          under(Roux.Revision),
+          under(Roux.Telemetry)
+        ]
+      )
+    end
+  end
+
+  describe "Tier 1: Dependencies" do
+    test "Roux.Dependencies depends only on Database, Memo and Revision", %{boundary: boundary} do
+      assert_boundary(boundary,
+        modules: under(Roux.Dependencies),
+        allow: [under(Roux.Database), under(Roux.Memo), under(Roux.Revision)]
       )
     end
   end
 
   describe "Tier 1: Memo" do
-    test "Roux.Memo depends only on Database and Blob", %{boundary: boundary} do
+    test "Roux.Memo depends only on Database, Blob, and Dependencies", %{boundary: boundary} do
       assert_boundary(boundary,
         modules: under(Roux.Memo),
-        allow: [under(Roux.Database), under(Roux.Blob)]
+        allow: [under(Roux.Dependencies), under(Roux.Database), under(Roux.Blob)]
       )
     end
   end
 
   describe "Tier 2: Input" do
-    test "Roux.Input depends only on Database, Revision, Memo, and Telemetry", %{
+    test "Roux.Input depends only on Database, Revision, Memo, Telemetry, and Dependencies", %{
       boundary: boundary
     } do
       assert_boundary(boundary,
         modules: under(Roux.Input),
         allow: [
+          under(Roux.Dependencies),
           under(Roux.Database),
           under(Roux.Revision),
           under(Roux.Memo),
@@ -94,12 +111,13 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 2: Validation" do
-    test "Roux.Validation depends only on Database, Memo, Revision, and Telemetry", %{
+    test "Roux.Validation stays within its data and invalidation dependencies", %{
       boundary: boundary
     } do
       assert_boundary(boundary,
         modules: under(Roux.Validation),
         allow: [
+          under(Roux.Dependencies),
           under(Roux.Database),
           under(Roux.Memo),
           under(Roux.Entity),
@@ -111,13 +129,14 @@ defmodule Roux.BoundaryTest do
   end
 
   describe "Tier 3: Runtime" do
-    test "Roux.Runtime depends only on Database, Memo, Input, Validation, Telemetry, Cycle, and Entity",
+    test "Roux.Runtime stays within the execution subsystems",
          %{
            boundary: boundary
          } do
       assert_boundary(boundary,
         modules: [Roux.Runtime],
         allow: [
+          under(Roux.Dependencies),
           under(Roux.Database),
           under(Roux.Memo),
           under(Roux.Input),

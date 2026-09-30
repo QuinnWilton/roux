@@ -115,7 +115,8 @@ defmodule Roux.Lang.Manifest do
 
   An entry whose query says so is left out (`Roux.Query`'s `store:
   :none`), as is a transient entry (`transient:`) and every entry that
-  read one, directly or through others.
+  read one, directly or through others. With reverse tracking, entries
+  without a valid dependency proof and their readers are also omitted.
 
   ## Options
 
@@ -423,7 +424,7 @@ defmodule Roux.Lang.Manifest do
   # pass its durability check on the next run, and serve what that value
   # led to without ever asking again.
   defp transient_closure(db) do
-    case Memo.keys_persisted_as(db, :transient) do
+    case Memo.keys_persisted_as(db, :transient) ++ Memo.unproven_keys(db) do
       [] ->
         %{}
 

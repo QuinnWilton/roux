@@ -33,7 +33,7 @@ defmodule Roux.Validation do
   """
 
   alias Roux.Database
-  alias Roux.{Entity, Memo, Revision, Telemetry}
+  alias Roux.{Dependencies, Entity, Memo, Revision, Telemetry}
 
   @type ensure_fn :: (Database.t(), Memo.query_key() -> :ok)
 
@@ -56,7 +56,24 @@ defmodule Roux.Validation do
     Telemetry.validation_start(Database.id(db), query_name, key, current_rev)
     start_time = System.monotonic_time()
 
-    result = do_validate(db, query_key, current_rev, query_name, key, ensure_fn)
+    generation = Memo.generation(db, query_key)
+    token = {Dependencies.snapshot(db), generation}
+    status = Dependencies.status(db, query_key)
+
+    result =
+      case status do
+        :clean ->
+          verify(db, query_key, current_rev, nil, token)
+          :valid
+
+        :stale ->
+          :stale
+
+        status ->
+          do_validate(db, query_key, current_rev, query_name, key, ensure_fn, status, token)
+      end
+
+    if result == :valid, do: Dependencies.certify(db, query_key, generation, elem(token, 0))
 
     duration = System.monotonic_time() - start_time
     Telemetry.validation_stop(Database.id(db), query_name, key, current_rev, duration, result)
@@ -64,19 +81,29 @@ defmodule Roux.Validation do
     result
   end
 
+  @doc false
+  @spec current?(Database.t(), Memo.query_key(), Revision.revision()) :: boolean()
+  def current?(db, query_key, revision) do
+    case Dependencies.status(db, query_key) do
+      :clean -> true
+      :disabled -> match?({:ok, ^revision, _}, Memo.verification_state(db, query_key))
+      _ -> false
+    end
+  end
+
   # -- Private --
 
   # Reads only the fields each case needs. Every one of these used to come
   # from a full `Memo.get/2`, which deep-copies the entry's value out of ETS
   # — and none of the four cases looks at the value. See Memo.dep_state/2.
-  defp do_validate(db, query_key, current_rev, query_name, key, ensure_fn) do
+  defp do_validate(db, query_key, current_rev, query_name, key, ensure_fn, status, token) do
     case Memo.verification_state(db, query_key) do
       # Case 1: no memo.
       :miss ->
         :stale
 
       # Case 2: already validated this revision.
-      {:ok, ^current_rev, _durability} ->
+      {:ok, ^current_rev, _durability} when status == :disabled ->
         :valid
 
       {:ok, verified_at, durability} ->
@@ -87,8 +114,9 @@ defmodule Roux.Validation do
             :stale
 
           # Case 3: durability skip.
-          Revision.last_changed_at_or_above(db.revision, durability) <= verified_at ->
-            Memo.update_verified(db, query_key, current_rev)
+          status == :disabled and
+              Revision.last_changed_at_or_above(db.revision, durability) <= verified_at ->
+            verify(db, query_key, current_rev, nil, token)
             Telemetry.durability_skip(Database.id(db), query_name, key, durability, current_rev)
             :valid
 
@@ -97,7 +125,7 @@ defmodule Roux.Validation do
           true ->
             case Memo.dependencies(db, query_key) do
               {:ok, deps} ->
-                walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn)
+                walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn, token)
 
               :miss ->
                 :stale
@@ -120,12 +148,20 @@ defmodule Roux.Validation do
   # dependencies: an empty walk's `:high` would raise it, and every later
   # write at its level would then advance the revision at `:high`, where
   # nothing skips its walk.
-  defp walk_dependencies(db, {:input, _name, _key} = query_key, [], _verified, current_rev, _fn) do
-    Memo.update_verified(db, query_key, current_rev)
+  defp walk_dependencies(
+         db,
+         {:input, _name, _key} = query_key,
+         [],
+         _verified,
+         current_rev,
+         _fn,
+         token
+       ) do
+    verify(db, query_key, current_rev, nil, token)
     :valid
   end
 
-  defp walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn) do
+  defp walk_dependencies(db, query_key, deps, verified_at, current_rev, ensure_fn, token) do
     case check_deps(db, deps, verified_at, ensure_fn, :high) do
       {:clean, durability} ->
         # Refresh durability, not just verified_at. It is the minimum over
@@ -134,12 +170,24 @@ defmodule Roux.Validation do
         # validated without executing, so a stale level would persist and
         # then skip a change at a lower one. The walk just read every
         # dependency's entry, so the current minimum is already in hand.
-        Memo.update_verified(db, query_key, current_rev, durability)
+        verify(db, query_key, current_rev, durability, token)
         :valid
 
       :stale ->
         :stale
     end
+  end
+
+  # Never advance verified_at using a walk that overlapped an input write.
+  # In particular, a writer may have advanced the revision but not stored its
+  # value yet. Its later changed_at must still be newer than this memo's proof.
+  defp verify(db, key, revision, durability, {token, generation}) do
+    if db.dependencies == nil or (token != nil and Dependencies.snapshot(db) == token) or
+         Dependencies.status(db, key) == :disabled do
+      Memo.verify_generation(db, key, generation, revision, durability)
+    end
+
+    :ok
   end
 
   defp check_deps(_db, [], _verified_at, _ensure_fn, durability), do: {:clean, durability}

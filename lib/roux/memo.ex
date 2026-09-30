@@ -39,7 +39,7 @@ defmodule Roux.Memo do
   recomputes it (`Roux.Runtime` does, transparently).
   """
 
-  alias Roux.{Blob, Database}
+  alias Roux.{Blob, Database, Dependencies}
   alias Roux.Memo.Entry
   alias Roux.Revision
 
@@ -79,8 +79,8 @@ defmodule Roux.Memo do
   #
   # {query_key, value, hash, changed_at, verified_at, dependencies, durability, output_entities, encoded,
   #  pos 1      pos 2  pos 3 pos 4       pos 5        pos 6         pos 7       pos 8            pos 9
-  #  code_version, persist, blobs}
-  #  pos 10        pos 11   pos 12
+  #  code_version, persist, blobs, generation}
+  #  pos 10        pos 11   pos 12 pos 13
   #
   # `encoded` is nil when `value` holds the entry's value, and — when the
   # entry was restored and has not been replaced since — the value in the
@@ -124,6 +124,21 @@ defmodule Roux.Memo do
     case :ets.lookup(table, key) do
       [tuple] -> value_of(db, tuple)
       [] -> :miss
+    end
+  end
+
+  @doc false
+  @spec fetch_versioned_value(Database.t(), query_key()) ::
+          {:ok, Revision.revision(), reference() | nil, term()} | :miss | :missing
+  def fetch_versioned_value(%Database{memo_table: table} = db, key) do
+    case :ets.lookup(table, key) do
+      [tuple] ->
+        with {:ok, value} <- value_of(db, tuple) do
+          {:ok, elem(tuple, 3), elem(tuple, 12), value}
+        end
+
+      [] ->
+        :miss
     end
   end
 
@@ -257,7 +272,7 @@ defmodule Roux.Memo do
   def reduce_dependencies(%Database{memo_table: table}, acc, fun) when is_function(fun, 3) do
     table
     |> :ets.select([
-      {{:"$1", :_, :_, :_, :_, :"$2", :_, :_, :_, :_, :_, :_}, [], [{{:"$1", :"$2"}}]}
+      {{:"$1", :_, :_, :_, :_, :"$2", :_, :_, :_, :_, :_, :_, :_}, [], [{{:"$1", :"$2"}}]}
     ])
     |> Enum.reduce(acc, fn {key, deps}, acc -> fun.(key, deps, acc) end)
   end
@@ -265,7 +280,23 @@ defmodule Roux.Memo do
   @doc "The keys of the entries whose `persist` is `persist`."
   @spec keys_persisted_as(Database.t(), Entry.persist()) :: [query_key()]
   def keys_persisted_as(%Database{memo_table: table}, persist) do
-    :ets.select(table, [{{:"$1", :_, :_, :_, :_, :_, :_, :_, :_, :_, persist, :_}, [], [:"$1"]}])
+    :ets.select(table, [
+      {{:"$1", :_, :_, :_, :_, :_, :_, :_, :_, :_, persist, :_, :_}, [], [:"$1"]}
+    ])
+  end
+
+  @doc false
+  @spec unproven_keys(Database.t()) :: [query_key()]
+  def unproven_keys(%Database{dependencies: nil}), do: []
+
+  def unproven_keys(%Database{memo_table: table} = db) do
+    table
+    |> :ets.select([
+      {{:"$1", :_, :_, :_, :_, :_, :_, :_, :_, :_, :_, :_, :"$2"}, [], [{{:"$1", :"$2"}}]}
+    ])
+    |> Enum.flat_map(fn {key, generation} ->
+      if Dependencies.persistable?(db, key, generation), do: [], else: [key]
+    end)
   end
 
   @doc "Reads an entry's `durability` without its value."
@@ -298,9 +329,41 @@ defmodule Roux.Memo do
   Called after successful query execution with the buffered result.
   """
   @spec put(Database.t(), query_key(), Entry.t()) :: :ok
-  def put(%Database{memo_table: table}, key, %Entry{} = entry) do
-    :ets.insert(table, to_tuple(key, entry))
+  def put(%Database{} = db, key, %Entry{} = entry) do
+    Dependencies.mutate(db, :all, fn -> publish(db, key, entry, false, :restored) end)
     :ok
+  end
+
+  @doc false
+  @spec generation(Database.t(), query_key()) :: reference() | nil
+  def generation(%Database{dependencies: nil}, _key), do: nil
+
+  def generation(%Database{memo_table: table}, key),
+    do: :ets.lookup_element(table, key, 13, nil)
+
+  @doc false
+  @spec put_input(Database.t(), query_key(), Entry.t()) :: :ok
+  def put_input(%Database{memo_table: table} = db, key, entry) do
+    Dependencies.forget(db, key)
+    :ets.insert(table, to_tuple(key, entry, nil))
+    :ok
+  end
+
+  @doc false
+  @spec publish(Database.t(), query_key(), Entry.t(), boolean(), Dependencies.token() | :restored) ::
+          reference() | nil
+  def publish(db, key, entry, unchanged?, token) do
+    generation = if db.dependencies, do: make_ref()
+
+    Dependencies.publish(db, key, generation, entry.dependencies, token, fn ->
+      if unchanged? do
+        put_equal(db, key, entry, generation)
+      else
+        :ets.insert(db.memo_table, to_tuple(key, entry, generation))
+      end
+
+      generation
+    end)
   end
 
   @doc """
@@ -317,7 +380,12 @@ defmodule Roux.Memo do
   Behaves as `put/3` when there is no stored entry.
   """
   @spec put_unchanged(Database.t(), query_key(), Entry.t()) :: :ok
-  def put_unchanged(%Database{memo_table: table} = db, key, %Entry{} = e) do
+  def put_unchanged(db, key, entry) do
+    Dependencies.mutate(db, :all, fn -> publish(db, key, entry, true, :restored) end)
+    :ok
+  end
+
+  defp put_equal(%Database{memo_table: table}, key, %Entry{} = e, generation) do
     # Positions 3 to 8 and 10; the value (2) and its encoding (9) stay.
     fields = [
       {3, e.hash},
@@ -328,10 +396,13 @@ defmodule Roux.Memo do
       {8, e.output_entities},
       {10, e.code_version},
       {11, e.persist},
-      {12, e.blobs}
+      {12, e.blobs},
+      {13, generation}
     ]
 
-    if :ets.update_element(table, key, fields), do: :ok, else: put(db, key, e)
+    if :ets.update_element(table, key, fields),
+      do: :ok,
+      else: :ets.insert(table, to_tuple(key, e, generation))
   end
 
   @doc """
@@ -370,22 +441,71 @@ defmodule Roux.Memo do
     :ok
   end
 
+  @doc false
+  @spec verify_generation(
+          Database.t(),
+          query_key(),
+          reference() | nil,
+          Revision.revision(),
+          Revision.durability() | nil
+        ) :: :ok
+  def verify_generation(%Database{dependencies: nil} = db, key, _generation, revision, durability) do
+    if durability,
+      do: update_verified(db, key, revision, durability),
+      else: update_verified(db, key, revision)
+  end
+
+  def verify_generation(%Database{memo_table: table}, key, generation, revision, durability) do
+    # Match the incarnation and update in the same ETS operation. A validator
+    # that raced a replacement must not advance the new entry's proof.
+    :ets.select_replace(table, [
+      {{literal_pattern(key), :"$1", :"$2", :"$3", :_, :"$4", :"$5", :"$6", :"$7", :"$8", :"$9",
+        :"$10", generation}, [{:"=:=", {:element, 1, :"$_"}, {:const, key}}],
+       [
+         {{{:const, key}, :"$1", :"$2", :"$3", revision, :"$4", durability || :"$5", :"$6", :"$7",
+           :"$8", :"$9", :"$10", {:const, generation}}}
+       ]}
+    ])
+
+    :ok
+  end
+
+  # Most keys bind the table key directly. Maps and match-specification atoms
+  # need a broader pattern, narrowed by the exact-key guard above.
+  defp literal_pattern(term) when is_map(term), do: :_
+
+  defp literal_pattern(term) when is_tuple(term),
+    do: term |> Tuple.to_list() |> Enum.map(&literal_pattern/1) |> List.to_tuple()
+
+  defp literal_pattern([head | tail]), do: [literal_pattern(head) | literal_pattern(tail)]
+
+  defp literal_pattern(term) when is_atom(term) do
+    if term == :_ or String.starts_with?(Atom.to_string(term), "$"), do: :_, else: term
+  end
+
+  defp literal_pattern(term), do: term
+
   @doc """
   Removes a memo entry. Called during GC. No-op if the key doesn't exist.
   """
   @spec delete(Database.t(), query_key()) :: :ok
-  def delete(%Database{memo_table: table}, key) do
-    :ets.delete(table, key)
-    :ok
+  def delete(%Database{memo_table: table} = db, key) do
+    Dependencies.mutate(db, :all, fn ->
+      Dependencies.forget(db, key)
+      :ets.delete(table, key)
+      :ok
+    end)
   end
 
   @doc """
   Clears all memo entries. Called on database reset.
   """
   @spec delete_all(Database.t()) :: :ok
-  def delete_all(%Database{memo_table: table}) do
-    :ets.delete_all_objects(table)
-    :ok
+  def delete_all(%Database{memo_table: table} = db) do
+    Dependencies.mutate(db, :all, fn ->
+      :ets.delete_all_objects(table)
+      Dependencies.clear(db)
+    end)
   end
 
   @doc """
@@ -444,12 +564,12 @@ defmodule Roux.Memo do
   def persisted(%Database{} = db, keep?, hold) when is_function(keep?, 2),
     do: persisted(db, fn key, durability, _persist -> keep?.(key, durability) end, hold)
 
-  def persisted(%Database{memo_table: table}, keep?, hold) when is_function(keep?, 3) do
+  def persisted(%Database{memo_table: table} = db, keep?, hold) when is_function(keep?, 3) do
     :ets.foldl(
       fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded, code,
-          persist, blobs},
+          persist, blobs, generation},
          acc ->
-        if keep?.(key, durability, persist) do
+        if keep?.(key, durability, persist) and Dependencies.persistable?(db, key, generation) do
           encoded =
             cond do
               encoded != nil -> encoded
@@ -478,7 +598,7 @@ defmodule Roux.Memo do
   Raises `ArgumentError` for anything that is not a persisted entry.
   """
   @spec restore_persisted(Database.t(), [persisted()]) :: :ok
-  def restore_persisted(%Database{memo_table: table}, entries) when is_list(entries) do
+  def restore_persisted(%Database{memo_table: table} = db, entries) when is_list(entries) do
     rows =
       Enum.map(entries, fn
         {key, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, blobs} =
@@ -490,14 +610,25 @@ defmodule Roux.Memo do
           persist = if is_binary(encoded), do: :inline, else: :blob
 
           {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, code,
-           persist, blobs}
+           persist, blobs, if(db.dependencies, do: make_ref())}
 
         other ->
           raise ArgumentError, "not a persisted memo entry: #{inspect(other, limit: 5)}"
       end)
 
-    :ets.insert(table, rows)
-    :ok
+    Dependencies.mutate(db, :all, fn ->
+      if db.dependencies do
+        for row <- rows do
+          Dependencies.publish(db, elem(row, 0), elem(row, 12), elem(row, 5), :restored, fn ->
+            :ets.insert(table, row)
+          end)
+        end
+      else
+        :ets.insert(table, rows)
+      end
+
+      :ok
+    end)
   end
 
   @doc "Whether `entry` has the shape of a persisted entry (`persisted/3`)."
@@ -530,7 +661,7 @@ defmodule Roux.Memo do
 
     tuple =
       {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, persist,
-       blobs}
+       blobs, nil}
 
     case to_entry(%{blob: store}, tuple) do
       {:ok, entry} -> {key, entry}
@@ -540,9 +671,9 @@ defmodule Roux.Memo do
 
   # -- Private helpers --
 
-  defp to_tuple(key, %Entry{} = e) do
+  defp to_tuple(key, %Entry{} = e, generation) do
     {key, e.value, e.hash, e.changed_at, e.verified_at, e.dependencies, e.durability,
-     e.output_entities, nil, e.code_version, e.persist, e.blobs}
+     e.output_entities, nil, e.code_version, e.persist, e.blobs, generation}
   end
 
   defp entry_pairs(db, tuple) do
@@ -555,7 +686,7 @@ defmodule Roux.Memo do
   defp to_entry(
          db,
          {_key, _value, hash, changed_at, verified_at, deps, durability, output_entities,
-          _encoded, code_version, persist, blobs} = tuple
+          _encoded, code_version, persist, blobs, _generation} = tuple
        ) do
     with {:ok, value} <- value_of(db, tuple) do
       {:ok,

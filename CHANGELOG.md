@@ -4,6 +4,10 @@
 
 ### Added
 
+- Opt-in reverse dependency tracking skips validation of unaffected queries.
+  Enable `reverse_dependencies: true` when opening a database or session.
+  It adds index memory and input-update work; restored entries validate once,
+  and databases with entity types retain ordinary validation.
 - Packed trace groups batch small cache records into indexed blobs. Records
   remain independently verifiable and readable without a session manifest;
   garbage collection retains and removes whole packs.

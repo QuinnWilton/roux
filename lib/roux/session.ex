@@ -67,15 +67,25 @@ defmodule Roux.Session do
       `store: :blob` values and code versions are kept;
     * `:force` — true to start cold, ignoring the manifest (it is still
       written on commit).
+    * `:reverse_dependencies` — opt into reverse dependency tracking
+      (`Roux.Database.new/1`). The index is rebuilt on restore, and restored
+      queries validate once before receiving a clean certificate.
   """
   @spec open(keyword()) :: t()
   def open(opts \\ []) do
     opts =
-      Keyword.validate!(opts, modules: [], languages: [], manifest: nil, blob: nil, force: false)
+      Keyword.validate!(opts,
+        modules: [],
+        languages: [],
+        manifest: nil,
+        blob: nil,
+        force: false,
+        reverse_dependencies: false
+      )
 
     blob = open_blob(Keyword.fetch!(opts, :blob))
     manifest = Keyword.fetch!(opts, :manifest)
-    db = Database.new(blob: blob)
+    db = Database.new(blob: blob, reverse_dependencies: opts[:reverse_dependencies])
 
     # A module that cannot be registered (`Roux.Query.FormatError`) is
     # a session that never opened: its database goes with it.

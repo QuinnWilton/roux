@@ -29,6 +29,7 @@ defmodule Roux.Runtime do
     Cancellation,
     Cycle,
     Database,
+    Dependencies,
     Entity,
     GC,
     Memo,
@@ -45,14 +46,16 @@ defmodule Roux.Runtime do
   @boundary_key {__MODULE__, :boundary}
 
   # Served values, per process: `{@values_key, memo_table, query_key} =>
-  # {changed_at, value}`. ETS copies a term out on every read, and a
+  # {changed_at, generation, value}`. ETS copies a term out on every read, and a
   # memoized structure (fact rows, syntax trees) is deep-copied in full;
   # a hot query graph reads the same large values thousands of times per
   # revision, so the first read caches the value on this process's heap
   # and later reads hand back the same term. `changed_at` is the guard:
   # a key executes at most once per revision and takes a new `changed_at`
   # whenever its value changes, so an equal `changed_at` is an equal
-  # value. The table id keeps caches of different databases apart.
+  # value. Reverse tracking also guards the exact memo incarnation: a manual
+  # replacement can change a value without advancing changed_at. The table id
+  # keeps caches of different databases apart.
   @values_key {__MODULE__, :value}
 
   # -- Public API --
@@ -96,22 +99,19 @@ defmodule Roux.Runtime do
     current_rev = Revision.current(db.revision)
 
     result =
-      case Memo.verification_state(db, query_key) do
-        {:ok, ^current_rev, _durability} ->
+      cond do
+        Validation.current?(db, query_key, current_rev) ->
           serve(db, query_name, key, query_key, current_rev, query_fun)
 
-        {:ok, _verified_at, _durability} ->
-          case Validation.validate(db, query_key, &ensure_up_to_date/2) do
-            :valid ->
-              serve(db, query_name, key, query_key, current_rev, query_fun)
-
-            :stale ->
-              compute(db, query_name, key, query_key, current_rev, query_fun, :replace)
-          end
-
-        :miss ->
+        Memo.verification_state(db, query_key) == :miss ->
           Telemetry.cache_miss(Database.id(db), query_name, key, current_rev)
           compute(db, query_name, key, query_key, current_rev, query_fun, :new)
+
+        true ->
+          case Validation.validate(db, query_key, &ensure_up_to_date/2) do
+            :valid -> serve(db, query_name, key, query_key, current_rev, query_fun)
+            :stale -> compute(db, query_name, key, query_key, current_rev, query_fun, :replace)
+          end
       end
 
     result
@@ -220,7 +220,7 @@ defmodule Roux.Runtime do
   defp current_value(db, {name, key} = query_key) do
     revision = Revision.current(db.revision)
 
-    with {:ok, ^revision, _} <- Memo.verification_state(db, query_key),
+    with true <- Validation.current?(db, query_key, revision),
          {:ok, changed, value} <- served_value(db, query_key) do
       Telemetry.cache_hit(Database.id(db), name, key, revision, changed, revision)
       {:ok, value}
@@ -695,21 +695,19 @@ defmodule Roux.Runtime do
 
     # Shared dependencies occur once per incoming edge. As in execute/4,
     # an entry already checked this revision needs no validation span.
-    case Memo.verification_state(db, query_key) do
-      {:ok, ^current_rev, _durability} ->
-        :ok
+    if Validation.current?(db, query_key, current_rev) do
+      :ok
+    else
+      case guarded?(db, query_key) do
+        true ->
+          re_execute(db, query_key)
 
-      _not_verified ->
-        case guarded?(db, query_key) do
-          true ->
-            re_execute(db, query_key)
-
-          false ->
-            case Validation.validate(db, query_key, &ensure_up_to_date/2) do
-              :valid -> :ok
-              :stale -> re_execute(db, query_key)
-            end
-        end
+        false ->
+          case Validation.validate(db, query_key, &ensure_up_to_date/2) do
+            :valid -> :ok
+            :stale -> re_execute(db, query_key)
+          end
+      end
     end
   end
 
@@ -792,6 +790,10 @@ defmodule Roux.Runtime do
       parent_stack: parent_stack
     } = job
 
+    dependency_token = Dependencies.snapshot(db)
+    current_rev = if db.dependencies, do: Revision.current(db.revision), else: current_rev
+    prior_proven? = Dependencies.status(db, query_key) != :stale
+
     # What the entry being replaced says, read under the claim: no other
     # computation of this key can replace it until the claim is released,
     # so it is still the stored entry when the new one is written. Its
@@ -832,7 +834,7 @@ defmodule Roux.Runtime do
       hash = :erlang.phash2(value)
 
       # Early cutoff: if value unchanged, keep the old changed_at.
-      unchanged? = unchanged?(db, query_key, prior, hash, value)
+      unchanged? = prior_proven? and unchanged?(db, query_key, prior, hash, value)
 
       changed_at =
         if unchanged? do
@@ -859,13 +861,12 @@ defmodule Roux.Runtime do
       # one in would cost a copy of it, and would throw away a restored
       # value's encoding, which the next manifest would then encode again.
       # Unless the stored value is what was missing.
-      if unchanged? and mode != :reload,
-        do: Memo.put_unchanged(db, query_key, entry),
-        else: Memo.put(db, query_key, entry)
+      generation =
+        Memo.publish(db, query_key, entry, unchanged? and mode != :reload, dependency_token)
 
       Database.note_write(db)
 
-      cache_value(db, query_key, changed_at, value)
+      cache_value(db, query_key, changed_at, generation, value)
 
       # Update entity refcounts for the output entity diff (D15).
       old_entities = if prior, do: prior.output_entities, else: []
@@ -1124,15 +1125,16 @@ defmodule Roux.Runtime do
 
   defp served_value(%Database{memo_table: table} = db, query_key) do
     {:ok, changed_at} = Memo.changed_at(db, query_key)
+    generation = Memo.generation(db, query_key)
 
     case Process.get({@values_key, table, query_key}) do
-      {^changed_at, value} ->
+      {^changed_at, ^generation, value} ->
         {:ok, changed_at, value}
 
       _ ->
-        case Memo.fetch_value(db, query_key) do
-          {:ok, value} ->
-            cache_value(db, query_key, changed_at, value)
+        case Memo.fetch_versioned_value(db, query_key) do
+          {:ok, changed_at, generation, value} ->
+            cache_value(db, query_key, changed_at, generation, value)
             {:ok, changed_at, value}
 
           _missing ->
@@ -1141,8 +1143,12 @@ defmodule Roux.Runtime do
     end
   end
 
-  defp cache_value(%Database{memo_table: table}, query_key, changed_at, value) do
-    Process.put({@values_key, table, query_key}, {changed_at, value})
+  defp cache_value(%Database{memo_table: table}, query_key, changed_at, generation, value) do
+    Process.put(
+      {@values_key, table, query_key},
+      {changed_at, generation, value}
+    )
+
     :ok
   end
 
