@@ -125,6 +125,7 @@ defmodule Roux.BoundaryTest do
           under(Roux.Telemetry),
           under(Roux.Cycle),
           under(Roux.Runtime.Context),
+          under(Roux.Runtime.Scope),
           under(Roux.Revision),
           under(Roux.Cancellation),
           under(Roux.GC),

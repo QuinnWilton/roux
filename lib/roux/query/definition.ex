@@ -14,6 +14,9 @@ defmodule Roux.Query.Definition do
   `store` and `transient` are how a manifest keeps the query's entries
   (see `Roux.Query`): `transient` names the function the `defquery`
   generated from its `transient:` predicate.
+
+  `opts[:boundary]` names the generated timeout and fallback functions. The
+  runtime applies this policy to validation and execution under one claim.
   """
 
   @type code :: [module()] | {module(), atom(), [term()]} | nil

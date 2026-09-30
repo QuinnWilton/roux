@@ -39,8 +39,10 @@ defmodule Roux.Runtime do
 
   alias Roux.Memo.Entry
   alias Roux.Runtime.Context
+  alias Roux.Runtime.Scope
 
   @context_key {__MODULE__, :context}
+  @boundary_key {__MODULE__, :boundary}
 
   # Served values, per process: `{@values_key, memo_table, query_key} =>
   # {changed_at, value}`. ETS copies a term out on every read, and a
@@ -76,6 +78,21 @@ defmodule Roux.Runtime do
     # execute/4 calls (test closures, ad-hoc queries).
     Process.put({__MODULE__, :query_fun, query_name}, query_fun)
 
+    result =
+      case Database.query_definition(db, query_name) do
+        %{boundary: {module, timeout, fallback}} ->
+          bounded(db, query_name, key, query_fun, {module, timeout, fallback})
+
+        _ ->
+          resolve(db, query_name, key, query_fun)
+      end
+
+    propagate_durability(db, query_key)
+    result
+  end
+
+  defp resolve(db, query_name, key, query_fun) do
+    query_key = {query_name, key}
     current_rev = Revision.current(db.revision)
 
     result =
@@ -97,10 +114,112 @@ defmodule Roux.Runtime do
           compute(db, query_name, key, query_key, current_rev, query_fun, :new)
       end
 
-    # Propagate child's durability to parent context when nested.
-    propagate_durability(db, query_key)
-
     result
+  end
+
+  # Ownership spans validation as well as computation: a timeout is one shared
+  # outcome, never a second caller overwriting an already-published success.
+  defp bounded(db, name, key, fun, policy) do
+    query_key = {name, key}
+
+    stack =
+      case get_context() do
+        nil -> []
+        ctx -> ctx.query_stack
+      end
+
+    Cycle.check!(%Context{db: db, query_stack: stack}, query_key)
+
+    case current_value(db, query_key) do
+      {:ok, value} ->
+        value
+
+      :missing ->
+        case claim_dedup(db, query_key) do
+          :wait ->
+            bounded(db, name, key, fun, policy)
+
+          :claimed ->
+            Cancellation.register_task(db, query_key, self())
+
+            try do
+              bounded_owned(db, name, key, fun, policy, stack)
+            after
+              Cancellation.unregister_task(db, query_key)
+              release_dedup(db, query_key)
+            end
+        end
+    end
+  end
+
+  defp bounded_owned(db, name, key, fun, {module, timeout_fun, fallback}, stack) do
+    query_key = {name, key}
+
+    case current_value(db, query_key) do
+      {:ok, value} ->
+        value
+
+      :missing ->
+        timeout = apply(module, timeout_fun, [])
+        functions = for {{__MODULE__, :query_fun, _} = k, v} <- Process.get(), do: {k, v}
+
+        Scope.run(db, timeout, fn ->
+          Enum.each(functions, fn {k, v} -> Process.put(k, v) end)
+          put_context(%Context{db: db, query_stack: stack})
+          Process.put(@boundary_key, {db.memo_table, query_key})
+          resolve(db, name, key, fun)
+        end)
+        |> bounded_result(db, name, key, module, fallback)
+    end
+  end
+
+  defp bounded_result({:ok, value}, _db, _name, _key, _module, _fallback), do: value
+
+  defp bounded_result(:timeout, db, name, key, module, fallback) do
+    query_key = {name, key}
+    # The worker may have committed just before the deadline. Never replace a
+    # value already established at this revision, even if its blob is missing.
+    case current_value(db, query_key) do
+      {:ok, value} ->
+        value
+
+      :missing ->
+        revision = Revision.current(db.revision)
+
+        case Memo.verification_state(db, query_key) do
+          {:ok, ^revision, _} ->
+            exit({:timeout, query_key})
+
+          _ ->
+            old = Process.put(@boundary_key, {db.memo_table, query_key})
+
+            try do
+              compute(
+                db,
+                name,
+                key,
+                query_key,
+                revision,
+                fn db, key -> apply(module, fallback, [db, key]) end,
+                :replace
+              )
+            after
+              if old, do: Process.put(@boundary_key, old), else: Process.delete(@boundary_key)
+            end
+        end
+    end
+  end
+
+  defp current_value(db, {name, key} = query_key) do
+    revision = Revision.current(db.revision)
+
+    with {:ok, ^revision, _} <- Memo.verification_state(db, query_key),
+         {:ok, changed, value} <- served_value(db, query_key) do
+      Telemetry.cache_hit(Database.id(db), name, key, revision, changed, revision)
+      {:ok, value}
+    else
+      _ -> :missing
+    end
   end
 
   # A valid entry's value, or — when its value was held by a blob that is
@@ -368,9 +487,13 @@ defmodule Roux.Runtime do
   end
 
   defp start_worker({item, index}, caller, ref, fun) do
+    scope = Scope.current()
+
     {_pid, monitor} =
       :erlang.spawn_opt(
         fn ->
+          Scope.join(scope)
+
           result =
             try do
               {:ok, fun.(item)}
@@ -570,12 +693,24 @@ defmodule Roux.Runtime do
         :ok
 
       _not_verified ->
-        case Validation.validate(db, query_key, &ensure_up_to_date/2) do
-          :valid -> :ok
-          :stale -> re_execute(db, query_key)
+        case guarded?(db, query_key) do
+          true ->
+            re_execute(db, query_key)
+
+          false ->
+            case Validation.validate(db, query_key, &ensure_up_to_date/2) do
+              :valid -> :ok
+              :stale -> re_execute(db, query_key)
+            end
         end
     end
   end
+
+  defp guarded?(db, {name, _key}) when is_atom(name) do
+    match?(%{boundary: {_, _, _}}, Database.query_definition(db, name))
+  end
+
+  defp guarded?(_db, _key), do: false
 
   defp re_execute(db, {query_name, key}) do
     case Process.get({__MODULE__, :query_fun, query_name}) do
@@ -613,6 +748,14 @@ defmodule Roux.Runtime do
       parent_stack: parent_stack
     }
 
+    if Process.get(@boundary_key) == {db.memo_table, query_key} do
+      do_compute(job)
+    else
+      compute_claimed(job)
+    end
+  end
+
+  defp compute_claimed(%{db: db, query_key: query_key} = job) do
     case claim_dedup(db, query_key) do
       :claimed ->
         Cancellation.register_task(db, query_key, self())
@@ -626,7 +769,7 @@ defmodule Roux.Runtime do
 
       :wait ->
         # Another process computed it. Re-check the memo.
-        execute(db, query_name, key, query_fun)
+        execute(db, job.query_name, job.key, job.query_fun)
     end
   end
 

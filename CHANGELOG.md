@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Query deadlines cover dependency validation, execution and missing-value
+  recovery. Concurrent callers share one attempt; a timeout cancels its nested
+  workers and can produce a transient fallback for retry in the next session.
+
 ### Fixed
 
 - Entity fields use exact equality when checking for changes, so numerically
@@ -11,6 +17,8 @@
 
 - Concurrent requests share cold code-closure and digest computations. Code
   walks also cache the OTP root, avoiding repeated calls to the code server.
+- Query definition format is now 2. Recompile query modules against this release.
+
 - Validation skips recursive checks for input leaves and shared queries already
   checked in the current revision. Input changes and deletions still invalidate
   their readers, while graphs with many shared dependencies do less work.

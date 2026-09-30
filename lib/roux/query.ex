@@ -117,7 +117,7 @@ defmodule Roux.Query do
   # structs, `__roux_queries__/0`, and the calls the query functions
   # make into roux. Bump it with any change to that shape, so modules
   # compiled against the old one are recompiled before they run.
-  @format 1
+  @format 2
 
   @doc """
   The definition format of this roux (see "Definition format").
@@ -180,6 +180,13 @@ defmodule Roux.Query do
     * `:version` — (optional) a term mixed into the query's code version
     * `:store` — (optional) `:inline`, `:blob` or `:none` (see "Persistence")
     * `:transient` — (optional) a predicate over the value (see "Persistence")
+    * `:timeout` — milliseconds for the entire demand, including validation,
+      or a zero-arity function returning milliseconds. Concurrent callers share
+      one attempt. Work runs in an isolated process, including nested fan-out.
+    * `:on_timeout` — a `(db, key)` function computing a fallback value. Its
+      reads become dependencies. Pair with `:transient` to retry next session.
+      Recovery of a value already verified this revision raises on timeout:
+      replacing it could leave already-verified consumers with stale results.
     * `:do` — the query body block
 
   ## Example
@@ -207,6 +214,10 @@ defmodule Roux.Query do
     {version, opts} = Keyword.pop(opts, :version)
     {store, opts} = Keyword.pop(opts, :store, :inline)
     {transient, opts} = Keyword.pop(opts, :transient)
+    {timeout, opts} = Keyword.pop(opts, :timeout)
+    {on_timeout, opts} = Keyword.pop(opts, :on_timeout)
+
+    {boundary_opts, boundary_ast} = boundary(name, timeout, on_timeout)
 
     unless store in [:inline, :blob, :none] do
       raise ArgumentError,
@@ -238,7 +249,7 @@ defmodule Roux.Query do
         name: unquote(name),
         module: __MODULE__,
         function: unquote(name),
-        opts: unquote(opts),
+        opts: unquote(opts) ++ unquote(boundary_opts),
         code: unquote(code),
         version: unquote(version),
         store: unquote(store),
@@ -246,6 +257,7 @@ defmodule Roux.Query do
       }
 
       unquote(transient_ast)
+      unquote(boundary_ast)
 
       unquote(spec_ast)
 
@@ -274,6 +286,34 @@ defmodule Roux.Query do
     end
   end
 
+  defp boundary(_name, nil, nil), do: {[], nil}
+
+  defp boundary(name, timeout, on_timeout) when timeout == nil or on_timeout == nil do
+    raise ArgumentError,
+          "defquery #{inspect(name)}: :timeout and :on_timeout are required together"
+  end
+
+  defp boundary(name, timeout, on_timeout) do
+    timeout_fun = :"__roux_boundary_#{name}__"
+    fallback_fun = :"__roux_timeout_#{name}__"
+    opts = quote do: [boundary: {__MODULE__, unquote(timeout_fun), unquote(fallback_fun)}]
+
+    body =
+      quote do
+        @doc false
+        def unquote(timeout_fun)(), do: Roux.Query.__timeout__(unquote(timeout))
+
+        @doc false
+        def unquote(fallback_fun)(db, key) do
+          Roux.Query.__run__(@roux_around, db, unquote(name), key, fn ->
+            unquote(on_timeout).(db, key)
+          end)
+        end
+      end
+
+    {opts, body}
+  end
+
   @doc false
   # Runs a query body, inside the module's `around:` hook when it has one.
   @spec __run__({module(), atom()} | nil, Roux.Database.t(), atom(), term(), (-> result)) ::
@@ -283,6 +323,12 @@ defmodule Roux.Query do
 
   def __run__({module, function}, db, name, key, body),
     do: apply(module, function, [%{db: db, query: name, key: key}, body])
+
+  @doc false
+  @spec __timeout__(timeout() | (-> timeout())) :: timeout()
+  def __timeout__(fun) when is_function(fun, 0), do: __timeout__(fun.())
+  def __timeout__(ms) when ms == :infinity or (is_integer(ms) and ms >= 0), do: ms
+  def __timeout__(other), do: raise(ArgumentError, "invalid query timeout: #{inspect(other)}")
 
   @doc """
   The code version of `definition` (see "Code versions"), given the

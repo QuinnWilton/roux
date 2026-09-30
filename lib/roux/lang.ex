@@ -200,7 +200,8 @@ defmodule Roux.Lang do
         function: defn.function,
         code_version: Query.code_version(defn, code, db.blob),
         store: defn.store,
-        transient: defn.transient
+        transient: defn.transient,
+        boundary: Keyword.get(defn.opts, :boundary)
       })
     end)
 
