@@ -18,6 +18,10 @@ defmodule Roux.Blob.Trace.Pack do
   Worker processes do not inherit a group. Nested groups restore their caller's
   group on return.
 
+  `write: :loose` reads the group's packs but writes ordinary traces. Use it
+  for isolated lookups that cannot amortize a batch. A nested call to the
+  active group keeps that group's write policy and size limits.
+
   Collection operates on whole packs. Using one record retains its neighbors;
   `keep:` bounds lookup history outside the refresh window, but reclaiming
   individual obsolete records requires repacking. Choose bounded groups, such
@@ -34,7 +38,12 @@ defmodule Roux.Blob.Trace.Pack do
   @doc "Runs `fun` with bounded packed writes in `group`, returning its result."
   @spec with_group(Blob.t(), term(), (-> result), keyword()) :: result when result: var
   def with_group(%Blob{} = store, group, fun, opts \\ []) when is_function(fun, 0) do
-    limits = Keyword.validate!(opts, @defaults)
+    opts = Keyword.validate!(opts, @defaults ++ [write: :packed])
+    {write, limits} = Keyword.pop!(opts, :write)
+
+    unless write in [:packed, :loose] do
+      raise ArgumentError, "pack write policy must be :packed or :loose"
+    end
 
     unless Enum.all?(limits, fn {_key, value} -> is_integer(value) and value > 0 end) do
       raise ArgumentError, "pack size limits must be positive integers"
@@ -52,6 +61,7 @@ defmodule Roux.Blob.Trace.Pack do
 
       state = %{
         store: store,
+        write: write,
         root: store.root,
         group: group,
         dir: Path.join([store.root, "traces", "pack-v1-" <> Blob.term_digest(group)]),
@@ -79,6 +89,9 @@ defmodule Roux.Blob.Trace.Pack do
   def put(%Blob{} = store, name, deps, value, opts \\ []) do
     case context(store) do
       nil ->
+        Trace.put(store, name, deps, value, opts)
+
+      %{write: :loose} ->
         Trace.put(store, name, deps, value, opts)
 
       state ->

@@ -58,6 +58,32 @@ defmodule Roux.TracePackTest do
     assert values(store, :legacy) == [:old]
   end
 
+  test "isolated lookups reuse packs without creating a pack per write", %{store: store} do
+    Pack.with_group(store, :module, fn -> Pack.put(store, :packed, [], :packed) end)
+
+    Pack.with_group(
+      store,
+      :module,
+      fn ->
+        assert values(store, :packed) == [:packed]
+        Pack.put(store, :loose, [], :loose)
+      end,
+      write: :loose
+    )
+
+    assert length(indexes(store)) == 1
+    assert [%{value: :loose}] = Trace.fetch(store, :loose)
+
+    Pack.with_group(store, :module, fn ->
+      Pack.with_group(store, :module, fn -> Pack.put(store, :nested, [], :nested) end,
+        write: :loose
+      )
+    end)
+
+    assert length(indexes(store)) == 2
+    assert Trace.fetch(store, :nested) == []
+  end
+
   test "lookups see buffered writes and nesting restores the outer group", %{store: store} do
     Pack.with_group(store, :outer, fn ->
       Pack.put(store, :a, [], :outer)
