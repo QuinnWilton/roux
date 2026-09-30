@@ -310,7 +310,7 @@ defmodule Roux.Code do
     MapSet.member?(modules, mod)
   end
 
-  defp otp_root, do: List.to_string(:code.root_dir()) <> "/"
+  defp otp_root, do: memo(:otp_root, fn -> List.to_string(:code.root_dir()) <> "/" end)
 
   # -- Digest --
 
@@ -833,6 +833,8 @@ defmodule Roux.Code do
 
   # -- Helpers --
 
+  @computing {__MODULE__, :computing}
+
   defp hash(parts) do
     parts
     |> Enum.reduce(:crypto.hash_init(:sha256), fn part, hash ->
@@ -843,8 +845,38 @@ defmodule Roux.Code do
   end
 
   defp memo(key, compute) do
-    key = {__MODULE__, key}
+    qualified = {__MODULE__, key}
 
+    case :persistent_term.get(qualified, :none) do
+      :none ->
+        if is_tuple(key) and elem(key, 0) in [:closure, :digest] and
+             not Process.get(@computing, false) do
+          # Concurrent graph opens share the same cold walk. The lock is local
+          # to this node, is released on owner exit, and never covers a hit.
+          :global.trans({qualified, self()}, fn -> owned(qualified, compute) end, [node()])
+        else
+          fill(qualified, compute)
+        end
+
+      value ->
+        value
+    end
+  end
+
+  defp owned(key, compute) do
+    # An exclusion predicate may demand another closure. Nested computations
+    # do not take a second lock, so concurrent predicates cannot form a cycle.
+    Process.put(@computing, true)
+
+    try do
+      fill(key, compute)
+    after
+      Process.delete(@computing)
+    end
+  end
+
+  defp fill(key, compute) do
+    # Another caller may have completed the value while this one waited.
     case :persistent_term.get(key, :none) do
       :none ->
         value = compute.()

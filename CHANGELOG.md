@@ -9,6 +9,8 @@
 
 ### Changed
 
+- Concurrent requests share cold code-closure and digest computations. Code
+  walks also cache the OTP root, avoiding repeated calls to the code server.
 - Validation skips recursive checks for input leaves and shared queries already
   checked in the current revision. Input changes and deletions still invalidate
   their readers, while graphs with many shared dependencies do less work.
