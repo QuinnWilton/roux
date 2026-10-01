@@ -6,6 +6,7 @@ defmodule Roux.Lang.ManifestTest do
   alias Roux.{Blob, Database, Input, Intern, Memo, Revision, Runtime}
   alias Roux.Lang.Manifest
   alias Roux.Memo.Entry
+  alias Roux.Memo.Value
   alias Roux.Test.PersistQueries
 
   @moduletag :tmp_dir
@@ -746,16 +747,18 @@ defmodule Roux.Lang.ManifestTest do
     defp held(path) do
       {:ok, data} = Manifest.load(path)
 
-      for {{:p_blob, key}, _, _, _, _, _, _, {:blob, digest}, _, _} <- data.memo_entries,
+      for {{:p_blob, key}, _, _, _, _, _, _, handle, _, _} <- data.memo_entries,
+          not is_binary(handle),
           into: %{},
-          do: {key, digest}
+          do: {key, handle}
     end
 
     test "a :blob query's value is in the store, and the manifest holds its digest",
          %{store: store, path: path} do
       held = held(path)
       assert Map.keys(held) == ["a", "b"]
-      assert {:ok, %{rows: rows}} = Blob.get_term(store, held["a"])
+      assert {:ok, bytes} = Value.load_bytes(store, held["a"])
+      assert {:ok, %{rows: rows}} = Blob.decode(bytes)
       assert rows == Enum.to_list(1..100)
 
       {:ok, data} = Manifest.load(path)
@@ -779,7 +782,7 @@ defmodule Roux.Lang.ManifestTest do
 
       try do
         assert {:ok, digest} = Memo.held_digest(db, {:p_blob, "a"})
-        assert digest == held(path)["a"]
+        assert digest == Value.logical_digest(held(path)["a"])
         assert %{rows: rows} = PersistQueries.p_blob(db, "a")
         assert length(rows) == 100
       after
@@ -791,7 +794,7 @@ defmodule Roux.Lang.ManifestTest do
       store: store,
       path: path
     } do
-      digest = held(path)["a"]
+      [digest] = Value.roots(held(path)["a"])
       File.rm!(Blob.path(store, digest))
       db = restored_with(store, path)
       handler = {__MODULE__, make_ref()}
@@ -815,21 +818,23 @@ defmodule Roux.Lang.ManifestTest do
 
         # Served from memory now, and written back to the store next time.
         :ok = Manifest.write(db, %{}, path)
-        assert Blob.member?(store, digest)
+        assert {:ok, bytes} = Value.load_bytes(store, held(path)["a"])
+        assert {:ok, %{rows: _}} = Blob.decode(bytes)
       after
         :telemetry.detach(handler)
         Database.shutdown(db)
       end
     end
 
-    test "early cutoff compares digests, putting a missing blob back", %{
+    test "early cutoff compares logical digests after a physical blob disappears", %{
       store: store,
       path: path
     } do
-      digest = held(path)["b"]
+      [digest] = Value.roots(held(path)["b"])
       db = restored_with(store, path)
 
       try do
+        {:ok, before} = Memo.changed_at(db, {:p_blob, "b"})
         File.rm!(Blob.path(store, digest))
         # Another key moves the revision; "b" is set to what it was.
         Input.set(db, :psrc, "b", %{rows: [2]})
@@ -838,8 +843,11 @@ defmodule Roux.Lang.ManifestTest do
 
         assert %{rows: [1]} = PersistQueries.p_blob(db, "b")
         assert Roux.QueryLog.cutoffs(log, :p_blob) == ["b"]
-        assert {:ok, ^digest} = Memo.held_digest(db, {:p_blob, "b"})
-        assert Blob.member?(store, digest)
+        assert %{rows: [1]} = PersistQueries.p_blob(db, "b")
+        assert {:ok, ^before} = Memo.changed_at(db, {:p_blob, "b"})
+        Manifest.write(db, %{}, path)
+        assert {:ok, bytes} = Value.load_bytes(store, held(path)["b"])
+        assert {:ok, %{rows: [1]}} = Blob.decode(bytes)
         Roux.QueryLog.stop(log)
       after
         Database.shutdown(db)
@@ -850,7 +858,7 @@ defmodule Roux.Lang.ManifestTest do
       store: store,
       path: path
     } do
-      digests = path |> held() |> Map.values()
+      digests = path |> held() |> Map.values() |> Enum.flat_map(&Value.roots/1) |> Enum.uniq()
       old = System.os_time(:second) - 3 * 24 * 60 * 60
       for digest <- digests, do: File.touch!(Blob.path(store, digest), old)
 
@@ -956,13 +964,16 @@ defmodule Roux.Lang.ManifestTest do
     @header_size 16
 
     test "the manifest it writes loads", %{path: path} do
-      assert {:ok, %{vsn: 6}} = Manifest.load(path)
+      assert {:ok, %{vsn: 7}} = Manifest.load(path)
     end
 
-    test "format 5 remains readable", %{path: path, bytes: bytes} do
-      <<"ROUXMNFT", 6::32, rest::binary>> = bytes
-      File.write!(path, ["ROUXMNFT", <<5::32>>, rest])
-      assert {:ok, %{vsn: 5}} = Manifest.load(path)
+    test "formats 5 and 6 remain readable", %{path: path, bytes: bytes} do
+      <<"ROUXMNFT", 7::32, rest::binary>> = bytes
+
+      for format <- [5, 6] do
+        File.write!(path, ["ROUXMNFT", <<format::32>>, rest])
+        assert {:ok, %{vsn: ^format}} = Manifest.load(path)
+      end
     end
 
     test "refuses a manifest with any payload byte changed", %{path: path, bytes: bytes} do
@@ -991,14 +1002,14 @@ defmodule Roux.Lang.ManifestTest do
     end
 
     test "refuses another format, even with a good checksum", %{path: path, bytes: bytes} do
-      <<magic::binary-size(8), 6::32, rest::binary>> = bytes
+      <<magic::binary-size(8), 7::32, rest::binary>> = bytes
 
-      for format <- [3, 4, 7] do
+      for format <- [3, 4, 8] do
         File.write!(path, [magic, <<format::32>>, rest])
         assert Manifest.load(path) == :error
       end
 
-      File.write!(path, ["ROUXMNFX", <<6::32>>, rest])
+      File.write!(path, ["ROUXMNFX", <<7::32>>, rest])
       assert Manifest.load(path) == :error
     end
 
@@ -1019,7 +1030,7 @@ defmodule Roux.Lang.ManifestTest do
             %{good | revision: %{counter: -1, high: 0, medium: 0, low: 0}}
           ] do
         payload = :erlang.term_to_binary(payload)
-        File.write!(path, ["ROUXMNFT", <<6::32, :erlang.crc32(payload)::32>>, payload])
+        File.write!(path, ["ROUXMNFT", <<7::32, :erlang.crc32(payload)::32>>, payload])
         assert Manifest.load(path) == :error, "read #{inspect(payload, limit: 3)}"
       end
     end

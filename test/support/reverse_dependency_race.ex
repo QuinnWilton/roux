@@ -65,7 +65,7 @@ defmodule Roux.Test.ReverseDependencyRace do
           dedup: :set,
           waiters: :duplicate_bag,
           entity_registry: :set,
-          dependency_edges: :bag,
+          dependency_edges: :duplicate_bag,
           dependency_nodes: :set,
           dependency_dirty: :set,
           dependency_writers: :set

@@ -180,6 +180,12 @@ defmodule Roux.Query do
     * `:version` — (optional) a term mixed into the query's code version
     * `:store` — (optional) `:inline`, `:blob` or `:none` (see "Persistence")
     * `:transient` — (optional) a predicate over the value (see "Persistence")
+    * `:revalidate` — `:dependencies` (the default) validates the memo's previous
+      reads. `:execute` runs the body whenever its memo needs validation. Use
+      this for bodies with their own cheap, tracked cache check: they can replace
+      a large dependency graph with the reads proving a cached result. Clean
+      hits still skip execution; equality, deadlines and publication guards
+      remain the same.
     * `:timeout` — milliseconds for the entire demand, including validation,
       or a zero-arity function returning milliseconds. Concurrent callers share
       one attempt. Work runs in an isolated process, including nested fan-out.
@@ -232,6 +238,11 @@ defmodule Roux.Query do
       raise ArgumentError,
             "defquery #{inspect(name)}: :store must be :inline, :blob or :none, " <>
               "got: #{Macro.to_string(store)}"
+    end
+
+    unless Keyword.get(opts, :revalidate, :dependencies) in [:dependencies, :execute] do
+      raise ArgumentError,
+            "defquery #{inspect(name)}: :revalidate must be :dependencies or :execute"
     end
 
     # The predicate is code, not data: it becomes a function of the

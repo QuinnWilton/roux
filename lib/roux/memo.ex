@@ -22,6 +22,10 @@ defmodule Roux.Memo do
   The encoding also goes back out unchanged: `persisted/2` hands a
   still-encoded value to the next manifest without encoding it again.
 
+  Live values keep their first persistence encoding beside the decoded value.
+  Later checkpoints reuse those bytes; reads still return the decoded value.
+  Replacement clears the encoding, while equal-value recomputation preserves it.
+
   Nothing writes a decoded value back into the table. Doing that safely
   would need a compare-and-swap against a concurrent `put/3` of a newer
   entry for the same key, and a lost race would pair the newer entry's
@@ -31,8 +35,8 @@ defmodule Roux.Memo do
   ## Values held by digest
 
   An entry of a `store: :blob` query (`Roux.Query`) restored from a
-  manifest holds `{:blob, digest}` instead of an encoding: its value is
-  in the database's `Roux.Blob` store (`Roux.Database.new/1`'s `blob:`),
+  manifest holds a loose `{:blob, digest}` or packed-record locator: its
+  value is in the database's `Roux.Blob` store (`Roux.Database.new/1`'s `blob:`),
   read from there by the first read that needs it. A value whose blob is
   gone — collected, or no store to read it from — reads as absent:
   `get/2` misses it, and `fetch_value/2` says so, for a caller that
@@ -41,6 +45,7 @@ defmodule Roux.Memo do
 
   alias Roux.{Blob, Database, Dependencies}
   alias Roux.Memo.Entry
+  alias Roux.Memo.Value
   alias Roux.Revision
 
   @type query_key :: {query_name :: atom(), key :: term()} | {:input, atom(), term()}
@@ -61,10 +66,20 @@ defmodule Roux.Memo do
           | {:parallel, pos_integer(), [query_key()]}
 
   @typedoc """
-  A value as a manifest holds it: in the external term format, or by the
-  digest of its blob (`{:blob, digest}`, a `store: :blob` query's).
+  A value as a manifest holds it: inline ETF, a loose blob digest, or a
+  packed record's logical digest and physical location.
   """
-  @type encoded :: binary() | {:blob, Blob.digest()}
+  @type encoded ::
+          binary()
+          | {:blob, Blob.digest()}
+          | {:packed, Blob.digest(), Blob.digest(), non_neg_integer(), pos_integer()}
+
+  @typedoc false
+  @type encoding_cache :: {:inline, binary()} | {:term, Blob.digest(), binary()}
+
+  @typep publisher ::
+           (encoding_cache() | nil, encoded() | nil ->
+              encoded() | {:pending, Blob.digest()} | :missing)
 
   @typedoc """
   An entry as a manifest persists it: every field of `Roux.Memo.Entry`
@@ -72,10 +87,13 @@ defmodule Roux.Memo do
   `persisted/3`.
   """
   @type persisted ::
-          {query_key(), hash :: integer(), changed_at :: Revision.revision(),
-           verified_at :: Revision.revision(), [dependency()], Revision.durability(),
-           output_entities :: [{module(), term()}], encoded(), code_version :: binary() | nil,
-           blobs :: [Blob.digest()]}
+          persisted_row(encoded())
+
+  @typep persisted_row(value) ::
+           {query_key(), hash :: integer(), changed_at :: Revision.revision(),
+            verified_at :: Revision.revision(), [dependency()], Revision.durability(),
+            output_entities :: [{module(), term()}], value, code_version :: binary() | nil,
+            blobs :: [Blob.digest()]}
 
   # -- ETS tuple layout --
   #
@@ -86,12 +104,12 @@ defmodule Roux.Memo do
   #
   # `encoded` is nil when `value` holds the entry's value, and — when the
   # entry was restored and has not been replaced since — the value in the
-  # external term format, or `{:blob, digest}`; `value` is then nil and
-  # means nothing. Only `put/3` (nil) and `restore_persisted/2` (an
-  # encoding) write position 9, each together with position 2 in one
-  # insert; `put_unchanged/3` and `update_verified` leave both alone. So
-  # the two never disagree. `blobs` are the digests the entry's value
-  # names (`Roux.Runtime.hold/1`), which a manifest keeps alive.
+  # external term format, a loose blob or packed locator; `value` is then nil and
+  # means nothing. A live value can also hold {:live, encoding, receipt}:
+  # cached bytes and an optional locator in db.blob. Cache writes compare the
+  # exact incarnation (or input value); replacement resets it atomically with
+  # the value. Equal-value updates leave both alone. `blobs` are the digests
+  # the entry's value names (`Roux.Runtime.hold/1`), kept alive by the manifest.
 
   # Level 1 is a fifth of the default level's encode time for a fifth
   # more bytes. Against no compression, it takes twice as long to encode
@@ -145,16 +163,54 @@ defmodule Roux.Memo do
   end
 
   @doc """
-  The digest an entry's value is held by, when it is held by one (a
-  restored `store: :blob` entry not replaced since): `{:ok, digest}`, or
-  `:none`. Read without the value.
+  The logical digest of a restored `store: :blob` value: `{:ok, digest}`,
+  or `:none` for a live or inline value. Reads no value bytes.
+
+  A packed value's digest identifies the value, not its physical file.
+  Internal storage code uses `held_locator/2` and `Roux.Memo.Value.roots/1`
+  to find the backing blob.
   """
   @spec held_digest(Database.t(), query_key()) :: {:ok, Blob.digest()} | :none
   def held_digest(%Database{memo_table: table}, key) do
     case :ets.lookup_element(table, key, 9, :missing) do
       {:blob, digest} -> {:ok, digest}
+      {:packed, digest, _pack, _offset, _length} -> {:ok, digest}
       _other -> :none
     end
+  end
+
+  @doc false
+  @spec held_locator(Database.t(), query_key()) :: {:ok, encoded()} | :none
+  def held_locator(%Database{memo_table: table}, key) do
+    case :ets.lookup_element(table, key, 9, :missing) do
+      {:blob, _digest} = handle -> {:ok, handle}
+      {:packed, _digest, _pack, _offset, _length} = handle -> {:ok, handle}
+      _other -> :none
+    end
+  end
+
+  @doc false
+  @spec remember_encoding(
+          Database.t(),
+          query_key(),
+          reference() | nil,
+          term(),
+          {Blob.digest(), binary()}
+        ) :: :ok
+  def remember_encoding(%Database{memo_table: table}, key, generation, value, {digest, bytes}) do
+    case :ets.lookup(table, key) do
+      [row] when elem(row, 12) == generation ->
+        if live_encoding?(elem(row, 8)) do
+          cache = {:term, digest, bytes}
+          receipt = matching_receipt(elem(row, 8), digest)
+          replace_encoding(table, key, generation, value, elem(row, 8), {:live, cache, receipt})
+        end
+
+      _ ->
+        :ok
+    end
+
+    :ok
   end
 
   @doc """
@@ -244,6 +300,43 @@ defmodule Roux.Memo do
     else
       :missing -> :miss
     end
+  end
+
+  @doc false
+  # The caller has already proved equal values. Storage locators and live
+  # encoding caches do not change the persisted result's dependency metadata.
+  @spec same_persistence?(Database.t(), query_key(), reference() | nil, Entry.t()) :: boolean()
+  def same_persistence?(%Database{memo_table: table}, key, generation, %Entry{} = entry) do
+    expected =
+      {entry.hash, entry.changed_at, entry.verified_at, entry.dependencies, entry.durability,
+       entry.output_entities, entry.code_version, entry.persist, entry.blobs}
+
+    guards = [
+      {:"=:=", {:element, 1, :"$_"}, {:const, key}},
+      {:"=:=", {:element, 13, :"$_"}, {:const, generation}}
+    ]
+
+    # Inputs and databases without reverse tracking lack incarnation tokens.
+    # Compare the decoded value too; restored values conservatively differ.
+    guards =
+      if is_nil(generation) do
+        guards ++
+          [
+            {:"=:=", {:element, 2, :"$_"}, {:const, entry.value}},
+            {:orelse, {:"=:=", {:element, 9, :"$_"}, nil},
+             {:"=:=", {:element, 1, {:element, 9, :"$_"}}, :live}}
+          ]
+      else
+        guards
+      end
+
+    state =
+      :ets.select(table, [
+        {{literal_pattern(key), :_, :"$1", :"$2", :"$3", :"$4", :"$5", :"$6", :_, :"$7", :"$8",
+          :"$9", :_}, guards, [{{:"$1", :"$2", :"$3", :"$4", :"$5", :"$6", :"$7", :"$8", :"$9"}}]}
+      ])
+
+    state === [expected]
   end
 
   @doc "Reads an entry's `changed_at` without its value."
@@ -474,17 +567,37 @@ defmodule Roux.Memo do
   def verify_generation(%Database{memo_table: table}, key, generation, revision, durability) do
     # Match the incarnation and update in the same ETS operation. A validator
     # that raced a replacement must not advance the new entry's proof.
+    {key_pattern, key_result} = replacement_key(key)
+
     :ets.select_replace(table, [
-      {{literal_pattern(key), :"$1", :"$2", :"$3", :_, :"$4", :"$5", :"$6", :"$7", :"$8", :"$9",
-        :"$10", generation}, [{:"=:=", {:element, 1, :"$_"}, {:const, key}}],
+      {{key_pattern, :"$1", :"$2", :"$3", :_, :"$4", :"$5", :"$6", :"$7", :"$8", :"$9", :"$10",
+        generation}, [{:"=:=", {:element, 1, :"$_"}, {:const, key}}],
        [
-         {{{:const, key}, :"$1", :"$2", :"$3", revision, :"$4", durability || :"$5", :"$6", :"$7",
+         {{key_result, :"$1", :"$2", :"$3", revision, :"$4", durability || :"$5", :"$6", :"$7",
            :"$8", :"$9", :"$10", {:const, generation}}}
        ]}
     ])
 
     :ok
   end
+
+  # A replacement must retain the matched key, even when the match head cannot
+  # express it literally. Ordinary keys still use ETS's indexed lookup.
+  defp replacement_key(key) do
+    if literal_key?(key), do: {key, {:const, key}}, else: {:"$14", :"$14"}
+  end
+
+  defp literal_key?(term) when is_map(term), do: false
+
+  defp literal_key?(term) when is_tuple(term),
+    do: term |> Tuple.to_list() |> Enum.all?(&literal_key?/1)
+
+  defp literal_key?([head | tail]), do: literal_key?(head) and literal_key?(tail)
+
+  defp literal_key?(term) when is_atom(term),
+    do: term != :_ and not String.starts_with?(Atom.to_string(term), "$")
+
+  defp literal_key?(_term), do: true
 
   # Most keys bind the table key directly. Maps and match-specification atoms
   # need a broader pattern, narrowed by the exact-key guard above.
@@ -566,15 +679,17 @@ defmodule Roux.Memo do
   three arguments, its `persist` (`Roux.Memo.Entry`) — before its value
   is touched. A restored value that was never replaced goes out in the
   encoding it came in with, or by the digest it was held by; any other
-  value is encoded here, one entry at a time — by `hold`, when given, for
-  a `:blob` entry: it stores the value and returns `{:blob, digest}`.
+  live value reuses its cached encoding. The legacy `hold` callback receives
+  a `:blob` value and returns its persisted handle. The internal
+  `{:encoded, publisher}` form receives cached bytes and any existing handle,
+  separating encoding from the writer's storage and packing decisions.
   """
   @spec persisted(
           Database.t(),
           (query_key(), Revision.durability() -> boolean())
           | (query_key(), Revision.durability(), Entry.persist() -> boolean()),
-          (term() -> {:blob, Blob.digest()}) | nil
-        ) :: [persisted()]
+          (term() -> encoded()) | {:encoded, publisher()} | nil
+        ) :: [persisted_row(encoded() | {:pending, Blob.digest()} | :missing)]
   def persisted(db, keep?, hold \\ nil)
 
   def persisted(%Database{} = db, keep?, hold) when is_function(keep?, 2),
@@ -582,16 +697,11 @@ defmodule Roux.Memo do
 
   def persisted(%Database{memo_table: table} = db, keep?, hold) when is_function(keep?, 3) do
     :ets.foldl(
-      fn {key, value, hash, changed_at, verified_at, deps, durability, outputs, encoded, code,
-          persist, blobs, generation},
+      fn {key, _value, hash, changed_at, verified_at, deps, durability, outputs, _encoded, code,
+          persist, blobs, generation} = row,
          acc ->
         if keep?.(key, durability, persist) and Dependencies.persistable?(db, key, generation) do
-          encoded =
-            cond do
-              encoded != nil -> encoded
-              persist == :blob and hold != nil -> hold.(value)
-              true -> encode_value(value)
-            end
+          encoded = persist_value(db, row, hold)
 
           [
             {key, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, blobs}
@@ -606,6 +716,130 @@ defmodule Roux.Memo do
     )
   end
 
+  # Structured publishers separate encoding from placement, so live bytes can
+  # be reused whether the writer chooses a loose blob, a pack, or inline data.
+  defp persist_value(db, row, {:encoded, publisher}) do
+    case elem(row, 8) do
+      {:live, _encoding, receipt} -> publisher.(live_cache(db, row), receipt)
+      nil -> publisher.(live_cache(db, row), nil)
+      restored -> publisher.(nil, restored)
+    end
+  end
+
+  defp persist_value(db, row, hold) do
+    case elem(row, 8) do
+      nil -> persist_live(db, row, hold)
+      {:live, _, _} -> persist_live(db, row, hold)
+      restored -> restored
+    end
+  end
+
+  defp persist_live(db, row, hold) do
+    if elem(row, 10) == :blob and is_function(hold, 1) do
+      hold.(elem(row, 1))
+    else
+      db |> live_cache(row, :inline) |> cache_bytes()
+    end
+  end
+
+  defp live_cache(db, row), do: live_cache(db, row, elem(row, 10))
+
+  defp live_cache(%Database{memo_table: table}, row, kind) do
+    case {elem(row, 8), kind} do
+      {{:live, {:term, _, _} = cache, _receipt}, :blob} ->
+        cache
+
+      {{:live, {:term, _, bytes}, _receipt}, _} ->
+        {:inline, bytes}
+
+      {{:live, {:inline, _} = cache, _receipt}, kind} when kind != :blob ->
+        cache
+
+      _ ->
+        value = elem(row, 1)
+
+        cache =
+          if kind == :blob do
+            {digest, bytes} = Blob.encode_term(value)
+            {:term, digest, bytes}
+          else
+            {:inline, encode_value(value)}
+          end
+
+        replace_encoding(
+          table,
+          elem(row, 0),
+          elem(row, 12),
+          value,
+          elem(row, 8),
+          {:live, cache, nil}
+        )
+
+        cache
+    end
+  end
+
+  defp cache_bytes({:inline, bytes}), do: bytes
+  defp cache_bytes({:term, _digest, bytes}), do: bytes
+
+  @doc false
+  @spec cache_receipts(Database.t(), [persisted()], Blob.t() | nil) :: :ok
+  def cache_receipts(%Database{blob: %Blob{root: root}} = db, entries, %Blob{root: root}) do
+    Enum.each(entries, fn entry -> cache_receipt(db, elem(entry, 0), elem(entry, 7)) end)
+  end
+
+  def cache_receipts(_db, _entries, _other_store), do: :ok
+
+  defp cache_receipt(%Database{memo_table: table}, key, handle) do
+    with digest when is_binary(digest) <- Value.logical_digest(handle),
+         [row] <- :ets.lookup(table, key) do
+      encoding = elem(row, 8)
+
+      replacement =
+        case encoding do
+          {:live, {:term, ^digest, _} = cache, _receipt} -> {:live, cache, handle}
+          restored -> if Value.logical_digest(restored) == digest, do: handle
+        end
+
+      if replacement do
+        replace_encoding(table, key, elem(row, 12), elem(row, 1), encoding, replacement)
+      end
+    end
+
+    :ok
+  end
+
+  defp matching_receipt({:live, {:term, digest, _bytes}, receipt}, digest), do: receipt
+  defp matching_receipt(_encoding, _digest), do: nil
+
+  defp live_encoding?(nil), do: true
+  defp live_encoding?({:live, _cache, _receipt}), do: true
+  defp live_encoding?(_restored), do: false
+
+  # Inputs and databases without reverse tracking have no generation token.
+  # Their exact value is the guard; derived rows use their unique incarnation.
+  defp replace_encoding(table, key, generation, value, expected, replacement) do
+    {key_pattern, key_result} = replacement_key(key)
+
+    guards = [
+      {:"=:=", {:element, 1, :"$_"}, {:const, key}},
+      {:"=:=", :"$11", {:const, expected}}
+    ]
+
+    guards = if generation == nil, do: [{:"=:=", :"$1", {:const, value}} | guards], else: guards
+
+    :ets.select_replace(table, [
+      {{key_pattern, :"$1", :"$2", :"$3", :"$4", :"$5", :"$6", :"$7", :"$11", :"$8", :"$9",
+        :"$10", generation}, guards,
+       [
+         {{key_result, :"$1", :"$2", :"$3", :"$4", :"$5", :"$6", :"$7", {:const, replacement},
+           :"$8", :"$9", :"$10", {:const, generation}}}
+       ]}
+    ])
+
+    :ok
+  end
+
   @doc """
   Inserts persisted entries (`persisted/2`) with their values still
   encoded: each is decoded by the first read that needs it.
@@ -615,22 +849,7 @@ defmodule Roux.Memo do
   """
   @spec restore_persisted(Database.t(), [persisted()]) :: :ok
   def restore_persisted(%Database{memo_table: table} = db, entries) when is_list(entries) do
-    rows =
-      Enum.map(entries, fn
-        {key, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, blobs} =
-            entry ->
-          unless persisted?(entry) do
-            raise ArgumentError, "not a persisted memo entry: #{inspect(entry, limit: 5)}"
-          end
-
-          persist = if is_binary(encoded), do: :inline, else: :blob
-
-          {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, code,
-           persist, blobs, if(db.dependencies, do: make_ref())}
-
-        other ->
-          raise ArgumentError, "not a persisted memo entry: #{inspect(other, limit: 5)}"
-      end)
+    rows = persisted_rows(db, entries)
 
     Dependencies.mutate(db, :all, fn ->
       if db.dependencies do
@@ -647,6 +866,52 @@ defmodule Roux.Memo do
     end)
   end
 
+  @doc false
+  # Only Session's new, unpublished database can use batched installation.
+  @spec restore_new(Database.t(), [persisted()]) :: :ok
+  def restore_new(%Database{memo_table: table} = db, entries) when is_list(entries) do
+    unless :ets.info(table, :size) == 0 do
+      raise ArgumentError, "bulk restore requires an empty memo table"
+    end
+
+    rows = persisted_rows(db, entries)
+
+    _ =
+      Enum.reduce(rows, MapSet.new(), fn row, seen ->
+        key = elem(row, 0)
+
+        if MapSet.member?(seen, key),
+          do: raise(ArgumentError, "duplicate memo key in bulk restore")
+
+        MapSet.put(seen, key)
+      end)
+
+    publications = Enum.map(rows, &{elem(&1, 0), elem(&1, 12), elem(&1, 5)})
+
+    Dependencies.restore_new(db, publications, fn ->
+      :ets.insert(table, rows)
+      :ok
+    end)
+  end
+
+  defp persisted_rows(db, entries) do
+    Enum.map(entries, fn
+      {key, hash, changed_at, verified_at, deps, durability, outputs, encoded, code, blobs} =
+          entry ->
+        unless persisted?(entry) do
+          raise ArgumentError, "not a persisted memo entry: #{inspect(entry, limit: 5)}"
+        end
+
+        persist = if is_binary(encoded), do: :inline, else: :blob
+
+        {key, nil, hash, changed_at, verified_at, deps, durability, outputs, encoded, code,
+         persist, blobs, if(db.dependencies, do: make_ref())}
+
+      other ->
+        raise ArgumentError, "not a persisted memo entry: #{inspect(other, limit: 5)}"
+    end)
+  end
+
   @doc "Whether `entry` has the shape of a persisted entry (`persisted/3`)."
   @spec persisted?(term()) :: boolean()
   def persisted?(
@@ -655,11 +920,7 @@ defmodule Roux.Memo do
       when is_integer(hash) and is_integer(changed_at) and is_integer(verified_at) and
              is_list(deps) and is_atom(durability) and is_list(outputs) and
              (is_binary(code) or is_nil(code)) and is_list(blobs) do
-    case encoded do
-      encoded when is_binary(encoded) -> true
-      {:blob, digest} when is_binary(digest) -> true
-      _ -> false
-    end
+    Value.valid?(encoded)
   end
 
   def persisted?(_entry), do: false
@@ -724,15 +985,23 @@ defmodule Roux.Memo do
   defp value_of(db, tuple) do
     case elem(tuple, 8) do
       nil -> {:ok, elem(tuple, 1)}
+      {:live, _encoding, _receipt} -> {:ok, elem(tuple, 1)}
       encoded when is_binary(encoded) -> {:ok, decode_value(encoded)}
-      {:blob, digest} -> load(db, digest)
+      handle -> load(db, handle)
     end
   end
 
-  defp load(%{blob: %Blob{} = store}, digest) do
-    case Blob.get_term(store, digest) do
-      {:ok, value} -> {:ok, value}
-      :miss -> :missing
+  defp load(%{blob: %Blob{} = store}, handle) do
+    case Value.load_bytes(store, handle) do
+      {:ok, bytes} ->
+        try do
+          {:ok, decode_value(bytes)}
+        rescue
+          ArgumentError -> :missing
+        end
+
+      :miss ->
+        :missing
     end
   end
 

@@ -58,6 +58,39 @@ defmodule Roux.DependenciesTest do
     assert Runtime.execute(db, :parent, :all, parent) == 4
   end
 
+  test "publication deduplicates edges and replaces only its own incarnation", %{db: db} do
+    assert :ets.info(db.dependencies.edges, :type) == :duplicate_bag
+    source = {:input, :source, :a}
+    leaf = {:leaf, {:_, :"$1"}}
+    key = {:reader, {:_, :"$1"}}
+    Input.set(db, :source, :a, 1)
+
+    entry = %Memo.Entry{
+      value: 1,
+      hash: :erlang.phash2(1),
+      changed_at: Revision.current(db.revision),
+      verified_at: Revision.current(db.revision),
+      dependencies: [source, source, leaf, {:parallel, 2, [leaf, leaf]}],
+      durability: :medium,
+      output_entities: []
+    }
+
+    first = Memo.publish(db, key, entry, false, Dependencies.snapshot(db))
+    assert :ets.lookup(db.dependencies.edges, source) == [{source, key, first}]
+    assert :ets.lookup(db.dependencies.edges, leaf) == [{leaf, key, first}]
+
+    for _ <- 1..3 do
+      replacement = %{entry | dependencies: [source, source]}
+      next = Memo.publish(db, key, replacement, true, Dependencies.snapshot(db))
+      assert :ets.lookup(db.dependencies.edges, source) == [{source, key, next}]
+      assert :ets.lookup(db.dependencies.edges, leaf) == []
+      assert :ets.lookup(db.dependencies.nodes, first) == []
+    end
+
+    Input.set(db, :source, :a, 2)
+    assert Dependencies.status(db, key) == :check
+  end
+
   test "absent inputs share their invalidation key with present and deleted inputs", %{db: db} do
     assert top(db, :optional) == 0
     Input.set(db, :source, :optional, 4)

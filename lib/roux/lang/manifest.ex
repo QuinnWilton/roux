@@ -21,7 +21,7 @@ defmodule Roux.Lang.Manifest do
   - Revision counter and durability tracking state.
   - Source file metadata (mtime, content hash) for staleness detection.
 
-  ## Layout (format 6)
+  ## Layout (format 7)
 
   A manifest is a header and a payload:
 
@@ -53,13 +53,13 @@ defmodule Roux.Lang.Manifest do
 
   With a `Roux.Blob` store (the database's, `Roux.Database.new/1`'s
   `blob:`, or `write/4`'s), the value of a `store: :blob` query is kept
-  in the store and the manifest holds its digest: a large value the
+  in the store and the manifest holds its location: a large value the
   manifest need not carry, read back by the first read that needs it.
   Its early cutoff compares digests, and a value whose blob is gone is
-  recomputed transparently (`Roux.Runtime`). The manifest is the owner
-  of what it names (`Roux.Blob.retain/3`): every held digest and every
-  one an entry holds, so a collection of the store keeps them for as
-  long as the manifest is there.
+  recomputed transparently (`Roux.Runtime`). The manifest retains physical
+  value files and every artifact digest recorded by `Roux.Runtime.hold/1`,
+  so the store keeps them while the manifest exists. A record's logical
+  digest compares values; its pack's digest is the garbage-collection root.
 
   ## Integrity
 
@@ -77,17 +77,19 @@ defmodule Roux.Lang.Manifest do
 
   ## Versioning
 
-  Format 6 adds code-version observations to dependency lists. Format 5
-  remains readable; older Roux releases reject format 6 before interpreting
-  its new dependencies. Formats 1 to 4 are refused and rebuilt from scratch.
+  Format 7 adds packed memo-value locations. Formats 5 and 6 remain readable;
+  older Roux releases reject format 7 and rebuild. Each packed value keeps its
+  logical digest independently of its physical file and byte range. Unchanged
+  locations are reused; sparse packs are compacted within a bounded write budget.
+  Format 6 added code-version observations to dependency lists.
   """
 
   alias Roux.{Blob, Database, Dependencies, Entity, Intern, Memo, Revision}
-  alias Roux.Memo.Entry
+  alias Roux.Memo.{Entry, Value, Writer}
 
   @magic "ROUXMNFT"
-  @format 6
-  @readable_formats [5, @format]
+  @format 7
+  @readable_formats [5, 6, @format]
 
   @typedoc "Metadata for a single source file."
   @type source_meta :: %{mtime: term(), hash: integer()}
@@ -139,6 +141,7 @@ defmodule Roux.Lang.Manifest do
 
   defp encode(db, source_metadata, store) do
     entries = persisted_entries(db, store)
+    :ok = Memo.cache_receipts(db, entries, store)
 
     payload =
       :erlang.term_to_binary(%{
@@ -156,10 +159,7 @@ defmodule Roux.Lang.Manifest do
   defp named_digests(entries) do
     entries
     |> Enum.flat_map(fn {_key, _h, _c, _v, _d, _dur, _o, encoded, _code, blobs} ->
-      case encoded do
-        {:blob, digest} -> [digest | blobs]
-        _inline -> blobs
-      end
+      Value.roots(encoded) ++ blobs
     end)
     |> Enum.uniq()
   end
@@ -272,10 +272,16 @@ defmodule Roux.Lang.Manifest do
   A value held by digest is read from the database's `Roux.Blob` store.
   """
   @spec restore(Database.t(), manifest_data()) :: :ok
-  def restore(%Database{} = db, data) do
+  def restore(%Database{} = db, data), do: restore_with(db, data, &Memo.restore_persisted/2)
+
+  @doc false
+  @spec restore_new(Database.t(), manifest_data()) :: :ok
+  def restore_new(%Database{} = db, data), do: restore_with(db, data, &Memo.restore_new/2)
+
+  defp restore_with(db, data, restore_memos) do
     Revision.restore(db.revision, data.revision)
     {entries, code_moved?} = registered(db, data.memo_entries)
-    :ok = Memo.restore_persisted(db, entries)
+    :ok = restore_memos.(db, entries)
     # Restored entries already require an ordered dependency walk, including
     # code-version checks. Keep their old values proven for early cutoff.
     if code_moved?, do: Dependencies.advance(db, :high)
@@ -402,28 +408,65 @@ defmodule Roux.Lang.Manifest do
   defp persisted_entries(db, store) do
     excluded = transient_closure(db)
 
-    Memo.persisted(
-      db,
-      fn key, durability, persist ->
-        persist in [:inline, :blob] and persist?(key, durability) and
-          not Map.has_key?(excluded, key)
-      end,
-      hold_fun(store)
-    )
+    entries =
+      Writer.run(store, db.blob, fn publisher ->
+        Memo.persisted(
+          db,
+          fn key, durability, persist ->
+            persist in [:inline, :blob] and persist?(key, durability) and
+              not Map.has_key?(excluded, key)
+          end,
+          {:encoded, publisher}
+        )
+      end)
+
+    entries |> relocate_blobs(db.blob, store) |> drop_missing()
   end
 
-  # Keeps a `store: :blob` value in the store, by its digest. A value
-  # the store cannot take is kept inline.
-  defp hold_fun(nil), do: nil
+  defp relocate_blobs(entries, %Blob{root: root}, %Blob{root: root}), do: entries
+  defp relocate_blobs(entries, _source, nil), do: entries
 
-  defp hold_fun(%Blob{} = store) do
-    fn value ->
-      {digest, encoded} = Blob.encode_term(value)
+  defp relocate_blobs(entries, source, target) do
+    missing =
+      entries
+      |> Enum.flat_map(&elem(&1, 9))
+      |> Enum.uniq()
+      |> Enum.reject(&copy_blob(source, target, &1))
+      |> MapSet.new()
 
-      case Blob.put_encoded_term(store, digest, encoded) do
-        {:ok, ^digest} -> {:blob, digest}
-        {:error, _} -> :erlang.term_to_binary(value, compressed: 1)
+    Enum.map(entries, fn entry ->
+      if Enum.any?(elem(entry, 9), &MapSet.member?(missing, &1)),
+        do: put_elem(entry, 7, :missing),
+        else: entry
+    end)
+  end
+
+  defp copy_blob(source, target, digest) do
+    bytes =
+      case Blob.get(target, digest) do
+        {:ok, _} = found -> found
+        :miss -> Value.load_bytes(source, {:blob, digest})
       end
+
+    with {:ok, bytes} <- bytes,
+         {:ok, ^digest} <- Blob.put_encoded_term(target, digest, bytes) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  # A restored value can disappear before it is copied to another store or
+  # compacted. Drop its readers too, just as for transient computations.
+  defp drop_missing(entries) do
+    case for entry <- entries, elem(entry, 7) == :missing, do: elem(entry, 0) do
+      [] ->
+        entries
+
+      missing ->
+        readers = readers(Enum.map(entries, &{&1, :keep, false}))
+        dropped = spread(missing, readers, %{})
+        Enum.reject(entries, &Map.has_key?(dropped, elem(&1, 0)))
     end
   end
 

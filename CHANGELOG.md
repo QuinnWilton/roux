@@ -4,6 +4,8 @@
 
 ### Added
 
+- Queries can use `revalidate: :execute` to run a tracked cache check before
+  walking their previous dependency graph. Clean hits and early cutoff remain.
 - Reverse dependency tracking skips validation of unaffected queries in every
   database and session.
   It adds index memory and input-update work; restored entries validate once,
@@ -22,6 +24,8 @@
 
 ### Fixed
 
+- Verify memo generations for query keys containing maps, `_`, or `$`-prefixed
+  atoms without invalid ETS match specifications.
 - Entity fields use exact equality when checking for changes, so numerically
   equal values with different representations cannot leave stale field values.
 - Queries preserve early cutoff across registered code changes: a query whose
@@ -29,11 +33,23 @@
 
 ### Changed
 
+- Reuse encoded live memo values across checkpoints and equal recomputations.
+  Live reads continue using decoded values; encoding caches do not invalidate queries.
+- Blob-valued memos share bounded storage packs, reducing checkpoint file
+  operations. Reads verify individual records, unchanged values keep their
+  locations, and sparse packs are compacted within a bounded budget.
+- Reverse-edge insertion avoids duplicate scans for dependencies with many
+  readers, reducing cold publication and session restoration work.
+- New sessions restore memo entries and their reverse edges in batches before
+  exposing the database. Restored values still validate on demand.
+- Reexecuting an unchanged cache proof preserves healthy packed storage and
+  does not trigger a checkpoint when its persisted metadata is unchanged.
 - Concurrent requests share cold code-closure and digest computations. Code
   walks also cache the OTP root, avoiding repeated calls to the code server.
 - Query definition format is now 2. Recompile query modules against this release.
-- Manifests now use format 6 to record query-code dependencies. Existing
-  format-5 manifests remain readable; older Roux versions reject format 6.
+- Manifests now use format 7 for packed value locations and query-code
+  dependencies. Formats 5 and 6 remain readable; older Roux versions reject
+  format 7 and rebuild.
 
 - Validation skips recursive checks for input leaves and shared queries already
   checked in the current revision. Input changes and deletions still invalidate

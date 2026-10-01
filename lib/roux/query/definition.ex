@@ -17,6 +17,8 @@ defmodule Roux.Query.Definition do
 
   `opts[:boundary]` names the generated timeout and fallback functions. The
   runtime applies this policy to validation and execution under one claim.
+  `opts[:revalidate]` selects ordinary dependency validation or body execution
+  when a memo needs checking.
   """
 
   @type code :: [module()] | {module(), atom(), [term()]} | nil

@@ -187,6 +187,50 @@ defmodule Roux.Dependencies do
     end
   end
 
+  @doc false
+  # Session alone uses this before exposing its new database. Empty tables do
+  # not prove exclusive access: callers must also own the unpublished handle.
+  # Public restoration still installs each memo with publication guards.
+  @spec restore_new(
+          Database.t(),
+          [{Memo.query_key(), reference() | nil, [Memo.dependency()]}],
+          (-> result)
+        ) :: result
+        when result: term()
+  def restore_new(%Database{dependencies: nil}, _publications, write), do: write.()
+
+  def restore_new(%Database{dependencies: index} = db, publications, write) do
+    unless available?(index) and
+             Enum.all?([db.memo_table, index.nodes, index.edges, index.writers], fn table ->
+               :ets.info(table, :size) == 0
+             end) do
+      raise ArgumentError, "bulk restore requires a new unpublished database"
+    end
+
+    mutate(db, :all, fn ->
+      certificate = certificate(db, :restored)
+
+      publications
+      |> Enum.chunk_every(512)
+      |> Enum.each(fn chunk ->
+        nodes =
+          Enum.map(chunk, fn {key, generation, deps} ->
+            {generation, key, certificate, deps |> Enum.flat_map(&keys/1) |> Enum.uniq(), nil}
+          end)
+
+        edges =
+          for {generation, key, _certificate, deps, nil} <- nodes,
+              dependency <- deps,
+              do: {dependency, key, generation}
+
+        :ets.insert(index.nodes, nodes)
+        :ets.insert(index.edges, edges)
+      end)
+
+      write.()
+    end)
+  end
+
   defp remove_node(index, {generation, key, _certificate, deps, _owner}) do
     Enum.each(deps, &:ets.delete_object(index.edges, {&1, key, generation}))
     :ets.delete(index.nodes, generation)

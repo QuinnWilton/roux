@@ -114,7 +114,7 @@ defmodule Roux.Session do
   defp restore(db, manifest, false) do
     case Manifest.load(manifest) do
       {:ok, data} ->
-        :ok = Manifest.restore(db, data)
+        :ok = Manifest.restore_new(db, data)
         {data.sources, true}
 
       :error ->

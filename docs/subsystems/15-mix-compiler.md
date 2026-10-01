@@ -146,7 +146,9 @@ The durability system (see [02-revision.md](02-revision.md)) provides a natural 
 
 ### Manifest format
 
-`Roux.Lang.Manifest` writes format 6: an 8-byte magic (`ROUXMNFT`), the format number, a CRC-32 of the payload, and the payload — one uncompressed `term_to_binary/1` of the manifest data. Inside it, each memo entry's value is a binary of its own (its external term format, compressed at level 1) or, for a `store: :blob` query with a `Roux.Blob` store, the digest of the blob holding it; each entry carries its code version and the blob digests it holds; each intern table's forward rows are one binary. Format 6 adds query-code dependencies. The reader also accepts format 5.
+`Roux.Lang.Manifest` writes format 7: an 8-byte magic (`ROUXMNFT`), the format number, a CRC-32 of the payload, and one uncompressed external-term payload. Each memo value is independently encoded, either inline or in the blob store. Blob locations can name a loose file or an independently hashed range in a packed file. Entries also carry code versions, dependencies and held artifact digests; each intern table's forward rows are one binary. Formats 5 and 6 remain readable.
+
+New blob values share packs bounded to 1 MiB and 1,024 records; singleton and oversized values stay loose. Unchanged values keep their locations. The manifest retains physical pack digests and ordinary held blobs. Packs below half occupancy are compacted, at most four packs and 4 MiB of live records per checkpoint. Other manifests and the GC grace window may keep old packs alive. Missing or damaged records are recomputed on demand.
 
 The compiler runs on a `Roux.Session` (open, sync, compile, commit, close): `Roux.Sources.sync/5` is the mtime pre-filter and the content check, and `Roux.Session.commit/3` writes the manifest only when the run changed something it holds. A touch without an edit is a `:noop` run whose moved stamps are kept.
 

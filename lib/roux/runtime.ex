@@ -38,7 +38,7 @@ defmodule Roux.Runtime do
     Validation
   }
 
-  alias Roux.Memo.Entry
+  alias Roux.Memo.{Entry, Value}
   alias Roux.Runtime.Context
   alias Roux.Runtime.Scope
 
@@ -107,6 +107,9 @@ defmodule Roux.Runtime do
           Telemetry.cache_miss(Database.id(db), query_name, key, current_rev)
           compute(db, query_name, key, query_key, current_rev, query_fun, :new)
 
+        revalidate_by_execution?(db, query_name) ->
+          compute(db, query_name, key, query_key, current_rev, query_fun, :replace)
+
         true ->
           case Validation.validate(db, query_key, &ensure_up_to_date/2) do
             :valid -> serve(db, query_name, key, query_key, current_rev, query_fun)
@@ -116,6 +119,9 @@ defmodule Roux.Runtime do
 
     result
   end
+
+  defp revalidate_by_execution?(db, name),
+    do: match?(%{revalidate: :execute}, Database.query_definition(db, name))
 
   # Ownership spans validation as well as computation: a timeout is one shared
   # outcome, never a second caller overwriting an already-published success.
@@ -712,7 +718,7 @@ defmodule Roux.Runtime do
     if Validation.current?(db, query_key, current_rev) do
       :ok
     else
-      case guarded?(db, query_key) do
+      case execute_before_validation?(db, query_key) do
         true ->
           re_execute(db, query_key)
 
@@ -725,11 +731,15 @@ defmodule Roux.Runtime do
     end
   end
 
-  defp guarded?(db, {name, _key}) when is_atom(name) do
-    match?(%{boundary: {_, _, _}}, Database.query_definition(db, name))
+  defp execute_before_validation?(db, {name, _key}) when is_atom(name) do
+    case Database.query_definition(db, name) do
+      %{boundary: {_, _, _}} -> true
+      %{revalidate: :execute} -> true
+      _ -> false
+    end
   end
 
-  defp guarded?(_db, _key), do: false
+  defp execute_before_validation?(_db, _key), do: false
 
   defp re_execute(db, {query_name, key}) do
     case Process.get({__MODULE__, :query_fun, query_name}) do
@@ -812,7 +822,7 @@ defmodule Roux.Runtime do
     # computation of this key can replace it until the claim is released,
     # so it is still the stored entry when the new one is written. Its
     # value is not read here — only an equal hash needs it (see
-    # `unchanged?/5`), and a restored value would be decoded for nothing.
+    # `compare_value/5`), and a restored value would be decoded for nothing.
     prior =
       case mode do
         :new -> nil
@@ -848,7 +858,10 @@ defmodule Roux.Runtime do
       hash = :erlang.phash2(value)
 
       # Early cutoff: if value unchanged, keep the old changed_at.
-      unchanged? = prior_proven? and unchanged?(db, query_key, prior, hash, value)
+      {unchanged?, encoded} =
+        if prior_proven?,
+          do: compare_value(db, query_key, prior, hash, value),
+          else: {false, nil}
 
       changed_at =
         if unchanged? do
@@ -871,14 +884,14 @@ defmodule Roux.Runtime do
         blobs: Enum.uniq(final_ctx.blobs)
       }
 
-      # An unchanged value stays as it is stored: copying the equal new
-      # one in would cost a copy of it, and would throw away a restored
-      # value's encoding, which the next manifest would then encode again.
-      # Unless the stored value is what was missing.
-      generation =
-        Memo.publish(db, query_key, entry, unchanged? and mode != :reload, dependency_token)
+      {same_persistence?, preserve_storage?} =
+        publication_storage(db, query_key, prior, entry, {unchanged?, encoded}, mode)
 
-      Database.note_write(db)
+      generation = Memo.publish(db, query_key, entry, preserve_storage?, dependency_token)
+
+      if encoded, do: Memo.remember_encoding(db, query_key, generation, value, encoded)
+
+      unless same_persistence? and preserve_storage?, do: Database.note_write(db)
 
       cache_value(db, query_key, changed_at, generation, value)
 
@@ -925,14 +938,32 @@ defmodule Roux.Runtime do
     end
   end
 
+  # Rechecking an identical compact proof need not write a manifest. For
+  # packed values, first verify the old locator; a missing or damaged pack
+  # must publish live storage and make the repair durable on checkpoint.
+  defp publication_storage(db, key, prior, entry, {unchanged?, encoded}, mode) do
+    same_persistence? =
+      unchanged? and mode != :reload and
+        Memo.same_persistence?(db, key, prior.generation, entry)
+
+    preserve_storage? =
+      unchanged? and mode != :reload and
+        (not packed_prior?(prior) or
+           (same_persistence? and packed_available?(db, prior, encoded)))
+
+    {same_persistence?, preserve_storage?}
+  end
+
   defp prior_state(db, query_key) do
     case Memo.prior_state(db, query_key) do
       {:ok, hash, changed_at, output_entities} ->
         %{
           hash: hash,
           changed_at: changed_at,
+          generation: Memo.generation(db, query_key),
           output_entities: output_entities,
-          held: Memo.held_digest(db, query_key)
+          held: Memo.held_digest(db, query_key),
+          locator: Memo.held_locator(db, query_key)
         }
 
       :miss ->
@@ -947,18 +978,33 @@ defmodule Roux.Runtime do
   # blob is what went missing). A stored entry that went away meanwhile
   # (a GC sweep) counts as a change, which recomputes dependents rather
   # than serving them stale.
-  defp unchanged?(db, query_key, %{hash: hash, held: held}, hash, value) do
+  defp compare_value(db, query_key, %{hash: hash, held: held} = prior, hash, value) do
     case held do
       {:ok, digest} ->
         {new_digest, encoded} = Blob.encode_term(value)
-        new_digest == digest and held_again?(db, digest, encoded)
+
+        equal? =
+          new_digest == digest and
+            (packed_prior?(prior) or held_again?(db, digest, encoded))
+
+        {equal?, {new_digest, encoded}}
 
       :none ->
-        match?({:ok, ^value}, Memo.fetch_value(db, query_key))
+        {match?({:ok, ^value}, Memo.fetch_value(db, query_key)), nil}
     end
   end
 
-  defp unchanged?(_db, _query_key, _prior, _hash, _value), do: false
+  defp compare_value(_db, _query_key, _prior, _hash, _value), do: {false, nil}
+
+  # A packed locator may have vanished since restore. Keep equality's old
+  # changed_at, but publish the live value and reusable bytes independently of
+  # that physical pack. The next checkpoint chooses its new storage location.
+  defp packed_prior?(%{locator: {:ok, {:packed, _, _, _, _}}}), do: true
+  defp packed_prior?(_), do: false
+
+  defp packed_available?(db, %{locator: {:ok, locator}}, {_digest, bytes}) do
+    Value.load_bytes(db.blob, locator) == {:ok, bytes}
+  end
 
   defp held_again?(%Database{blob: %Blob{} = store}, digest, encoded),
     do: match?({:ok, _}, Blob.put_encoded_term(store, digest, encoded))

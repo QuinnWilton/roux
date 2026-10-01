@@ -600,6 +600,21 @@ defmodule Roux.Blob do
   def member?(%__MODULE__{} = store, digest),
     do: match?({:ok, %File.Stat{type: :regular}}, RawIO.stat(path(store, digest)))
 
+  @doc false
+  # Refreshes an existing physical entry without reading it. Packed memo writers
+  # call this once per shared file, then retain it with the manifest's roots.
+  @spec keep(t(), digest()) :: {:ok, non_neg_integer()} | :miss
+  def keep(%__MODULE__{} = store, digest) do
+    path = path(store, digest)
+
+    with {:ok, %File.Stat{type: :regular, size: size, mtime: mtime}} <- RawIO.stat(path),
+         :ok <- refresh(store, path, mtime) do
+      {:ok, size}
+    else
+      _ -> :miss
+    end
+  end
+
   @doc """
   Makes `dest` name the entry of `digest`: a hard link, or a copy when
   `dest` is on another file system — never a symbolic link, which a

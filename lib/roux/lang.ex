@@ -202,7 +202,8 @@ defmodule Roux.Lang do
         store: defn.store,
         transient: defn.transient,
         boundary: Keyword.get(defn.opts, :boundary),
-        around_demand: Keyword.get(defn.opts, :around_demand)
+        around_demand: Keyword.get(defn.opts, :around_demand),
+        revalidate: Keyword.get(defn.opts, :revalidate, :dependencies)
       })
     end)
 

@@ -28,6 +28,12 @@ these resets may recompute equal values instead of applying early cutoff.
 version without demanding its value. A cached aggregate can use it to track the
 code of computations it bypasses, even when those queries have no memos.
 
+A query with its own tracked cache verifier can use `revalidate: :execute`.
+When its memo needs checking, Roux executes the body before walking its previous
+dependencies. A verified cache hit can replace that graph with a smaller set of
+reads. Clean memos still return immediately; execution retains ordinary mutation
+guards, deadlines, dependency recording, and equal-result cutoff.
+
 The index survives table-owner restarts but is not persisted. Restore rebuilds
 edges and validates each demanded entry once. Checkpoints omit unproven entries
 and their readers, preserving both invalidation and held-blob ownership.

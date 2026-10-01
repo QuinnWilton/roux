@@ -28,7 +28,9 @@ defmodule Roux.Database.TableOwner do
     dedup_waiters: [:duplicate_bag, :public, write_concurrency: true],
     intern_registry: [:set, :public],
     entity_registry: [:set, :public],
-    dependency_edges: [:bag, :public, read_concurrency: true, write_concurrency: true],
+    # Each publication has a unique generation and distinct dependency keys.
+    # Avoid scanning every reader of a shared dependency to check duplicates.
+    dependency_edges: [:duplicate_bag, :public, read_concurrency: true, write_concurrency: true],
     dependency_nodes: [:set, :public, read_concurrency: true, write_concurrency: true],
     dependency_dirty: [:set, :public, read_concurrency: true, write_concurrency: true],
     dependency_writers: [:set, :public, read_concurrency: true, write_concurrency: true]
