@@ -964,13 +964,16 @@ defmodule Roux.Lang.ManifestTest do
     @header_size 16
 
     test "the manifest it writes loads", %{path: path} do
-      assert {:ok, %{vsn: 7}} = Manifest.load(path)
+      assert {:ok, %{vsn: 8}} = Manifest.load(path)
     end
 
-    test "formats 5 and 6 remain readable", %{path: path, bytes: bytes} do
-      <<"ROUXMNFT", 7::32, rest::binary>> = bytes
+    test "formats 5, 6 and 7 remain readable", %{path: path, bytes: bytes} do
+      <<"ROUXMNFT", 8::32, _crc::32, _payload::binary>> = bytes
+      {:ok, data} = Manifest.load(path)
+      payload = :erlang.term_to_binary(Map.delete(data, :vsn))
+      rest = <<:erlang.crc32(payload)::32, payload::binary>>
 
-      for format <- [5, 6] do
+      for format <- [5, 6, 7] do
         File.write!(path, ["ROUXMNFT", <<format::32>>, rest])
         assert {:ok, %{vsn: ^format}} = Manifest.load(path)
       end
@@ -1002,9 +1005,9 @@ defmodule Roux.Lang.ManifestTest do
     end
 
     test "refuses another format, even with a good checksum", %{path: path, bytes: bytes} do
-      <<magic::binary-size(8), 7::32, rest::binary>> = bytes
+      <<magic::binary-size(8), 8::32, rest::binary>> = bytes
 
-      for format <- [3, 4, 8] do
+      for format <- [3, 4, 9] do
         File.write!(path, [magic, <<format::32>>, rest])
         assert Manifest.load(path) == :error
       end

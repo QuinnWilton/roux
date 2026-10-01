@@ -22,6 +22,12 @@ defmodule Roux.Blob.Trace.Pack do
   for isolated lookups that cannot amortize a batch. A nested call to the
   active group keeps that group's write policy and size limits.
 
+  `lookup: :snapshot` discovers packed indexes once per group scope, refreshing
+  after this process publishes a pack. Concurrent publications can be missed
+  until the next scope. Use it for pure computations whose traces are still
+  checked against their observations. The default `:latest` discovers packs
+  on every lookup. Loose traces are always read afresh.
+
   Collection operates on whole packs. Using one record retains its neighbors;
   `keep:` bounds lookup history outside the refresh window, but reclaiming
   individual obsolete records requires repacking. Choose bounded groups, such
@@ -38,11 +44,16 @@ defmodule Roux.Blob.Trace.Pack do
   @doc "Runs `fun` with bounded packed writes in `group`, returning its result."
   @spec with_group(Blob.t(), term(), (-> result), keyword()) :: result when result: var
   def with_group(%Blob{} = store, group, fun, opts \\ []) when is_function(fun, 0) do
-    opts = Keyword.validate!(opts, @defaults ++ [write: :packed])
-    {write, limits} = Keyword.pop!(opts, :write)
+    opts = Keyword.validate!(opts, @defaults ++ [write: :packed, lookup: :latest])
+    {write, opts} = Keyword.pop!(opts, :write)
+    {lookup, limits} = Keyword.pop!(opts, :lookup)
 
     unless write in [:packed, :loose] do
       raise ArgumentError, "pack write policy must be :packed or :loose"
+    end
+
+    unless lookup in [:latest, :snapshot] do
+      raise ArgumentError, "pack lookup policy must be :latest or :snapshot"
     end
 
     unless Enum.all?(limits, fn {_key, value} -> is_integer(value) and value > 0 end) do
@@ -62,6 +73,7 @@ defmodule Roux.Blob.Trace.Pack do
       state = %{
         store: store,
         write: write,
+        lookup: lookup,
         root: store.root,
         group: group,
         dir: Path.join([store.root, "traces", "pack-v1-" <> Blob.term_digest(group)]),
@@ -69,7 +81,8 @@ defmodule Roux.Blob.Trace.Pack do
         pending: %{},
         pending_names: MapSet.new(),
         bytes: 0,
-        indexes: %{}
+        indexes: %{},
+        listing: nil
       }
 
       Process.put(@context, state)
@@ -217,12 +230,16 @@ defmodule Roux.Blob.Trace.Pack do
         | pending: %{},
           pending_names: MapSet.new(),
           bytes: 0,
-          indexes: cached
+          indexes: cached,
+          listing: nil
       })
     end
 
     :ok
   end
+
+  defp indexes(%{lookup: :snapshot, listing: listing} = state) when is_list(listing),
+    do: {listing, state}
 
   defp indexes(state) do
     {found, cached} =
@@ -237,7 +254,8 @@ defmodule Roux.Blob.Trace.Pack do
         end
       end)
 
-    {Enum.reject(found, &is_nil/1), %{state | indexes: cached}}
+    listing = Enum.reject(found, &is_nil/1)
+    {listing, %{state | indexes: cached, listing: listing}}
   end
 
   defp read_index(state, path, digest) do

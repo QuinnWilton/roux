@@ -276,8 +276,9 @@ defmodule Roux.BoundaryTest do
     test "Roux.Lang.Manifest stays within storage and invalidation dependencies",
          %{boundary: boundary} do
       assert_boundary(boundary,
-        modules: [Roux.Lang.Manifest],
+        modules: [under(Roux.Lang.Manifest)],
         allow: [
+          under(Roux.Lang.Manifest),
           under(Roux.Database),
           under(Roux.Dependencies),
           under(Roux.Memo),

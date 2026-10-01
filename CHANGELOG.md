@@ -15,6 +15,8 @@
 - Packed trace groups batch small cache records into indexed blobs. Records
   remain independently verifiable and readable without a session manifest;
   garbage collection retains and removes whole packs.
+- Packed trace groups accept `lookup: :snapshot` to reuse index discovery within
+  a group. The default still discovers concurrent publications on every lookup.
 - Query deadline scopes can wrap dependency validation as well as execution,
   allowing cache batches to include work triggered by validation.
 
@@ -37,7 +39,8 @@
   Live reads continue using decoded values; encoding caches do not invalidate queries.
 - Blob-valued memos share bounded storage packs, reducing checkpoint file
   operations. Reads verify individual records, unchanged values keep their
-  locations, and sparse packs are compacted within a bounded budget.
+  locations, and sparse packs are compacted within a bounded budget. Newly
+  written packs are exempt from compaction during the same checkpoint.
 - Reverse-edge insertion avoids duplicate scans for dependencies with many
   readers, reducing cold publication and session restoration work.
 - New sessions restore memo entries and their reverse edges in batches before
@@ -47,9 +50,9 @@
 - Concurrent requests share cold code-closure and digest computations. Code
   walks also cache the OTP root, avoiding repeated calls to the code server.
 - Query definition format is now 2. Recompile query modules against this release.
-- Manifests now use format 7 for packed value locations and query-code
-  dependencies. Formats 5 and 6 remain readable; older Roux versions reject
-  format 7 and rebuild.
+- Manifests now use format 8, sharing repeated keys, dependencies, paths and
+  digests in dictionaries. Formats 5, 6 and 7 remain readable; older Roux
+  versions reject format 8 and rebuild.
 
 - Validation skips recursive checks for input leaves and shared queries already
   checked in the current revision. Input changes and deletions still invalidate

@@ -246,14 +246,14 @@ defmodule Roux.Lang.PackedManifestTest do
 
     payload = :erlang.term_to_binary(%{data | memo_entries: entries})
 
-    for format <- [5, 6] do
+    for format <- [5, 6, 7] do
       File.write!(ctx.path, ["ROUXMNFT", <<format::32, :erlang.crc32(payload)::32>>, payload])
       old = handles(ctx.path)
       db = restore(ctx.store, ctx.path)
       assert "one" == PersistQueries.p_blob(db, :a)
       Manifest.write(db, %{}, ctx.path)
       assert handles(ctx.path) == old
-      assert {:ok, %{vsn: 7}} = Manifest.load(ctx.path)
+      assert {:ok, %{vsn: 8}} = Manifest.load(ctx.path)
     end
   end
 

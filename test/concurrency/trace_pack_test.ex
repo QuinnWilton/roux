@@ -35,16 +35,24 @@ defmodule Roux.Concurrency.TracePackGcTest do
       ModelFS.enter(fs, "3")
 
       result =
-        Pack.with_group(store, :group, fn ->
-          case Trace.find(Pack.fetch(store, :value), :value, fn _ -> nil end) do
-            {:ok, ^digest} ->
-              {:ok, "referenced"} = Blob.get(store, digest)
-              :hit
+        Pack.with_group(
+          store,
+          :group,
+          fn ->
+            # Populate the snapshot before racing a later lookup against GC.
+            Pack.fetch(store, :absent)
 
-            :miss ->
-              :miss
-          end
-        end)
+            case Trace.find(Pack.fetch(store, :value), :value, fn _ -> nil end) do
+              {:ok, ^digest} ->
+                {:ok, "referenced"} = Blob.get(store, digest)
+                :hit
+
+              :miss ->
+                :miss
+            end
+          end,
+          lookup: :snapshot
+        )
 
       send(parent, {:read, result})
     end)

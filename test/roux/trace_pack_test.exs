@@ -180,6 +180,41 @@ defmodule Roux.TracePackTest do
     end)
   end
 
+  test "snapshot scopes keep their view, publish their own writes and reopen afresh", %{
+    store: store
+  } do
+    Pack.with_group(store, :shared, fn -> Pack.put(store, :old, [], :old) end)
+
+    Pack.with_group(
+      store,
+      :shared,
+      fn ->
+        assert values(store, :old) == [:old]
+
+        Task.async(fn ->
+          Pack.with_group(store, :shared, fn -> Pack.put(store, :later, [], :new) end)
+        end)
+        |> Task.await()
+
+        assert values(store, :later) == []
+        Pack.put(store, :own, [], :own)
+        assert values(store, :own) == [:own]
+        assert values(store, :later) == [:new]
+
+        age_store(store)
+        Blob.gc(store, keep: 0, grace: 0)
+        assert values(store, :old) == []
+      end,
+      lookup: :snapshot
+    )
+
+    Pack.with_group(store, :shared, fn -> Pack.put(store, :later, [], :latest) end)
+
+    Pack.with_group(store, :shared, fn -> assert values(store, :later) == [:latest] end,
+      lookup: :snapshot
+    )
+  end
+
   test "observations, newest versions, lookup limits and history remain independent", %{
     store: store
   } do

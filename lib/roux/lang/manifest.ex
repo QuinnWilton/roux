@@ -21,25 +21,22 @@ defmodule Roux.Lang.Manifest do
   - Revision counter and durability tracking state.
   - Source file metadata (mtime, content hash) for staleness detection.
 
-  ## Layout (format 7)
+  ## Layout (format 8)
 
   A manifest is a header and a payload:
 
       <<"ROUXMNFT", format::32, crc32(payload)::32, payload::binary>>
 
-  The payload is one uncompressed `term_to_binary/1` of the manifest
-  data. What makes it fast to load is what that term holds: each memo
-  entry's value is already a binary of its own (the external term
-  format, compressed at level 1 — `Roux.Memo.persisted/2`), and so is
-  each intern table's forward rows (`Roux.Intern.encode_snapshot/1`).
-  Decoding the payload decodes keys, dependencies and revisions, and
-  copies those binaries without looking inside them. `restore/2` inserts
-  the memo entries with their values still encoded and leaves the intern
-  rows pending: a value is decoded by the first read that needs it, and
-  an intern table loads on its first miss. A warm run reads a handful of
-  values and no interned symbol, so it pays for almost none of it; on a
-  350-module scry project, loading and restoring the manifest went from
-  300 ms to under 20.
+  The payload is an uncompressed ETF term. Keys and dependencies share
+  dictionary IDs, and repeated paths and digests share binary references.
+  Loading expands these references before validating the memo rows. Memo values
+  remain separate ETF binaries, compressed at level 1 (`Roux.Memo.persisted/2`).
+  Each intern table's forward rows are also encoded separately
+  (`Roux.Intern.encode_snapshot/1`).
+
+  `restore/2` inserts memo entries with their values still encoded and leaves
+  intern rows pending. Values decode on their first read; intern tables load
+  on their first miss. A warm run pays only for the values and tables it uses.
 
   Writing is the same in reverse. A value restored from the last
   manifest and never replaced goes back out in the encoding it came in
@@ -77,19 +74,21 @@ defmodule Roux.Lang.Manifest do
 
   ## Versioning
 
-  Format 7 adds packed memo-value locations. Formats 5 and 6 remain readable;
-  older Roux releases reject format 7 and rebuild. Each packed value keeps its
+  Format 8 shares keys, dependencies, code versions and binary subterms.
+  Formats 5, 6 and 7 remain readable; older releases reject format 8 and rebuild.
+  Format 7 added packed memo-value locations. Each packed value keeps its
   logical digest independently of its physical file and byte range. Unchanged
   locations are reused; sparse packs are compacted within a bounded write budget.
   Format 6 added code-version observations to dependency lists.
   """
 
   alias Roux.{Blob, Database, Dependencies, Entity, Intern, Memo, Revision}
+  alias Roux.Lang.Manifest.Dictionary
   alias Roux.Memo.{Entry, Value, Writer}
 
   @magic "ROUXMNFT"
-  @format 7
-  @readable_formats [5, 6, @format]
+  @format 8
+  @readable_formats [5, 6, 7, @format]
 
   @typedoc "Metadata for a single source file."
   @type source_meta :: %{mtime: term(), hash: integer()}
@@ -146,7 +145,7 @@ defmodule Roux.Lang.Manifest do
     payload =
       :erlang.term_to_binary(%{
         sources: source_metadata,
-        memo_entries: entries,
+        memo_entries: Dictionary.encode(entries),
         entity_data: dump_entity_data(db),
         intern_data: dump_intern_data(db),
         revision: Revision.snapshot(db.revision)
@@ -226,7 +225,7 @@ defmodule Roux.Lang.Manifest do
          <<@magic, format::32, crc::32, payload::binary>> when format in @readable_formats <-
            binary,
          ^crc <- :erlang.crc32(payload),
-         {:ok, data} <- decode_payload(payload) do
+         {:ok, data} <- decode_payload(payload, format) do
       {:ok, Map.put(data, :vsn, format)}
     else
       _ -> :error
@@ -568,12 +567,26 @@ defmodule Roux.Lang.Manifest do
   # Decodes a checksummed payload, refusing any term that is not manifest
   # data of this format: restoring it would raise midway, or worse,
   # restore something else.
-  defp decode_payload(payload) do
+  defp decode_payload(payload, format) do
     data = :erlang.binary_to_term(payload)
-    if valid?(data), do: {:ok, data}, else: :error
+
+    with {:ok, data} <- expand_dictionary(data, format),
+         true <- valid?(data) do
+      {:ok, data}
+    else
+      _ -> :error
+    end
   rescue
     ArgumentError -> :error
   end
+
+  defp expand_dictionary(%{memo_entries: encoded} = data, 8) do
+    with {:ok, entries} <- Dictionary.decode(encoded),
+         do: {:ok, %{data | memo_entries: entries}}
+  end
+
+  defp expand_dictionary(data, format) when format in [5, 6, 7], do: {:ok, data}
+  defp expand_dictionary(_, _), do: :error
 
   defp valid?(%{
          sources: sources,

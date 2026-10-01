@@ -146,7 +146,7 @@ The durability system (see [02-revision.md](02-revision.md)) provides a natural 
 
 ### Manifest format
 
-`Roux.Lang.Manifest` writes format 7: an 8-byte magic (`ROUXMNFT`), the format number, a CRC-32 of the payload, and one uncompressed external-term payload. Each memo value is independently encoded, either inline or in the blob store. Blob locations can name a loose file or an independently hashed range in a packed file. Entries also carry code versions, dependencies and held artifact digests; each intern table's forward rows are one binary. Formats 5 and 6 remain readable.
+`Roux.Lang.Manifest` writes format 8: an 8-byte magic (`ROUXMNFT`), the format number, a CRC-32 of the payload, and one uncompressed external-term payload. Dictionaries share repeated keys, dependencies, paths and digests. Each memo value is independently encoded, either inline or in the blob store. Blob locations can name a loose file or an independently hashed range in a packed file. Entries also carry code versions and held artifact digests; each intern table's forward rows are one binary. Formats 5, 6 and 7 remain readable.
 
 New blob values share packs bounded to 1 MiB and 1,024 records; singleton and oversized values stay loose. Unchanged values keep their locations. The manifest retains physical pack digests and ordinary held blobs. Packs below half occupancy are compacted, at most four packs and 4 MiB of live records per checkpoint. Other manifests and the GC grace window may keep old packs alive. Missing or damaged records are recomputed on demand.
 
@@ -240,6 +240,6 @@ The data model already carries everything needed for serialization (values, hash
 - Edit one file between compiles — only affected queries re-execute
 - Delete a file between compiles — removed input triggers downstream cleanup
 - Corrupt manifest (any changed byte, any truncation) — falls back to full rebuild gracefully
-- Manifest of an unsupported format (anything except 5 or 6) — discarded, full rebuild
+- Manifest of an unsupported format (anything except 5, 6, 7 or 8) — discarded, full rebuild
 - A write that fails leaves the previous manifest in place
 - Touch a file without changing content — mtime changes but content hash matches, no recomputation

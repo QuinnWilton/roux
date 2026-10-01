@@ -27,7 +27,8 @@ defmodule Roux.Memo.Writer do
       bytes: byte_size(@header),
       count: 0,
       handles: %{},
-      sizes: %{}
+      sizes: %{},
+      fresh: MapSet.new()
     })
 
     try do
@@ -170,6 +171,7 @@ defmodule Roux.Memo.Writer do
         records = Enum.reverse(state.pending)
         bytes = IO.iodata_to_binary([@header | Enum.map(records, &elem(&1, 1))])
         physical = Blob.digest(bytes)
+        state = %{state | fresh: MapSet.put(state.fresh, physical)}
 
         handles =
           case Blob.put_encoded_term(state.target, physical, bytes) do
@@ -213,6 +215,8 @@ defmodule Roux.Memo.Writer do
   # Reusing locators avoids rewriting unchanged packs, but sparse packs would
   # otherwise pin obsolete neighbors forever. Move at most four MiB per save.
   defp compact(key, entries) do
+    fresh = Process.get(key).fresh
+
     groups =
       Enum.reduce(entries, %{}, fn entry, groups ->
         case elem(entry, 7) do
@@ -236,7 +240,9 @@ defmodule Roux.Memo.Writer do
                                                          {selected, budget} ->
         live = Enum.sum(for {_logical, {_handle, length}} <- records, do: length)
 
-        case size(key, physical) do
+        # Pending references still name logical digests. A new pack can look
+        # sparse until those references resolve, but contains no dead records.
+        case if(MapSet.member?(fresh, physical), do: :fresh, else: size(key, physical)) do
           n when is_integer(n) and live * 2 < n and live <= budget ->
             if MapSet.size(selected) < @compact_packs,
               do: {MapSet.put(selected, physical), budget - live},
