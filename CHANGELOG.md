@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-03
 
 ### Added
 
@@ -19,7 +19,6 @@
   a group. The default still discovers concurrent publications on every lookup.
 - Query deadline scopes can wrap dependency validation as well as execution,
   allowing cache batches to include work triggered by validation.
-
 - Query deadlines cover dependency validation, execution and missing-value
   recovery. Concurrent callers share one attempt; a timeout cancels its nested
   workers and can produce a transient fallback for retry in the next session.
@@ -61,7 +60,6 @@
 - Manifests now use format 8, sharing repeated keys, dependencies, paths and
   digests in dictionaries. Formats 5, 6 and 7 remain readable; older Roux
   versions reject format 8 and rebuild.
-
 - Validation skips recursive checks for input leaves and shared queries already
   checked in the current revision. Input changes and deletions still invalidate
   their readers, while graphs with many shared dependencies do less work.

@@ -11,7 +11,7 @@ A framework for building incremental mix compilers.
 ```elixir
 def deps do
   [
-    {:roux, "~> 0.2.0"}
+    {:roux, "~> 0.3.0"}
   ]
 end
 ```
