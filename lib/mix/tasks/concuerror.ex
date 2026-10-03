@@ -15,7 +15,7 @@ defmodule Mix.Tasks.Concuerror do
   ## Options
 
     * `-m` / `--module` — test module to run
-    * `--all` — run every `Roux.Concurrency.*` module
+    * `--all` — run every `Roux.Concurrency.*` module that defines `test/0`
     * `--dpor` — DPOR algorithm, `optimal` (default) or `source`
     * `--interleaving-bound` — bound on interleavings explored (default: unbounded)
     * `--treat-as-normal` — exit reasons to treat as normal (can be repeated)
@@ -174,9 +174,12 @@ defmodule Mix.Tasks.Concuerror do
     {:ok, modules} = :application.get_key(:roux, :modules)
 
     modules
-    |> Enum.filter(&under_namespace?/1)
+    |> Enum.filter(&(under_namespace?(&1) and scenario?(&1)))
     |> Enum.sort()
   end
+
+  # A scenario's helper modules (its queries, say) nest under it too.
+  defp scenario?(mod), do: Code.ensure_loaded?(mod) and function_exported?(mod, :test, 0)
 
   defp under_namespace?(mod) do
     prefix = Atom.to_string(@namespace) <> "."

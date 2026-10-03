@@ -32,6 +32,8 @@
   equal values with different representations cannot leave stale field values.
 - Queries preserve early cutoff across registered code changes: a query whose
   new code returns the same value does not force its readers to execute.
+- `mix concuerror --all` skips helper modules nested in a scenario: it runs
+  only `Roux.Concurrency.*` modules that define `test/0`.
 
 ### Changed
 
