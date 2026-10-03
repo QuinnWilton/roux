@@ -103,19 +103,19 @@ defmodule Roux.Input do
           end
 
         Dependencies.mutate(db, query_key, fn ->
-          new_rev = Dependencies.advance(db, advance_at)
+          new_rev =
+            Dependencies.advance(db, advance_at, fn revision ->
+              Memo.put_input(db, query_key, %Entry{
+                value: value,
+                hash: new_hash,
+                changed_at: revision,
+                verified_at: revision,
+                dependencies: [],
+                durability: durability,
+                output_entities: []
+              })
+            end)
 
-          entry = %Entry{
-            value: value,
-            hash: new_hash,
-            changed_at: new_rev,
-            verified_at: new_rev,
-            dependencies: [],
-            durability: durability,
-            output_entities: []
-          }
-
-          Memo.put_input(db, query_key, entry)
           Telemetry.input_set(Database.id(db), input_name, key, new_rev, durability)
           :ok
         end)

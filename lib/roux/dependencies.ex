@@ -146,9 +146,14 @@ defmodule Roux.Dependencies do
   end
 
   @doc false
-  @spec advance(Database.t(), Revision.durability()) :: Revision.revision()
-  def advance(%Database{dependencies: nil} = db, level), do: Revision.advance(db.revision, level)
-  def advance(db, level), do: Revision.advance_tracked(db.revision, level)
+  @spec advance(Database.t(), Revision.durability(), (Revision.revision() -> term())) ::
+          Revision.revision()
+  def advance(db, level, write \\ fn _revision -> :ok end)
+
+  def advance(%Database{dependencies: nil} = db, level, write),
+    do: Revision.advance(db.revision, level, write)
+
+  def advance(db, level, write), do: Revision.advance_tracked(db.revision, level, write)
 
   @doc false
   @spec publish(

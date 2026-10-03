@@ -140,6 +140,19 @@ When `set/4` is called, compare the new value to the old value *before* advancin
 
 This prevents cascading recomputation when a file is saved without changes.
 
+## Write before publish
+
+A changed value is stored before its revision becomes current
+(`Roux.Revision.advance/3`): the entry is written stamped with the revision
+about to be published, and the revision is then published with a
+compare-and-swap. A reader that captured a revision and then read the old
+value captured one older than the change, so its result validates as stale.
+Publishing first would let a reader at the new revision read the old value
+and record it as current, a stale result nothing later invalidates. When a
+concurrent advance publishes first, the entry is written again with the next
+revision, so concurrent sets of one key end stamped with the revision that
+published the surviving value.
+
 ## Implementation notes
 
 - Input definitions are stored in the `input_registry` ETS table in the database.

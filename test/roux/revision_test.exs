@@ -48,6 +48,52 @@ defmodule Roux.RevisionTest do
     end
   end
 
+  describe "advance/3" do
+    test "makes the change before the revision is current", %{rev: rev} do
+      seen =
+        Revision.advance(rev, :low, fn next ->
+          send(self(), {:write, next, Revision.current(rev)})
+        end)
+
+      assert seen == 1
+      assert_received {:write, 1, 0}
+    end
+
+    test "writes again with the next revision when another advance publishes first", %{rev: rev} do
+      writes = :counters.new(1, [])
+
+      published =
+        Revision.advance(rev, :low, fn next ->
+          :counters.add(writes, 1, 1)
+          send(self(), {:write, next})
+          if next == 1, do: Revision.advance(rev, :high)
+        end)
+
+      assert published == 2
+      assert :counters.get(writes, 1) == 2
+      assert_received {:write, 1}
+      assert_received {:write, 2}
+      assert Revision.current(rev) == 2
+      assert Revision.last_changed(rev, :high) == 1
+      assert Revision.last_changed(rev, :low) == 2
+    end
+
+    test "never lowers a durability slot another advance raised", %{rev: rev} do
+      Revision.advance(rev, :low, fn
+        1 ->
+          Revision.advance(rev, :low)
+          Revision.advance(rev, :low)
+
+        3 ->
+          # This attempt's guess of 1 failed after both inner advances.
+          send(self(), {:slot, Revision.last_changed(rev, :low)})
+      end)
+
+      assert_received {:slot, 2}
+      assert Revision.last_changed(rev, :low) == 3
+    end
+  end
+
   describe "last_changed/2" do
     test "returns 0 for levels that haven't changed", %{rev: rev} do
       assert Revision.last_changed(rev, :high) == 0

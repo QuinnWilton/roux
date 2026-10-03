@@ -32,6 +32,12 @@
   equal values with different representations cannot leave stale field values.
 - Queries preserve early cutoff across registered code changes: a query whose
   new code returns the same value does not force its readers to execute.
+- A query recomputing while `Roux.Input.set/5` runs can no longer keep the
+  overwritten value as current. `set` used to publish its revision before
+  storing the value; it now stores the value stamped with the revision it is
+  about to publish, then publishes it with a compare-and-swap, writing again
+  if a concurrent advance publishes first. Durability slots are raised before
+  the counter, and never lowered.
 - `mix concuerror --all` skips helper modules nested in a scenario: it runs
   only `Roux.Concurrency.*` modules that define `test/0`.
 

@@ -41,10 +41,10 @@ Durability levels map to atomics slots:
 @spec current(t()) :: revision()
 # Read the current global revision. Lock-free.
 
-@spec advance(t(), durability()) :: revision()
-# Increment the global revision counter and record which durability level changed.
-# Returns the new revision number.
-# Called when an input is set/modified.
+@spec advance(t(), durability(), (revision() -> term())) :: revision()
+# Publish the next revision, recording which durability level changed, and return it.
+# The optional write receives the revision about to be published and makes the change
+# visible first; it runs again with the next revision when a concurrent advance wins.
 
 @spec last_changed(t(), durability()) :: revision()
 # Return the revision at which the given durability level last had an input change.
@@ -74,8 +74,8 @@ The ordering is: `:high` > `:medium` > `:low` (high durability = changes less of
 
 ## Implementation notes
 
-- Use `:atomics.add_get/3` for the revision counter — atomic increment, returns new value.
-- Use `:atomics.put/3` for durability tracking — store the new revision at the appropriate slot.
+- A revision is published only after its change is visible: write with the next revision, raise the durability slot, then `:atomics.compare_exchange/4` the counter from the revision read to the next; on failure, retry from the new counter. Publishing first (`add_get`, then write) let a reader at the new revision record the old value as current.
+- Durability slots only rise (a compare-and-swap max), and rise before the counter, so a validation at a new revision never skips on a slot that has not caught up.
 - `last_changed_at_or_above/2` reads multiple atomics slots and returns the max. This is not atomic across slots, but that's fine — the worst case is a spurious validation (conservative, not incorrect).
 - Revision starts at 0. The first `advance/2` call sets it to 1.
 

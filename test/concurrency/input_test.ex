@@ -140,3 +140,68 @@ defmodule Roux.Concurrency.InputSetGetRaceTest do
     :ets.delete(db.input_registry)
   end
 end
+
+defmodule Roux.Concurrency.InputSetReaderRaceTest do
+  @moduledoc """
+  Two processes set the same input key while a third recomputes a stale
+  reader of it. Once all three finish, the reader must return the input's
+  final value: no interleaving may record an overwritten value as current
+  at a revision that already holds the new one.
+  """
+
+  alias Roux.{Input, Runtime}
+
+  def concuerror_options do
+    [dpor: :source, scheduling_bound: 3, depth_bound: 5_000]
+  end
+
+  def test do
+    db = make_db()
+    query = fn db, key -> Runtime.input(db, :source, key) end
+
+    Input.set(db, :source, :k, :old)
+    :old = Runtime.execute(db, :reader, :k, query)
+    Input.set(db, :source, :k, :stale)
+
+    monitors =
+      for run <- [
+            fn -> Runtime.execute(db, :reader, :k, query) end,
+            fn -> Input.set(db, :source, :k, :alpha) end,
+            fn -> Input.set(db, :source, :k, :beta) end
+          ] do
+        {pid, ref} = spawn_monitor(run)
+        {pid, ref}
+      end
+
+    for {pid, ref} <- monitors, do: receive(do: ({:DOWN, ^ref, :process, ^pid, :normal} -> :ok))
+
+    final = Input.get(db, :source, :k)
+    true = final in [:alpha, :beta]
+    ^final = Runtime.execute(db, :reader, :k, query)
+  end
+
+  # The tables die with the test process: Concuerror's exit bookkeeping
+  # fails on a table a scenario that runs queries deletes itself.
+  defp make_db do
+    memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
+    dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
+    task_reg = :ets.new(:task_reg, [:set, :public, write_concurrency: true])
+    reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
+    :ets.insert(reg, {:source, %{durability: :low}})
+
+    %Roux.Database{
+      memo_table: memo,
+      revision: Roux.Revision.new(),
+      query_registry: reg,
+      input_registry: reg,
+      task_registry: task_reg,
+      dedup_table: dedup,
+      dedup_waiters: waiters,
+      intern_registry: reg,
+      entity_registry: reg,
+      table_owner: self(),
+      supervisor: self()
+    }
+  end
+end

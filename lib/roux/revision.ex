@@ -21,11 +21,19 @@ defmodule Roux.Revision do
 
   ## Concurrency
 
-  All operations are lock-free. `advance/2` uses `:atomics.add_get/3` for
-  the global counter and `:atomics.put/3` for durability tracking.
+  All operations are lock-free. A revision becomes current only after its
+  change is visible: `advance/3` makes the change with the revision it is
+  about to publish, raises the durability slot, and only then publishes the
+  revision with a compare-and-swap. A reader that captured a revision and
+  then saw the old value therefore captured one older than the change, and
+  its result validates as stale. Publishing first and writing after would
+  let a reader record the old value as current at the new revision. A
+  concurrent advance that publishes first makes the write run again with
+  the next revision.
+
   `last_changed_at_or_above/2` reads multiple atomics slots without
-  cross-slot atomicity — the worst case is a spurious validation
-  (conservative, not incorrect).
+  cross-slot atomicity, and a slot can briefly lead the counter — the worst
+  case is a spurious validation (conservative, not incorrect).
   """
 
   @type revision :: non_neg_integer()
@@ -70,24 +78,56 @@ defmodule Roux.Revision do
   end
 
   @doc """
-  Increments the global revision counter and records which durability level
-  changed. Returns the new revision number.
+  Publishes the next revision, recording that `level` changed at it, and
+  returns that revision.
 
-  Called when an input is set or modified.
+  `write` receives the revision about to be published and makes the change
+  visible before it is: a change made after its revision is current could be
+  missed by a reader at that revision. When a concurrent advance publishes
+  first, `write` runs again with the next revision, so it must leave the
+  change stamped with the last revision it receives. A change already made
+  before the call (a deletion, say) needs no `write`.
   """
-  @spec advance(t(), durability()) :: revision()
-  def advance(%__MODULE__{} = revision, level) when level in [:high, :medium, :low] do
+  @spec advance(t(), durability(), (revision() -> term())) :: revision()
+  def advance(%__MODULE__{} = revision, level, write \\ &ignore/1)
+      when level in [:high, :medium, :low] and is_function(write, 1) do
     note_untracked(revision)
-    advance_tracked(revision, level)
+    advance_tracked(revision, level, write)
   end
 
   @doc false
-  @spec advance_tracked(t(), durability()) :: revision()
-  def advance_tracked(%__MODULE__{counter: counter, durability: durability}, level)
-      when level in [:high, :medium, :low] do
-    new_revision = :atomics.add_get(counter, 1, 1)
-    :atomics.put(durability, slot(level), new_revision)
-    new_revision
+  @spec advance_tracked(t(), durability(), (revision() -> term())) :: revision()
+  def advance_tracked(
+        %__MODULE__{counter: counter, durability: durability} = revision,
+        level,
+        write \\ &ignore/1
+      )
+      when level in [:high, :medium, :low] and is_function(write, 1) do
+    current = :atomics.get(counter, 1)
+    next = current + 1
+    write.(next)
+    # Before the counter: a validation at `next` must not skip on a stale slot.
+    raise_slot(durability, slot(level), next)
+
+    case :atomics.compare_exchange(counter, 1, current, next) do
+      :ok -> next
+      _published -> advance_tracked(revision, level, write)
+    end
+  end
+
+  defp ignore(_revision), do: :ok
+
+  defp raise_slot(durability, slot, revision) do
+    case :atomics.get(durability, slot) do
+      seen when seen >= revision ->
+        :ok
+
+      seen ->
+        case :atomics.compare_exchange(durability, slot, seen, revision) do
+          :ok -> :ok
+          _moved -> raise_slot(durability, slot, revision)
+        end
+    end
   end
 
   @doc """
