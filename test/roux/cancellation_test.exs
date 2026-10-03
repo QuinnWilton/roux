@@ -418,16 +418,11 @@ defmodule Roux.CancellationTest do
           Runtime.input(db, :prop_input, key)
         end
 
-        # Spawn concurrent query tasks.
-        query_tasks =
+        # Cancellation kills the caller itself, so the callers are monitored,
+        # never linked: a link would carry the kill to the test process.
+        callers =
           Enum.map(input_keys, fn k ->
-            Task.async(fn ->
-              try do
-                Runtime.execute(db, :prop_reader, k, query_fun)
-              catch
-                :exit, :killed -> :cancelled
-              end
-            end)
+            spawn_monitor(fn -> Runtime.execute(db, :prop_reader, k, query_fun) end)
           end)
 
         # Concurrently change inputs and cancel dependents.
@@ -437,9 +432,12 @@ defmodule Roux.CancellationTest do
           Cancellation.cancel_dependents(db, {:input, :prop_input, k})
         end)
 
-        # Wait for all query tasks to finish.
-        Enum.each(query_tasks, fn task ->
-          Task.await(task, 5000)
+        Enum.each(callers, fn {pid, ref} ->
+          receive do
+            {:DOWN, ^ref, :process, ^pid, reason} -> assert reason in [:normal, :killed]
+          after
+            5000 -> flunk("Caller #{inspect(pid)} did not finish")
+          end
         end)
 
         # Invariant: task registry is empty for these keys.

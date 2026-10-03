@@ -521,3 +521,73 @@ defmodule Roux.Concurrency.CancellationInputSetRaceTest do
     :ets.delete(db.input_registry)
   end
 end
+
+defmodule Roux.Concurrency.CancellationCallerTest do
+  @moduledoc """
+  An input change cancels a caller recomputing a stale reader of it, through
+  the real `Roux.Runtime` and `Roux.Input`. The caller either finishes or is
+  killed, and either way the task registry and dedup tables end clean and
+  the next demand reads the input's last value.
+  Killing the caller is the protocol, so a harness must not link to it
+  (`Roux.CancellationTest`).
+  """
+
+  alias Roux.{Cancellation, Input, Runtime}
+
+  def concuerror_options do
+    [treat_as_normal: [:killed], dpor: :source, scheduling_bound: 3, depth_bound: 5_000]
+  end
+
+  def test do
+    db = make_db()
+    query = fn db, key -> Runtime.input(db, :source, key) end
+
+    Input.set(db, :source, :a, 1)
+    1 = Runtime.execute(db, :reader, :a, query)
+    Input.set(db, :source, :a, 2)
+
+    {caller, caller_ref} = spawn_monitor(fn -> Runtime.execute(db, :reader, :a, query) end)
+
+    {writer, writer_ref} =
+      spawn_monitor(fn ->
+        Input.set(db, :source, :a, 3)
+        Cancellation.cancel_dependents(db, {:input, :source, :a})
+      end)
+
+    receive do: ({:DOWN, ^writer_ref, :process, ^writer, :normal} -> :ok)
+
+    receive do
+      {:DOWN, ^caller_ref, :process, ^caller, reason} when reason in [:normal, :killed] -> :ok
+    end
+
+    [] = :ets.tab2list(db.task_registry)
+    [] = :ets.tab2list(db.dedup_table)
+    [] = :ets.tab2list(db.dedup_waiters)
+    3 = Runtime.execute(db, :reader, :a, query)
+  end
+
+  # The tables die with the test process: Concuerror's exit bookkeeping
+  # fails on a table this scenario deletes itself.
+  defp make_db do
+    memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
+    dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
+    task_reg = :ets.new(:task_reg, [:set, :public, write_concurrency: true])
+    reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
+    :ets.insert(reg, {:source, %{durability: :low}})
+
+    %Roux.Database{
+      memo_table: memo,
+      revision: Roux.Revision.new(),
+      query_registry: reg,
+      input_registry: reg,
+      task_registry: task_reg,
+      dedup_table: dedup,
+      dedup_waiters: waiters,
+      intern_registry: reg,
+      entity_registry: reg,
+      table_owner: self(),
+      supervisor: self()
+    }
+  end
+end
