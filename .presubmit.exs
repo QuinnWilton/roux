@@ -10,13 +10,5 @@
   {Presubmit.Rules.Message,
    subject: ~r/^\[[a-z0-9_.\/-]+\] \S/,
    max_subject_length: 72,
-   warn: [:subject_length],
-   trailers: [
-     {fn commit ->
-        Enum.any?(
-          Presubmit.Query.trailer(commit, "Co-Authored-By"),
-          &(&1 =~ ~r/anthropic\.com/)
-        )
-      end, "Claude-Session", ~r{^https://claude\.ai/code/session_}}
-   ]}
+   warn: [:subject_length]}
 ]
