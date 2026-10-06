@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `Roux.Code.Verify.counting/2` turns call counting on once for a test that
+  counts many runs, and `Roux.Code.Verify.calls/2` reads each run with the
+  counts set back to zero, function by function with how often each was
+  called. `Roux.Code.Verify.ignore/2` stops counting hot functions, and
+  `Roux.Code.Verify.modules/1` names the modules among a run's calls.
+  Sessions in one VM take turns.
+
+### Changed
+
+- `Roux.Code.Verify.executed/2` runs on a counting session, and waits for
+  another process's session to end. It raises
+  `Roux.Code.Verify.UncountedError` when a watched module is loaded again or
+  unloaded during the run, where it took a module loaded again for one that
+  was called.
+
 ## 0.3.0 - 2026-10-03
 
 ### Added
