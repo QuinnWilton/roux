@@ -279,7 +279,10 @@ defmodule Roux.GCTest do
 
       GC.sweep(db)
 
-      assert_received {:telemetry, ^event, measurements, metadata}
+      # Other async tests sweep too, and the handler hears every sweep in
+      # the VM: this one is the sweep of this test's database.
+      database = Database.id(db)
+      assert_received {:telemetry, ^event, measurements, %{database: ^database} = metadata}
       assert is_integer(measurements.duration)
       assert measurements.entities_removed == 1
       assert measurements.memo_entries_removed == 0
