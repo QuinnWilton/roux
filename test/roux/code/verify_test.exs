@@ -40,6 +40,10 @@ defmodule Roux.Code.VerifyTest do
     test "names none for a computation that calls into no watched module" do
       assert Verify.executed(fn -> :done end, modules: [Probe]) == {:done, []}
     end
+
+    test "does not count itself, which runs after the computation to read the counts" do
+      assert Verify.executed(fn -> :done end, modules: [Verify, Probe]) == {:done, []}
+    end
   end
 
   describe "counting/2 and calls/2" do

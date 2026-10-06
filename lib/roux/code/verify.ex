@@ -75,6 +75,7 @@ defmodule Roux.Code.Verify do
     * `:modules` — the modules to watch (default: every module of every
       loaded application that is not OTP's or Elixir's). A module is
       loaded before the run, since only loaded code can be counted.
+      This module is never watched.
   """
   @spec executed((-> result), keyword()) :: {result, [module()]} when result: var
   def executed(fun, opts \\ []) when is_function(fun, 0) do
@@ -99,7 +100,11 @@ defmodule Roux.Code.Verify do
   """
   @spec counting((Session.t() -> result), keyword()) :: result when result: var
   def counting(fun, opts \\ []) when is_function(fun, 1) do
-    modules = Keyword.get_lazy(opts, :modules, &project_modules/0)
+    # This module runs between a computation and the read of its counts:
+    # counted, it would read as called by every run.
+    modules =
+      opts |> Keyword.get_lazy(:modules, &project_modules/0) |> Enum.reject(&(&1 == __MODULE__))
+
     Enum.each(modules, &Code.ensure_loaded/1)
     session = %Session{modules: Enum.filter(modules, &:erlang.module_loaded/1)}
 

@@ -19,6 +19,12 @@
   unloaded during the run, where it took a module loaded again for one that
   was called.
 
+### Fixed
+
+- `Roux.Code.Verify` no longer counts itself. It runs between a computation and
+  the read of its counts, so a test watching roux's own modules read it as
+  called by every run.
+
 ## 0.3.0 - 2026-10-03
 
 ### Added
