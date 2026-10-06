@@ -10,7 +10,8 @@ end
 defmodule Roux.Code.VerifyTest do
   @moduledoc """
   Call counting for closure tests (`Roux.Code.Verify`): a session turned
-  on once, each run read apart, function by function.
+  on once, each run read apart, function by function, and nothing else
+  the VM traces disturbed.
 
   Counts are VM-wide, but each test counts a module only it calls, and
   sessions take turns, so the tests run beside the rest of the suite.
@@ -56,11 +57,11 @@ defmodule Roux.Code.VerifyTest do
       )
     end
 
-    test "read each run with the counts set back to zero" do
+    test "read each run as the counts it moved" do
       Verify.counting(
         fn session ->
           assert {:ok, %{@step => 2}} = Verify.calls(session, fn -> Probe.run(2) end)
-          # Between runs: counted, and set back to zero by the next.
+          # Between runs: counted, and no part of the next.
           Probe.run(5)
           assert {:other, calls} = Verify.calls(session, &Probe.other/0)
           assert calls == %{@other => 1}
@@ -80,6 +81,25 @@ defmodule Roux.Code.VerifyTest do
         end,
         modules: [Probe]
       )
+    end
+
+    test "leave tracing set elsewhere in the VM alone" do
+      # A call trace another test set, on a module the session does not
+      # watch: resetting every counter in the VM cleared it.
+      traced = compile!("def f(x), do: x")
+      mfa = {traced, :f, 1}
+      1 = :erlang.trace_pattern(mfa, true, [])
+      on_exit(fn -> :erlang.trace_pattern(mfa, false, []) end)
+
+      Verify.counting(
+        fn session ->
+          assert {:ok, %{@run => 1}} = Verify.calls(session, fn -> Probe.run(1) end)
+          assert {:ok, %{@run => 1}} = Verify.calls(session, fn -> Probe.run(1) end)
+        end,
+        modules: [Probe]
+      )
+
+      assert :erlang.trace_info(mfa, :traced) == {:traced, :global}
     end
 
     test "turn counting off when the session ends, or raises" do

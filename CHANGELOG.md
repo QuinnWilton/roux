@@ -5,9 +5,10 @@
 ### Added
 
 - `Roux.Code.Verify.counting/2` turns call counting on once for a test that
-  counts many runs, and `Roux.Code.Verify.calls/2` reads each run with the
-  counts set back to zero, function by function with how often each was
-  called. `Roux.Code.Verify.ignore/2` stops counting hot functions, and
+  counts many runs, and `Roux.Code.Verify.calls/2` reads each run as the
+  counts it moved, function by function with how often each was called. It
+  never sets counters back to zero: doing so over every function in the VM
+  also clears other tracing, such as another test's call trace. `Roux.Code.Verify.ignore/2` stops counting hot functions, and
   `Roux.Code.Verify.modules/1` names the modules among a run's calls.
   Sessions in one VM take turns.
 

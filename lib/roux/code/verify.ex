@@ -12,9 +12,8 @@ defmodule Roux.Code.Verify do
 
   `executed/2` counts one run. A test that counts many turns counting
   on once (`counting/2`), since turning it on and off again for a few
-  hundred modules takes a fraction of a second, and reads each run with
-  the counts set back to zero (`calls/2`), which takes a few
-  milliseconds:
+  hundred modules takes a fraction of a second, and reads each run as
+  the counts it moved (`calls/2`):
 
       Roux.Code.Verify.counting(fn session ->
         for key <- keys do
@@ -26,7 +25,12 @@ defmodule Roux.Code.Verify do
   Call counts are kept per VM, not per process: anything else the VM
   runs meanwhile counts too. Run it in a VM of its own (`:peer`). Two
   sessions in one VM take turns (`counting/2` waits for the other to
-  end), since setting the counts back to zero sets every session's.
+  end), since one ending turns counting off for the modules it watched,
+  which the other may watch too.
+
+  A session only reads counters between runs, never sets them back to
+  zero: `:erlang.trace_pattern/3`'s `:restart` over every function also
+  clears other tracing in the VM, such as a call trace another test set.
   """
 
   defmodule Session do
@@ -79,8 +83,7 @@ defmodule Roux.Code.Verify do
   """
   @spec executed((-> result), keyword()) :: {result, [module()]} when result: var
   def executed(fun, opts \\ []) when is_function(fun, 0) do
-    # A session's counters start at zero, so the run needs no reset.
-    {result, calls} = counting(fn session -> read(session, fun) end, opts)
+    {result, calls} = counting(fn session -> calls(session, fun) end, opts)
     {result, modules(calls)}
   end
 
@@ -125,19 +128,27 @@ defmodule Roux.Code.Verify do
   end
 
   @doc """
-  Runs `fun` within `session`, with every count set back to zero first:
-  its result, and the functions of the session's modules it called, each
-  with how often, among those still counted (see `ignore/2`).
+  Runs `fun` within `session`: its result, and the functions of the
+  session's modules it called, each with how often, among those still
+  counted (see `ignore/2`). The counts are read before and after the
+  run, and a run is what it moved.
 
   Raises `Roux.Code.Verify.UncountedError` when a module of the session
   is no longer counted at all.
   """
   @spec calls(Session.t(), (-> result)) :: {result, %{mfa() => pos_integer()}} when result: var
   def calls(%Session{} = session, fun) when is_function(fun, 0) do
-    # Every counter in the VM at once: a few milliseconds, where setting
-    # each module's apart takes as long as turning counting on.
-    :erlang.trace_pattern({:_, :_, :_}, :restart, [:call_count])
-    read(session, fun)
+    before = counts(session)
+    result = fun.()
+
+    calls =
+      for {mfa, count} <- counts(session),
+          calls = count - Map.get(before, mfa, 0),
+          calls > 0,
+          into: %{},
+          do: {mfa, calls}
+
+    {result, calls}
   end
 
   @doc """
@@ -160,27 +171,24 @@ defmodule Roux.Code.Verify do
     calls |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.sort()
   end
 
-  defp read(session, fun) do
-    result = fun.()
-
+  # Every counted function's count so far, called or not.
+  defp counts(session) do
     case Enum.reject(session.modules, &counted?/1) do
-      [] -> {result, called(session)}
-      uncounted -> raise UncountedError, modules: uncounted
+      [] ->
+        for module <- session.modules,
+            {name, arity} <- module.module_info(:functions),
+            name not in @uncounted,
+            mfa = {module, name, arity},
+            {:counted, count} <- [counter(mfa)],
+            into: %{},
+            do: {mfa, count}
+
+      uncounted ->
+        raise UncountedError, modules: uncounted
     end
   end
 
   defp counted?(module), do: counter({module, :module_info, 0}) != :uncounted
-
-  defp called(session) do
-    for module <- session.modules,
-        {name, arity} <- module.module_info(:functions),
-        name not in @uncounted,
-        mfa = {module, name, arity},
-        {:counted, calls} <- [counter(mfa)],
-        calls > 0,
-        into: %{},
-        do: {mfa, calls}
-  end
 
   # A function not counted reads `false`, which compares above every
   # number: `n > 0` alone takes it for called. One that no longer
