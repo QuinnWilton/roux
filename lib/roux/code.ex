@@ -21,9 +21,8 @@ defmodule Roux.Code do
 
   ## Where code is read
 
-  Object code comes from `:code.get_object_code/1`, which finds a
-  module on the code path wherever it lives: a `.beam` file, or an
-  escript's archive. A module that was compiled in memory (or
+  Object code is read from the file `:code.which/1` names, or, for a
+  module in an escript's archive, from `:code.get_object_code/1`. A module that was compiled in memory (or
   cover-compiled) has no object code to read, and no digest can name
   it: `closure/2` returns an error naming it.
 
@@ -253,13 +252,25 @@ defmodule Roux.Code do
     end
   end
 
+  # The file `:code.which/1` found, read directly: `:code.get_object_code/1`
+  # searches the code path again for a module not yet loaded, trying the
+  # file in every directory before the one that holds it — a walk of a
+  # thousand modules over a hundred directories read a hundred thousand
+  # files that are not there. A module in an archive (an escript's) is
+  # not a file to read, and is asked of the code server.
   defp located(mod, path) do
     if runtime?(mod, path) do
       :runtime
     else
-      case :code.get_object_code(mod) do
-        {^mod, bin, file} -> {:object, bin, List.to_string(file)}
-        :error -> :no_beam
+      case :file.read_file(path, [:raw]) do
+        {:ok, bin} ->
+          {:object, bin, path}
+
+        {:error, _not_a_file} ->
+          case :code.get_object_code(mod) do
+            {^mod, bin, file} -> {:object, bin, List.to_string(file)}
+            :error -> :no_beam
+          end
       end
     end
   end

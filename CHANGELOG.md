@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `Roux.Code.closure/2` and `digest/2` read each module's object code from the
+  file `:code.which/1` names, not through `:code.get_object_code/1`, which
+  searches the code path again for a module not yet loaded, trying every
+  directory before the one that holds it. A module in an escript's archive is
+  still read through the code server.
+
 ## 0.3.1 - 2026-10-06
 
 ### Added
