@@ -34,14 +34,25 @@ defmodule Roux.Session do
   alias Roux.{Blob, Database, Lang, Revision, Runtime}
   alias Roux.Lang.Manifest
 
-  @enforce_keys [:db, :manifest, :blob, :sources, :restored?, :revision, :writes]
-  defstruct [:db, :manifest, :blob, :sources, :restored?, :revision, :writes]
+  @enforce_keys [
+    :db,
+    :manifest,
+    :blob,
+    :sources,
+    :restored?,
+    :revision,
+    :writes,
+    :outdated,
+    :dropped
+  ]
+  defstruct [:db, :manifest, :blob, :sources, :restored?, :revision, :writes, :outdated, :dropped]
 
   @typedoc """
   An open session: its database, the manifest it came from and goes to
   (nil for none), its blob store (nil for none), the sources' metadata
-  the manifest held (`%{}` on a cold start), and whether it restored
-  one.
+  the manifest held (`%{}` on a cold start), whether it restored one,
+  the entries it restored outdated (`Roux.Lang.Manifest.outdated/1`) and,
+  of those, the ones its last commit left out of the manifest.
   """
   @type t :: %__MODULE__{
           db: Database.t(),
@@ -50,7 +61,9 @@ defmodule Roux.Session do
           sources: map(),
           restored?: boolean(),
           revision: Revision.revision(),
-          writes: non_neg_integer()
+          writes: non_neg_integer(),
+          outdated: [Manifest.key()],
+          dropped: [Manifest.key()]
         }
 
   @doc """
@@ -104,7 +117,9 @@ defmodule Roux.Session do
       sources: sources,
       restored?: restored?,
       revision: Revision.current(db.revision),
-      writes: Database.writes(db)
+      writes: Database.writes(db),
+      outdated: if(restored?, do: Manifest.outdated(db), else: []),
+      dropped: []
     }
   end
 
@@ -148,9 +163,15 @@ defmodule Roux.Session do
       when is_map(sources) do
     opts = Keyword.validate!(opts, [:extra])
 
+    # An entry restored outdated and outdated still is one this run never
+    # demanded. Kept, it would be restored outdated by every later run,
+    # each advancing the revision, for as long as nothing demands it,
+    # which may be never (a key an upgraded tool no longer asks for).
+    drop = still_outdated(session)
+
     status =
-      if dirty?(session, sources) do
-        :ok = Manifest.write(db, sources, manifest)
+      if drop != session.dropped or dirty?(session, sources) do
+        :ok = Manifest.write(db, sources, manifest, drop: drop)
         :written
       else
         :unchanged
@@ -167,8 +188,17 @@ defmodule Roux.Session do
        | sources: sources,
          restored?: true,
          revision: Revision.current(db.revision),
-         writes: Database.writes(db)
+         writes: Database.writes(db),
+         outdated: drop,
+         dropped: drop
      }}
+  end
+
+  defp still_outdated(%__MODULE__{outdated: []}), do: []
+
+  defp still_outdated(%__MODULE__{db: db, outdated: outdated}) do
+    now = MapSet.new(Manifest.outdated(db))
+    Enum.filter(outdated, &MapSet.member?(now, &1))
   end
 
   defp dirty?(%__MODULE__{db: db} = session, sources) do

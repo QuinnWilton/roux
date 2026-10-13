@@ -1,7 +1,8 @@
 defmodule Roux.SessionTest do
   use ExUnit.Case, async: true
 
-  alias Roux.{Blob, Input, Memo, QueryLog, Session}
+  alias Roux.{Blob, Dependencies, Input, Memo, QueryLog, Session}
+  alias Roux.Lang.Manifest
   alias Roux.Test.PersistQueries
 
   @moduletag :tmp_dir
@@ -73,6 +74,66 @@ defmodule Roux.SessionTest do
     assert {:unchanged, _} = Session.commit(second, %{"b.src" => :moved})
     assert File.stat!(manifest).mtime >= stamp
     Session.close(second)
+  end
+
+  # As if the last run had been another build's, whose :p_reader had
+  # other code: its entries' code version then, as that run kept them.
+  defp outdate!(tmp, query) do
+    session = open(tmp)
+
+    Memo.reduce_entries(session.db, :ok, fn
+      {{^query, _key} = key, entry}, :ok ->
+        Dependencies.mutate(session.db, key, fn ->
+          Memo.publish(session.db, key, %{entry | code_version: "old"}, false, :restored)
+        end)
+
+        :ok
+
+      _other, :ok ->
+        :ok
+    end)
+
+    :ok = Manifest.write(session.db, session.sources, session.manifest)
+    Session.close(session)
+  end
+
+  defp kept(tmp) do
+    {:ok, data} = Manifest.load(Path.join(tmp, "state/graph.manifest"))
+    data |> Manifest.memo_entries() |> Enum.map(&elem(&1, 0))
+  end
+
+  test "an entry a whole run left outdated is dropped, with its readers, and only once",
+       %{tmp_dir: tmp} do
+    first = open(tmp)
+    run(first, %{"a" => 1, "b" => 2})
+    {:written, _} = Session.commit(first, %{})
+    Session.close(first)
+    outdate!(tmp, :p_reader)
+
+    # A run that demands "a" alone: "b"'s reader is never asked again.
+    second = open(tmp)
+    assert Enum.sort(second.outdated) == [{:p_reader, "a"}, {:p_reader, "b"}]
+    assert PersistQueries.p_top(second.db, "a") == {:top, {:read, {:ok, 1}}}
+    assert {:written, second} = Session.commit(second, %{})
+    # A later commit of the same session drops it still, and writes for it once.
+    assert {:unchanged, second} = Session.commit(second, %{})
+    Input.set(second.db, :psrc, "a", 3)
+    assert PersistQueries.p_top(second.db, "a") == {:top, {:read, {:ok, 3}}}
+    assert {:written, _} = Session.commit(second, %{})
+    Session.close(second)
+
+    kept = kept(tmp)
+    assert {:p_reader, "a"} in kept
+    refute {:p_reader, "b"} in kept
+    refute {:p_top, "b"} in kept
+    assert {:p_fact, "b"} in kept
+
+    # Nothing kept is outdated now: a run that changes nothing writes nothing.
+    third = open(tmp)
+    assert third.outdated == []
+    assert PersistQueries.p_top(third.db, "a") == {:top, {:read, {:ok, 3}}}
+    assert {:unchanged, _} = Session.commit(third, %{})
+    Session.close(third)
   end
 
   test "a transient entry and its readers are asked again next run", %{tmp_dir: tmp} do

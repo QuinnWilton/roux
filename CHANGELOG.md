@@ -14,6 +14,20 @@
 - A stale query that is registered without a module and function, and that
   this process has not run against its database, raises an `ArgumentError`
   saying so when validation must re-execute it, instead of a `MatchError`.
+- `Roux.Session.commit/3` leaves out of the manifest the entries the session
+  restored outdated, computed by code that has since changed, and never
+  demanded, along with their readers. They were kept forever: restored as
+  outdated by every later run, each advancing the revision so that the
+  `revalidate: :execute` queries wrote and the whole manifest was rewritten on
+  every run, for as long as nothing asked for them again, which after an
+  upgrade could be never. An entry made outdated during a session (code
+  loaded again in an editor) is kept, for early cutoff.
+
+### Added
+
+- `Roux.Lang.Manifest.write/4` takes `:drop`, keys of entries to leave out
+  with their readers, and `Roux.Lang.Manifest.outdated/1` names a database's
+  outdated entries (`Roux.Memo.outdated_keys/1`).
 
 ## 0.3.2 - 2026-10-08
 

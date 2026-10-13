@@ -106,6 +106,18 @@ defmodule Roux.Lang.Manifest do
           revision: map()
         }
 
+  @typedoc "The key of a manifest's entry."
+  @type key :: Memo.query_key()
+
+  @doc """
+  The entries of `db` computed by another code version than their query
+  has now, or that observed another version of a query's code
+  (`Roux.Memo.outdated_keys/1`). Right after a restore, the entries the
+  last run kept that this run's code would compute again.
+  """
+  @spec outdated(Database.t()) :: [key()]
+  def outdated(%Database{} = db), do: Memo.outdated_keys(db)
+
   @doc """
   Writes a manifest to disk, atomically: the file at `path` is the old
   manifest or the new one, never part of either.
@@ -124,11 +136,15 @@ defmodule Roux.Lang.Manifest do
       (default: the database's). Without one they are written inline.
       The manifest then retains what it names in the store (see "Values
       held by digest").
+    * `:drop` — keys of entries to leave out, with every entry that read
+      one, directly or through others (`Roux.Session.commit/3` drops the
+      entries a run restored outdated and never demanded).
   """
   @spec write(Database.t(), %{String.t() => source_meta()}, String.t(), keyword()) :: :ok
   def write(%Database{} = db, source_metadata, path, opts \\ []) when is_binary(path) do
     store = Keyword.get(opts, :blob, db.blob)
-    {payload, crc, digests} = isolated(fn -> encode(db, source_metadata, store) end)
+    drop = Keyword.get(opts, :drop, [])
+    {payload, crc, digests} = isolated(fn -> encode(db, source_metadata, store, drop) end)
     File.mkdir_p!(Path.dirname(path))
     :ok = write_atomically!(path, [@magic, <<@format::32, crc::32>>, payload])
 
@@ -138,8 +154,8 @@ defmodule Roux.Lang.Manifest do
     end
   end
 
-  defp encode(db, source_metadata, store) do
-    entries = persisted_entries(db, store)
+  defp encode(db, source_metadata, store, drop) do
+    entries = persisted_entries(db, store, drop)
     :ok = Memo.cache_receipts(db, entries, store)
 
     payload =
@@ -404,8 +420,8 @@ defmodule Roux.Lang.Manifest do
 
   # -- Private: dump helpers --
 
-  defp persisted_entries(db, store) do
-    excluded = transient_closure(db)
+  defp persisted_entries(db, store, drop) do
+    excluded = transient_closure(db, drop)
 
     entries =
       Writer.run(store, db.blob, fn publisher ->
@@ -480,9 +496,10 @@ defmodule Roux.Lang.Manifest do
   # The transient entries and everything that read one, transitively.
   # Kept, a reader would restore beside the transient value's absence,
   # pass its durability check on the next run, and serve what that value
-  # led to without ever asking again.
-  defp transient_closure(db) do
-    case Memo.keys_persisted_as(db, :transient) ++ Memo.unproven_keys(db) do
+  # led to without ever asking again. The entries the caller drops go
+  # with them, and so do their readers.
+  defp transient_closure(db, drop) do
+    case Memo.keys_persisted_as(db, :transient) ++ Memo.unproven_keys(db) ++ drop do
       [] ->
         %{}
 

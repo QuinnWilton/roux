@@ -394,6 +394,42 @@ defmodule Roux.Memo do
     ])
   end
 
+  @doc """
+  The entries of registered queries computed by another code version
+  than their query's, or that observed another version of a query's
+  code (`{:query_code, name, version}`): restored entries no run has
+  demanded since their code changed. Their values can never be served
+  again as they are.
+  """
+  @spec outdated_keys(Database.t()) :: [query_key()]
+  def outdated_keys(%Database{memo_table: table} = db) do
+    table
+    |> :ets.select([
+      {{:"$1", :_, :_, :_, :_, :"$2", :_, :_, :_, :"$3", :_, :_, :_}, [],
+       [{{:"$1", :"$2", :"$3"}}]}
+    ])
+    |> Enum.flat_map(fn
+      {{name, _} = key, deps, code} when is_atom(name) and name != :input ->
+        if outdated_code?(db, name, code) or Enum.any?(deps, &observed_outdated?(db, &1)),
+          do: [key],
+          else: []
+
+      {_key, _deps, _code} ->
+        []
+    end)
+  end
+
+  defp outdated_code?(db, name, code),
+    do: Database.query_registered?(db, name) and Database.code_version(db, name) != code
+
+  defp observed_outdated?(db, {:query_code, name, version}),
+    do: Database.code_version(db, name) != version
+
+  defp observed_outdated?(db, {:parallel, _max, members}),
+    do: Enum.any?(members, &observed_outdated?(db, &1))
+
+  defp observed_outdated?(_db, _dependency), do: false
+
   @doc false
   @spec unproven_keys(Database.t()) :: [query_key()]
   def unproven_keys(%Database{dependencies: nil}), do: []
