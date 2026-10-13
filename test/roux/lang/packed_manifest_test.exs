@@ -43,7 +43,7 @@ defmodule Roux.Lang.PackedManifestTest do
     %{a: a, b: {:packed, _, physical, offset, _}} = handles(ctx.path)
     pack_path = Blob.path(ctx.store, physical)
     bytes = File.read!(pack_path)
-    <<prefix::binary-size(offset), byte, rest::binary>> = bytes
+    <<prefix::binary-size(^offset), byte, rest::binary>> = bytes
     File.chmod!(pack_path, 0o644)
     File.write!(pack_path, [prefix, Bitwise.bxor(byte, 1), rest])
     db = restore(ctx.store, ctx.path)

@@ -732,7 +732,7 @@ defmodule Roux.Code do
          root
        ) do
     table_at = byte_size(items) - byte_size(skip_line_items(items, lines))
-    <<entries::binary-size(table_at), table::binary>> = items
+    <<entries::binary-size(^table_at), table::binary>> = items
 
     names = file_names(table, files, root, <<>>)
     <<header::binary, lines::32, files::32, entries::binary, names::binary>>
@@ -791,7 +791,7 @@ defmodule Roux.Code do
 
         Bitwise.bsr(byte, 5) < 7 ->
           size = Bitwise.bsr(byte, 5) + 2
-          <<_value::binary-size(size), rest::binary>> = rest
+          <<_value::binary-size(^size), rest::binary>> = rest
           rest
       end
 

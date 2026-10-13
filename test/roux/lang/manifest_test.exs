@@ -984,7 +984,7 @@ defmodule Roux.Lang.ManifestTest do
 
       for offset <- [0, div(payload_size, 3), div(payload_size, 2), payload_size - 1] do
         at = @header_size + offset
-        <<before::binary-size(at), byte, rest::binary>> = bytes
+        <<before::binary-size(^at), byte, rest::binary>> = bytes
         File.write!(path, [before, Bitwise.bxor(byte, 0x5A), rest])
         assert Manifest.load(path) == :error, "a change at payload byte #{offset} was read"
       end
