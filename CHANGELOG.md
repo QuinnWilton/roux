@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `Roux.Sources.sync/5` reads a file again when the metadata it kept was
+  taken within `recent:` seconds of the file's last write. A file rewritten
+  in the second it was read, with the same size (a rebuild that only moves
+  line numbers), matched that metadata at every later sync, once it was
+  old enough to be trusted, and its new content was never read.
+
 ## 0.3.3 - 2026-10-13
 
 ### Fixed

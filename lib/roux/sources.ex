@@ -11,7 +11,10 @@ defmodule Roux.Sources do
   rebuild changes nothing downstream. A file written within the last
   `recent:` seconds is always read: a modification time has one-second
   granularity, and a quick edit-and-rerun can rewrite a file in the
-  same second with the same size.
+  same second with the same size. So is one whose metadata was taken
+  while it was that recent, at any later sync: rewritten in the second
+  it was read, with the same size, it would match that metadata for
+  good.
 
   Keys whose files are gone are removed from the input
   (`Roux.GC.mark_input_removed/3`).
@@ -22,8 +25,17 @@ defmodule Roux.Sources do
   require Record
   Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
 
-  @typedoc "What `sync/5` keeps of a file: the prefilter's stamp and the content's hash."
-  @type meta :: %{mtime: integer(), size: non_neg_integer(), hash: term()}
+  @typedoc """
+  What `sync/5` keeps of a file: the prefilter's stamp and the content's
+  hash, and `racy: true` when the stamp was taken too soon after the
+  file was written to be trusted.
+  """
+  @type meta :: %{
+          required(:mtime) => integer(),
+          required(:size) => non_neg_integer(),
+          required(:hash) => term(),
+          optional(:racy) => true
+        }
 
   @typedoc """
   What a sync did: the metadata to keep for the next (`%{path => meta}`),
@@ -87,7 +99,8 @@ defmodule Roux.Sources do
         cutoff = job.cutoff
 
         case Map.get(job.prior, path) do
-          %{mtime: ^mtime, size: ^size} = prior when mtime < cutoff ->
+          %{mtime: ^mtime, size: ^size} = prior
+          when mtime < cutoff and not is_map_key(prior, :racy) ->
             # The metadata is keyed by path, not by key: a file new to
             # this input has metadata but no value under it, and is read.
             if Input.exists?(job.db, job.input, key),
@@ -111,6 +124,7 @@ defmodule Roux.Sources do
         changed? = Input.fetch(job.db, job.input, key) != {:ok, value}
         :ok = Input.set(job.db, job.input, key, value)
         meta = %{mtime: mtime, size: size, hash: hash}
+        meta = if mtime < job.cutoff, do: meta, else: Map.put(meta, :racy, true)
         if changed?, do: {:changed, meta}, else: {:unchanged, meta}
 
       {:error, _} ->

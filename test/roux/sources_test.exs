@@ -77,6 +77,30 @@ defmodule Roux.SourcesTest do
     assert %{changed: [:a]} = Sources.sync(db, :file, %{a: a}, first.meta)
   end
 
+  test "a file read moments after it was written is read again, though its stamp holds",
+       %{db: db, tmp_dir: tmp} do
+    # Written a second ago, and read: its stamp is too recent to trust.
+    second = System.os_time(:second) - 1
+    a = Path.join(tmp, "a")
+    File.write!(a, "alpha")
+    File.touch!(a, second)
+
+    first = Sources.sync(db, :file, %{a: a}, %{})
+
+    # Rewritten in the same second, with the same size.
+    File.write!(a, "omega")
+    File.touch!(a, second)
+
+    # Later, by when a stamp that old would be trusted: the content moved.
+    later = Sources.sync(db, :file, %{a: a}, first.meta, recent: 0)
+    assert later.changed == [:a]
+    assert Input.get(db, :file, :a).hash == :erlang.md5("omega")
+    refute Map.has_key?(later.meta[a], :racy)
+
+    # Read once it was old, the stamp is trusted from then on.
+    assert Sources.sync(db, :file, %{a: a}, later.meta, recent: 0).changed == []
+  end
+
   test "removes the keys whose files are gone", %{db: db, tmp_dir: tmp} do
     a = write!(Path.join(tmp, "a"), "alpha")
     b = write!(Path.join(tmp, "b"), "beta")
