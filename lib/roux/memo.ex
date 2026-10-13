@@ -167,7 +167,7 @@ defmodule Roux.Memo do
   or `:none` for a live or inline value. Reads no value bytes.
 
   A packed value's digest identifies the value, not its physical file.
-  Internal storage code uses `held_locator/2` and `Roux.Memo.Value.roots/1`
+  Internal storage code uses `held_locator/2` and Roux.Memo.Value.roots/1
   to find the backing blob.
   """
   @spec held_digest(Database.t(), query_key()) :: {:ok, Blob.digest()} | :none

@@ -6,8 +6,8 @@ defmodule Roux.Test.RawGate do
   every run: the gate is the other process, acting between the check and
   the act.
 
-  The store's file operations are raw (`Roux.Blob.IO`), past the VM's
-  file server, so this hangs on `Roux.Blob.IO`'s hook rather than
+  The store's file operations are raw (Roux.Blob.IO), past the VM's
+  file server, so this hangs on Roux.Blob.IO's hook rather than
   standing in for the server. Install it only in a VM of its own
   (`:peer`): while it is installed, every store operation of the VM goes
   through it.

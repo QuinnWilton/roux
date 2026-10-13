@@ -1,7 +1,7 @@
 defmodule Roux.Test.ModelFS do
   @moduledoc """
   A file system in an ETS table, for the Concuerror scenarios of the
-  blob store (`test/concurrency/blob_test.ex`): `Roux.Blob.IO` answers a
+  blob store (`test/concurrency/blob_test.ex`): Roux.Blob.IO answers a
   process's operations from it once the process `enter/2`s it, so the
   store's own code runs over a file system whose every step is a
   scheduling point Concuerror can interleave.
@@ -28,8 +28,8 @@ defmodule Roux.Test.ModelFS do
   which nothing here minds).
 
   Each actor names the model OS process it belongs to (`enter/2`'s
-  `ospid`), which is what `Roux.Blob.IO.ospid/0` returns to it; its
-  `Roux.Blob.IO.unique/0` counts from 1 per model OS process, as a new
+  `ospid`), which is what Roux.Blob.IO.ospid/0 returns to it; its
+  Roux.Blob.IO.unique/0 counts from 1 per model OS process, as a new
   VM's unique integers restart.
   """
 

@@ -73,7 +73,7 @@ defmodule Roux.Blob do
 
   ## Raw I/O, and touches that refresh
 
-  Every file operation of the store is raw (`Roux.Blob.IO`): it goes
+  Every file operation of the store is raw (Roux.Blob.IO): it goes
   straight to the operating system from the calling process, never
   through the VM's one file server, so a fan-out of lookups
   (`Roux.Runtime.parallel/3`) runs side by side.
@@ -734,7 +734,7 @@ defmodule Roux.Blob do
   whose owner died without removing it is collected after a day.
 
   The directory is new: made exclusively, under a name no other process
-  of the store uses (`Roux.Blob.IO.ospid/0`: the OS pid and a token of
+  of the store uses (Roux.Blob.IO.ospid/0: the OS pid and a token of
   the VM's own), and another name tried should it be there anyway. A
   directory that was there already would be a dead process's leftover,
   which a collection that found it a day old removes, contents and all.
