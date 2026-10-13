@@ -78,8 +78,10 @@ defmodule Roux.Runtime do
 
     # Store the query function so re_execute can find it during validation.
     # This covers both the defquery path (also registered) and direct
-    # execute/4 calls (test closures, ad-hoc queries).
-    Process.put({__MODULE__, :query_fun, query_name}, query_fun)
+    # execute/4 calls (test closures, ad-hoc queries). Keyed by the
+    # database, as served values are: two databases may register different
+    # queries under one name, and validating one must never run the other's.
+    Process.put(query_fun_key(db, query_name), query_fun)
 
     result =
       case Database.query_definition(db, query_name) do
@@ -167,7 +169,10 @@ defmodule Roux.Runtime do
 
       :missing ->
         timeout = apply(module, timeout_fun, [])
-        functions = for {{__MODULE__, :query_fun, _} = k, v} <- Process.get(), do: {k, v}
+        table = db.memo_table
+
+        functions =
+          for {{__MODULE__, :query_fun, ^table, _} = k, v} <- Process.get(), do: {k, v}
 
         Scope.run(db, timeout, fn ->
           Enum.each(functions, fn {k, v} -> Process.put(k, v) end)
@@ -741,14 +746,26 @@ defmodule Roux.Runtime do
 
   defp execute_before_validation?(_db, _key), do: false
 
+  defp query_fun_key(%Database{memo_table: table}, query_name),
+    do: {__MODULE__, :query_fun, table, query_name}
+
   defp re_execute(db, {query_name, key}) do
-    case Process.get({__MODULE__, :query_fun, query_name}) do
+    case Process.get(query_fun_key(db, query_name)) do
       fun when is_function(fun) ->
         execute(db, query_name, key, fun)
 
       nil ->
-        %{module: mod, function: fun} = lookup_query!(db, query_name)
-        apply(mod, fun, [db, key])
+        case lookup_query!(db, query_name) do
+          %{module: mod, function: fun} ->
+            apply(mod, fun, [db, key])
+
+          %{} ->
+            raise ArgumentError,
+                  "query #{inspect(query_name)} is stale and validation must re-execute it, " <>
+                    "but it is registered without a module and function, and this process " <>
+                    "has not run it against this database (register it with defquery, or " <>
+                    "with :module and :function)"
+        end
     end
 
     :ok
@@ -1213,18 +1230,24 @@ defmodule Roux.Runtime do
   end
 
   @doc """
-  Drops the values this process cached while serving `db`'s queries.
+  Drops the values, and the query functions, this process cached while
+  serving `db`'s queries.
 
   A process that serves queries keeps every value it served on its own
-  heap until the key is recomputed or the process exits. A long-lived
-  process that shuts a database down should call this alongside
+  heap until the key is recomputed or the process exits, and every query
+  function it ran, for validation to re-execute. A long-lived process
+  that shuts a database down should call this alongside
   `Roux.Database.shutdown/1`.
   """
   @spec drop_cached_values(Database.t()) :: :ok
   def drop_cached_values(%Database{memo_table: table}) do
-    for {{@values_key, ^table, _query_key} = key, _} <- Process.get(), do: Process.delete(key)
+    for {key, _} <- Process.get(), cached_for?(key, table), do: Process.delete(key)
     :ok
   end
+
+  defp cached_for?({@values_key, table, _query_key}, table), do: true
+  defp cached_for?({__MODULE__, :query_fun, table, _query_name}, table), do: true
+  defp cached_for?(_key, _table), do: false
 
   defp lookup_input_durability(%Database{input_registry: reg}, input_name) do
     case :ets.lookup(reg, input_name) do

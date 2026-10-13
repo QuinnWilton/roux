@@ -604,7 +604,7 @@ defmodule Roux.Lang.ManifestTest do
 
         # Another body, and the same value: :len re-runs, :parity is kept.
         len2 = fn db, key -> db |> Runtime.input(:source_text, key) |> String.length() end
-        Process.put({Runtime, :query_fun, :len}, len2)
+        Process.put({Runtime, :query_fun, db2.memo_table, :len}, len2)
 
         assert Runtime.execute(db2, :parity, "a", fn _db, _key -> flunk("recomputed") end) ==
                  0

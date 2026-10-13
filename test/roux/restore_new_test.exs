@@ -6,15 +6,25 @@ defmodule Roux.RestoreNewTest do
   defp database do
     db = Database.new()
     Input.register(db, Input.define(:source))
-    Database.register_query(db, :leaf, %{code_version: "leaf-v1"})
+    # Validation re-executes a stale leaf of a restored database, which
+    # has not run it, from its registration.
+    Database.register_query(db, :leaf, %{
+      code_version: "leaf-v1",
+      module: __MODULE__,
+      function: :leaf_body
+    })
+
     Database.register_query(db, :root, %{})
     on_exit(fn -> stop(db) end)
     db
   end
 
-  defp leaf(db, key) do
-    Runtime.execute(db, :leaf, key, fn db, _ -> Runtime.input(db, :source, :all) end)
-  end
+  @doc false
+  def leaf_body(db, key), do: Runtime.execute(db, :leaf, key, &leaf_value/2)
+
+  defp leaf_value(db, _key), do: Runtime.input(db, :source, :all)
+
+  defp leaf(db, key), do: Runtime.execute(db, :leaf, key, &leaf_value/2)
 
   defp root(db) do
     Runtime.execute(db, :root, :all, fn db, _ ->

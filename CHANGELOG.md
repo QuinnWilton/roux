@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Validation re-executes a stale query with the function its own database
+  last ran under that name. The function was kept per process under the
+  query's name alone, so a process serving two databases whose queries share
+  a name (two roux-based Mix compilers, say) could validate one with the
+  other's: storing, and persisting, the other's value, or raising that a
+  query only the other registers is not registered.
+  `Roux.Runtime.drop_cached_values/1` drops a database's functions too.
+- A stale query that is registered without a module and function, and that
+  this process has not run against its database, raises an `ArgumentError`
+  saying so when validation must re-execute it, instead of a `MatchError`.
+
 ## 0.3.2 - 2026-10-08
 
 ### Changed

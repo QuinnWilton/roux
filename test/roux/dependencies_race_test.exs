@@ -124,7 +124,7 @@ defmodule Roux.DependenciesRaceTest do
     assert Runtime.execute(db, :versioned_parent, :a, parent) == 1
     Database.register_query(db, :versioned_leaf, %{code_version: "registered"})
     leaf = fn _, _ -> 2 end
-    Process.put({Runtime, :query_fun, :versioned_leaf}, leaf)
+    Process.put({Runtime, :query_fun, db.memo_table, :versioned_leaf}, leaf)
     parent = fn db, key -> Runtime.execute(db, :versioned_leaf, key, leaf) end
     assert Runtime.execute(db, :versioned_parent, :a, parent) == 2
   end

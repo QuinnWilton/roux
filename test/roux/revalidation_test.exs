@@ -101,7 +101,7 @@ defmodule Roux.RevalidationTest do
       Runtime.input(db, :source, :all)
     end
 
-    Process.put({Runtime, :query_fun, :root}, compact)
+    Process.put({Runtime, :query_fun, restored.memo_table, :root}, compact)
     log = QueryLog.start(restored)
 
     try do
