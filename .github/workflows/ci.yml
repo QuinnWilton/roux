@@ -110,3 +110,45 @@ jobs:
           restore-keys: dialyzer-${{ runner.os }}-${{ steps.setup-beam.outputs.otp-version }}-${{ steps.setup-beam.outputs.elixir-version }}-
       - run: mix deps.get
       - run: mix dialyzer
+
+  argus:
+    name: Argus
+    runs-on: ubuntu-latest
+    env:
+      # bin/argus analyzes the dev build, as it does locally.
+      MIX_ENV: dev
+      # The runner has Rust, with which argus would build its engines from
+      # source; naming a cargo that is not there makes it use the release's
+      # prebuilt ones.
+      ARGUS_CARGO: /nonexistent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        id: setup-beam
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: argus-${{ runner.os }}-${{ steps.setup-beam.outputs.otp-version }}-${{ steps.setup-beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: argus-${{ runner.os }}-${{ steps.setup-beam.outputs.otp-version }}-${{ steps.setup-beam.outputs.elixir-version }}-
+      - name: Restore argus's escript, engines and store
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/argus
+          key: argus-cache-${{ runner.os }}-${{ hashFiles('bin/argus') }}
+          restore-keys: argus-cache-${{ runner.os }}-
+      - run: mix deps.get
+      # Every finding is shown; one at error severity (argus.config) fails the job.
+      - name: Analyze
+        run: |
+          bin/argus --color always
+          bin/argus --format json > "$RUNNER_TEMP/argus.json"
+          errors=$(jq '[.[] | select(.severity == "error")] | length' "$RUNNER_TEMP/argus.json")
+          if [ "$errors" -gt 0 ]; then
+            echo "::error::argus reported $errors error findings"
+            exit 1
+          fi

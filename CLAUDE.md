@@ -90,7 +90,13 @@ mix format                    # format code
 mix format --check-formatted  # check formatting
 mix credo --strict            # lint
 mix dialyzer                  # static analysis
+bin/argus                     # argus's analyses (argus.config), from its released escript
 ```
+
+roux cannot depend on argus (argus depends on roux), so `bin/argus` runs a
+pinned argus escript, downloaded once and checked against its SHA-256, over
+the dev build's beams. Bump `version` and `sha256` in it to move to a newer
+argus.
 
 ## Commit message style
 
