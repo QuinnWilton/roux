@@ -11,6 +11,13 @@
   grew with every project ever built. Its owner's next run finds them
   missing, a cache miss, and computes them again.
 
+### Fixed
+
+- `Roux.Blob.gc/2` says when its mark was partial (`partial: true` in its
+  stats: a root or trace it could not read), in which case it removes no
+  content-addressed entry; a collection that could not read a trace
+  raised instead of reporting.
+
 ## 0.3.5 - 2026-10-14
 
 ### Fixed

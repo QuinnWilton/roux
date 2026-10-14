@@ -516,7 +516,7 @@ defmodule Roux.BlobTest do
       File.mkdir_p!(Path.join(store.root, "roots"))
       File.write!(Path.join([store.root, "roots", "unreadable"]), "not a root")
 
-      assert %{removed: 0} = Blob.gc(store)
+      assert %{removed: 0, partial: true} = Blob.gc(store)
       assert Blob.member?(store, digest)
     end
   end
@@ -598,7 +598,7 @@ defmodule Roux.BlobTest do
 
       age!(root, 31 * @day)
 
-      Blob.gc(store)
+      assert %{partial: false} = Blob.gc(store)
       refute Blob.member?(store, stale)
       refute File.exists?(root)
       assert Blob.member?(store, fresh)

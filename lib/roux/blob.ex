@@ -806,11 +806,17 @@ defmodule Roux.Blob do
   @type gc_option ::
           {:grace, non_neg_integer()} | {:keep, non_neg_integer()} | {:roots, non_neg_integer()}
 
-  @typedoc "What a collection did."
+  @typedoc """
+  What a collection did: the entries it removed and their bytes, the
+  entries the live roots and pointers name, and whether its mark was
+  partial (a root or pointer it could not read), in which case it
+  removed no content-addressed entry.
+  """
   @type gc_stats :: %{
           removed: non_neg_integer(),
           bytes: non_neg_integer(),
-          kept: non_neg_integer()
+          kept: non_neg_integer(),
+          partial: boolean()
         }
 
   @doc """
@@ -842,7 +848,7 @@ defmodule Roux.Blob do
     # A root or pointer that could not be read — being replaced as it was
     # looked at, say — might name any entry: nothing is swept on a
     # partial mark.
-    {marked, removed} =
+    {marked, removed, partial?} =
       case {pointers, root_digests(store, now - grace, now - roots)} do
         {{:ok, pointed}, {:ok, retained}} ->
           marked = MapSet.union(retained, pointed)
@@ -855,10 +861,10 @@ defmodule Roux.Blob do
                 {:ok, size} <- [sweep(store, path, now - grace, name <> ".")],
                 do: size
 
-          {marked, removed}
+          {marked, removed, false}
 
         {pointed, _retained} ->
-          {with({:ok, marked} <- pointed, do: marked), []}
+          {with({:ok, marked} <- pointed, do: marked, else: (_ -> MapSet.new())), [], true}
       end
 
     # What a process that died left behind: its scratch directories, its
@@ -872,7 +878,8 @@ defmodule Roux.Blob do
     %{
       removed: length(removed) + length(swept_pointers),
       bytes: Enum.sum(removed) + Enum.sum(swept_pointers),
-      kept: MapSet.size(marked)
+      kept: MapSet.size(marked),
+      partial: partial?
     }
   end
 
