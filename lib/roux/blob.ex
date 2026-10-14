@@ -799,9 +799,12 @@ defmodule Roux.Blob do
     * `:grace` — seconds an unmarked entry is kept after it was last
       written or touched (default a day);
     * `:keep` — seconds an action-cache entry or trace is kept after it
-      was last used, and counts as a root (default a week).
+      was last used, and counts as a root (default a week);
+    * `:roots` — seconds a root counts after its owner last retained it
+      (default 30 days), whether or not its owner is still there.
   """
-  @type gc_option :: {:grace, non_neg_integer()} | {:keep, non_neg_integer()}
+  @type gc_option ::
+          {:grace, non_neg_integer()} | {:keep, non_neg_integer()} | {:roots, non_neg_integer()}
 
   @typedoc "What a collection did."
   @type gc_stats :: %{
@@ -817,11 +820,18 @@ defmodule Roux.Blob do
   and scratch directories and writes a dead process left behind. A grace
   or keep period shorter than the store's window (`window/1`) is taken as
   the window: an entry in use may look that much older than it is.
+
+  A root its owner has not retained for longer than `roots:` is removed
+  with what only it named: a manifest of a project nobody has built for
+  a month (another checkout, an old worktree, a release's build) keeps
+  nothing alive for good. Its owner's next run finds those entries
+  missing, which is a cache miss: it computes them again.
   """
   @spec gc(t(), [gc_option()]) :: gc_stats()
   def gc(%__MODULE__{root: root} = store, opts \\ []) do
     grace = max(Keyword.get(opts, :grace, @day), window(store))
     keep = max(Keyword.get(opts, :keep, 7 * @day), window(store))
+    roots = max(Keyword.get(opts, :roots, 30 * @day), grace)
     now = System.os_time(:second)
 
     # The pointers' fate first, then what they name: a pointer used as it
@@ -833,9 +843,9 @@ defmodule Roux.Blob do
     # looked at, say — might name any entry: nothing is swept on a
     # partial mark.
     {marked, removed} =
-      case {pointers, root_digests(store, now - grace)} do
-        {{:ok, pointed}, {:ok, roots}} ->
-          marked = MapSet.union(roots, pointed)
+      case {pointers, root_digests(store, now - grace, now - roots)} do
+        {{:ok, pointed}, {:ok, retained}} ->
+          marked = MapSet.union(retained, pointed)
 
           removed =
             for aa <- ls(Path.join(root, "cas")),
@@ -847,7 +857,7 @@ defmodule Roux.Blob do
 
           {marked, removed}
 
-        {pointed, _roots} ->
+        {pointed, _retained} ->
           {with({:ok, marked} <- pointed, do: marked), []}
       end
 
@@ -909,8 +919,8 @@ defmodule Roux.Blob do
   # roots go — but only a root not retained since `since`: a manifest
   # being rewritten is missing for the same moment (`Roux.Lang.Manifest`
   # renames it into place), and its owner retains its roots again right
-  # after.
-  defp root_digests(%__MODULE__{root: root}, since) do
+  # after. A root not retained since `stale` is dead whoever its owner is.
+  defp root_digests(%__MODULE__{root: root}, since, stale) do
     dir = Path.join(root, "roots")
 
     Enum.reduce_while(ls(dir), {:ok, MapSet.new()}, fn name, {:ok, marked} ->
@@ -918,7 +928,7 @@ defmodule Roux.Blob do
 
       case read_root(path, 3) do
         {:ok, {owner, digests}} ->
-          if live_owner?(owner, path, since),
+          if live_root?(owner, path, since, stale),
             do: {:cont, {:ok, MapSet.union(marked, MapSet.new(digests))}},
             else: {:cont, {:ok, marked}}
 
@@ -944,6 +954,15 @@ defmodule Roux.Blob do
 
       _ ->
         if match?({:error, :enoent}, RawIO.lstat(path)), do: :gone, else: :unreadable
+    end
+  end
+
+  defp live_root?(owner, path, since, stale) do
+    if older_than?(path, stale) do
+      RawIO.delete(path)
+      false
+    else
+      live_owner?(owner, path, since)
     end
   end
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `Roux.Blob.gc/2` drops a root its owner has not retained for 30 days
+  (`roots:`), and the entries only it named, though its owner (a
+  manifest) is still there. A manifest of a project nobody has built since
+  (another checkout, an old worktree) kept its entries for good: a store
+  grew with every project ever built. Its owner's next run finds them
+  missing, a cache miss, and computes them again.
+
 ## 0.3.5 - 2026-10-14
 
 ### Fixed

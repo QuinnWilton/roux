@@ -579,6 +579,35 @@ defmodule Roux.BlobTest do
       refute Blob.member?(store, kept)
     end
 
+    test "a root its owner has not retained for `roots:` goes, owner or not", %{
+      store: store,
+      tmp_dir: tmp
+    } do
+      owner = Path.join(tmp, "manifest")
+      File.write!(owner, "")
+      {:ok, stale} = Blob.put(store, "named by a root nobody retains")
+      {:ok, fresh} = Blob.put(store, "named by a root retained today")
+      :ok = Blob.retain(store, owner, [stale])
+      :ok = Blob.retain(store, :fresh_owner, [fresh])
+      for digest <- [stale, fresh], do: age!(Blob.path(store, digest), 2 * @day)
+
+      [root] =
+        for path <- Path.wildcard(Path.join([store.root, "roots", "*"])),
+            match?({^owner, _}, :erlang.binary_to_term(File.read!(path))),
+            do: path
+
+      age!(root, 31 * @day)
+
+      Blob.gc(store)
+      refute Blob.member?(store, stale)
+      refute File.exists?(root)
+      assert Blob.member?(store, fresh)
+
+      # Retained again, the owner's root counts again.
+      :ok = Blob.retain(store, owner, [stale])
+      assert Path.wildcard(Path.join([store.root, "roots", "*"])) |> length() == 2
+    end
+
     test "removes what a dead process left behind a day ago", %{store: store} do
       left = Path.join([store.root, "scratch", "99999-1"])
       File.mkdir_p!(left)
