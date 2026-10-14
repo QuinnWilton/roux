@@ -19,6 +19,11 @@
   registration, and none of the key's waiters. Removed by key, a claim
   another process had taken since went too, and a second process computed
   the key, while the new claim's waiters lost their wakeup.
+- An edit keeps the reverse-dependency edges of a query published while it
+  ran. It read the query's memo before the publication wrote it and the
+  publication's node after, took the published generation for an
+  abandoned one and removed its edges, so later edits to the query's
+  dependencies did not reach it.
 
 ## 0.3.4 - 2026-10-13
 

@@ -337,11 +337,19 @@ defmodule Roux.Dependencies do
         [{^generation, ^key, _certificate, _deps, owner} = node] ->
           # An in-flight publication needs its edges before its memo exists.
           # A killed publisher's edges can be collected on the next edit.
-          if is_pid(owner) and Process.alive?(owner) do
-            true
-          else
-            remove_node(index, node)
-            false
+          # The memo is read again first: a publication that wrote its memo
+          # since the read above (and then cleared its owner, or was killed)
+          # is the current generation, whose edges must stay.
+          cond do
+            is_pid(owner) and Process.alive?(owner) ->
+              true
+
+            Memo.generation(db, key) == generation ->
+              true
+
+            true ->
+              remove_node(index, node)
+              false
           end
 
         [] ->
