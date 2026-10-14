@@ -14,6 +14,11 @@
   released it meanwhile. That release deleted every waiter of the key,
   those of the new claim included, which then waited for the new claimant
   to exit: forever, for a long-lived one (a GenServer, an LSP loop).
+- Cancelling a task (a timeout of `Roux.Cancellation.await_or_cancel/3`,
+  `cancel_dependents/2`, `cancel_all/1`) removes only that task's claim and
+  registration, and none of the key's waiters. Removed by key, a claim
+  another process had taken since went too, and a second process computed
+  the key, while the new claim's waiters lost their wakeup.
 
 ## 0.3.4 - 2026-10-13
 

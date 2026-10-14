@@ -289,6 +289,26 @@ defmodule Roux.CancellationTest do
       assert [] = :ets.lookup(db.task_registry, query_key)
     end
 
+    test "kill_task leaves a newer claim of the key, and its waiters, alone", %{db: db} do
+      query_key = {:q, :k}
+      old = spawn_blocking_task(db, query_key)
+      old_ref = Process.monitor(old)
+
+      # The await reads `old` from the registry at once; the key is claimed
+      # anew, and waited on, before it times out and kills `old`.
+      awaiting = Task.async(fn -> Cancellation.await_or_cancel(db, query_key, 300) end)
+      Process.sleep(100)
+      new = spawn_blocking_task(db, query_key)
+      :ets.insert(db.dedup_waiters, {query_key, self()})
+
+      assert :cancelled = Task.await(awaiting)
+      assert_receive {:DOWN, ^old_ref, :process, ^old, :killed}
+      assert [{^query_key, ^new}] = :ets.lookup(db.dedup_table, query_key)
+      assert [{^query_key, ^new}] = :ets.lookup(db.task_registry, query_key)
+      assert [{^query_key, _}] = :ets.lookup(db.dedup_waiters, query_key)
+      send(new, :unblock)
+    end
+
     test "telemetry events are emitted on cancel", %{db: db} do
       test_pid = self()
 

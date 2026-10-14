@@ -124,8 +124,9 @@ defmodule Roux.Cancellation do
 
       {:DOWN, ^ref, :process, ^pid, _reason} ->
         # Task was killed or crashed. Clean up registry in case the
-        # kill bypassed Runtime's after block (e.g. external :kill).
-        unregister_task(db, query_key)
+        # kill bypassed Runtime's after block (e.g. external :kill): its
+        # own row only, as another task may have claimed the key since.
+        :ets.delete_object(db.task_registry, {query_key, pid})
 
         # Check memo in case it completed between our registry lookup
         # and the kill signal.
@@ -154,14 +155,16 @@ defmodule Roux.Cancellation do
     Process.exit(pid, :kill)
 
     # Manual cleanup since :kill is untrappable — after blocks don't run.
-    :ets.delete(db.dedup_table, query_key)
-    :ets.delete(db.task_registry, query_key)
+    # Only the killed task's rows: once it is dead, a waiter woken by its
+    # `:DOWN` can claim the key and register under it, and deleting by key
+    # would take that live claim (two computations of one key) and its
+    # registration.
+    :ets.delete_object(db.dedup_table, {query_key, pid})
+    :ets.delete_object(db.task_registry, {query_key, pid})
 
-    # Anyone blocked on this key is woken by their monitor firing on the
-    # kill, so there is no completion message to send — but their rows
-    # would otherwise sit here until the next successful computation of the
-    # same key swept them up.
-    :ets.delete(db.dedup_waiters, query_key)
+    # The dead task's waiters are woken by their monitors, and each deletes
+    # its own row as it wakes (Runtime.forget_waiter/2); the rows of a newer
+    # claim's waiters must stay for that claim's completion message.
 
     {query_name, key} = decompose_query_key(query_key)
     Telemetry.cancel_task(Database.id(db), query_name, key, reason)
