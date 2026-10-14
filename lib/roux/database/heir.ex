@@ -48,6 +48,10 @@ defmodule Roux.Database.Heir do
 
   @impl true
   def init(opts) do
+    # The supervisor's shutdown is an exit signal: trapped, it runs
+    # terminate/2, which erases the published PID. Untrapped, the process
+    # dies at once and leaves one :persistent_term entry per database.
+    Process.flag(:trap_exit, true)
     sup_pid = Keyword.fetch!(opts, :sup_pid)
     :persistent_term.put({__MODULE__, sup_pid}, self())
     {:ok, %{tables: %{}, sup_pid: sup_pid}}

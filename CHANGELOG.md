@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `Roux.Database.shutdown/1` leaves nothing in `:persistent_term`. The
+  table heir publishes its PID there and erased it in `terminate/2`, which
+  never ran: the heir did not trap exits, so the supervisor's shutdown
+  killed it. Every database a VM started (each test's, each session's)
+  left an entry behind.
+
 ## 0.3.4 - 2026-10-13
 
 ### Fixed

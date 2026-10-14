@@ -86,6 +86,15 @@ defmodule Roux.DatabaseTest do
       assert :ets.info(db.intern_registry) == :undefined
       assert :ets.info(db.entity_registry) == :undefined
     end
+
+    test "leaves no published heir behind" do
+      db = Database.new()
+      assert is_pid(Roux.Database.Heir.whereis(db.supervisor))
+
+      Database.shutdown(db)
+
+      assert :persistent_term.get({Roux.Database.Heir, db.supervisor}, nil) == nil
+    end
   end
 
   describe "register_query/3" do
