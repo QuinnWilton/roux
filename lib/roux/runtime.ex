@@ -1121,18 +1121,19 @@ defmodule Roux.Runtime do
 
   # Delete the claim BEFORE reading the waiter list — see claim_dedup/2.
   #
-  # `lookup` + `delete` rather than the atomic `take/2`, because Concuerror
-  # does not model `ets:take` and this is precisely the code its dedup
-  # scenarios exist to explore. Losing the atomicity is safe: a waiter that
-  # registers between the lookup and the delete gets dropped without a
-  # message, but it registered AFTER the claim row was already deleted, so
-  # its own re-check finds no claim and it returns immediately. The message
-  # is the fast path; the re-check is the correctness guarantee.
+  # Only the rows read are deleted, each by `delete_object/2`: once the
+  # claim row is gone another process can claim the key, and a waiter of
+  # that claim registers here too. A key-wide `delete/2` would take its row
+  # unread, and with it the only completion message it waits for: it would
+  # hang for as long as the new claimant lives. A row registered after the
+  # lookup stays for its own claimant to find. A waiter read here that was
+  # waiting on such a newer claim wakes early, finds no memo entry, and
+  # waits again.
   defp release_dedup(db, query_key) do
     :ets.delete(db.dedup_table, query_key)
 
     waiters = :ets.lookup(db.dedup_waiters, query_key)
-    :ets.delete(db.dedup_waiters, query_key)
+    Enum.each(waiters, &:ets.delete_object(db.dedup_waiters, &1))
 
     Enum.each(waiters, fn {^query_key, pid} -> send(pid, {:roux_computed, query_key}) end)
     :ok

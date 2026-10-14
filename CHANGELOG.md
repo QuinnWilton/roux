@@ -9,6 +9,11 @@
   never ran: the heir did not trap exits, so the supervisor's shutdown
   killed it. Every database a VM started (each test's, each session's)
   left an entry behind.
+- A demand waiting on a query another process is computing is woken when
+  that process finishes, also when the key's previous claimant failed and
+  released it meanwhile. That release deleted every waiter of the key,
+  those of the new claim included, which then waited for the new claimant
+  to exit: forever, for a long-lived one (a GenServer, an LSP loop).
 
 ## 0.3.4 - 2026-10-13
 

@@ -158,6 +158,86 @@ defmodule Roux.Concurrency.RuntimeDedupCompletionRaceTest do
   end
 end
 
+defmodule Roux.Concurrency.RuntimeDedupNewClaimTest do
+  @moduledoc """
+  A claimant releases a key it failed to compute, while another process
+  claims it anew and a third waits on that new claim. The new claimant
+  stays alive after computing, as a GenServer or an LSP loop would, so
+  the waiter is woken only by its completion message: releasing the
+  failed claim must not delete the waiter's row.
+  """
+
+  alias Roux.Runtime
+
+  # Three processes and a raise: unbounded, the search does not finish.
+  # The lost wakeup takes two preemptions (the failed claimant between its
+  # waiter lookup and delete, and the new claimant before its own release).
+  def concuerror_options do
+    [treat_as_normal: [:shutdown], dpor: :source, scheduling_bound: 3, depth_bound: 5_000]
+  end
+
+  def test do
+    db = make_db()
+    parent = self()
+
+    spawn(fn ->
+      try do
+        Runtime.execute(db, :q, :k, fn _db, _key -> raise "boom" end)
+      rescue
+        RuntimeError -> :ok
+      end
+
+      send(parent, :failed)
+    end)
+
+    claimant =
+      spawn(fn ->
+        Runtime.execute(db, :q, :k, fn _db, _key -> :value end)
+        send(parent, :claimant_done)
+        receive(do: (:stop -> :ok))
+      end)
+
+    spawn(fn ->
+      send(parent, {:waiter, Runtime.execute(db, :q, :k, fn _db, _key -> :value end)})
+    end)
+
+    :value = receive(do: ({:waiter, value} -> value))
+    receive(do: (:claimant_done -> :ok))
+    receive(do: (:failed -> :ok))
+    send(claimant, :stop)
+
+    [] = :ets.lookup(db.dedup_table, {:q, :k})
+    cleanup(db)
+  end
+
+  defp make_db do
+    memo = :ets.new(:memo, [:set, :public, read_concurrency: true, write_concurrency: true])
+    dedup = :ets.new(:dedup, [:set, :public, write_concurrency: true])
+    waiters = :ets.new(:waiters, [:duplicate_bag, :public, write_concurrency: true])
+    reg = :ets.new(:reg, [:set, :public, read_concurrency: true])
+
+    %Roux.Database{
+      memo_table: memo,
+      revision: Roux.Revision.new(),
+      query_registry: reg,
+      input_registry: reg,
+      task_registry: reg,
+      dedup_table: dedup,
+      dedup_waiters: waiters,
+      intern_registry: reg,
+      entity_registry: reg,
+      table_owner: self(),
+      supervisor: self()
+    }
+  end
+
+  defp cleanup(db) do
+    :ets.delete(db.memo_table)
+    :ets.delete(db.dedup_table)
+    :ets.delete(db.input_registry)
+  end
+end
+
 defmodule Roux.Concurrency.RuntimeWriteBufferingTest do
   @moduledoc """
   A process crashes (raises) during query computation. The memo table
