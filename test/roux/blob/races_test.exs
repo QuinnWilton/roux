@@ -11,6 +11,7 @@ defmodule Roux.Blob.RacesTest do
 
   alias Roux.Blob
   alias Roux.Blob.Trace
+  alias Roux.Blob.Trace.Pack
   alias Roux.Test.RawGate
 
   @moduletag :tmp_dir
@@ -106,6 +107,32 @@ defmodule Roux.Blob.RacesTest do
 
       assert put == :ok
       assert [%{value: {:value, 1}}] = Trace.fetch(store, :fresh)
+    end
+  end
+
+  describe "a trace pack's flush" do
+    test "publishes its index when a collection removes the directory it just made",
+         %{tmp_dir: tmp} do
+      store = store!(tmp)
+      dir = Path.join([store.root, "traces", "pack-v1-" <> Blob.term_digest(:group)])
+
+      # The directory goes as the flush asks whether its index is there.
+      gate = %{
+        name: :gc,
+        ops: [:read_file_info],
+        path: dir,
+        prefix: true,
+        action: {File, :rmdir, [dir]}
+      }
+
+      {written, %{gc: :ok}} =
+        gated(peer!(), [gate], {Roux.Test.PackWriter, :write, [store, :group, :name, :value]})
+
+      assert written == :ok
+
+      Pack.with_group(store, :group, fn ->
+        assert [%{value: :value}] = Pack.fetch(store, :name)
+      end)
     end
   end
 

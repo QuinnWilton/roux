@@ -221,8 +221,7 @@ defmodule Roux.Blob.Trace.Pack do
       index = {:roux_trace_pack, 1, state.group, blob, entries, Enum.sort(refs)}
       {digest, bytes} = Blob.encode_term(index)
       path = Path.join(state.dir, digest)
-      :ok = RawIO.mkdir_p(state.dir)
-      :ok = Blob.install(store, path, bytes)
+      :ok = install_index(store, state.dir, path, bytes, 2)
       cached = Map.put(state.indexes, path, {blob, entries})
 
       Process.put(@context, %{
@@ -236,6 +235,18 @@ defmodule Roux.Blob.Trace.Pack do
     end
 
     :ok
+  end
+
+  # A collection removes a pack's directory once it is empty and idle
+  # (`Roux.Blob.gc/2`): one removed between making it and installing the
+  # index into it is made again.
+  defp install_index(store, dir, path, bytes, attempts) do
+    :ok = RawIO.mkdir_p(dir)
+
+    case Blob.install(store, path, bytes) do
+      {:error, :enoent} when attempts > 1 -> install_index(store, dir, path, bytes, attempts - 1)
+      result -> result
+    end
   end
 
   defp indexes(%{lookup: :snapshot, listing: listing} = state) when is_list(listing),
