@@ -13,6 +13,12 @@
 
 ### Fixed
 
+- `Roux.Blob.gc/2` removes a trace's directory once it is empty and idle.
+  A collection removed traces but never their directories, one per name
+  ever traced: an argus store held 184,829 empty directories among
+  306,949 entries, and every collection listed them all.
+  `Roux.Blob.Trace.put/5` makes its directory again when a collection
+  removes it between the put's making and installing.
 - `Roux.Blob.gc/2` says when its mark was partial (`partial: true` in its
   stats: a root or trace it could not read), in which case it removes no
   content-addressed entry; a collection that could not read a trace

@@ -608,6 +608,23 @@ defmodule Roux.BlobTest do
       assert Path.wildcard(Path.join([store.root, "roots", "*"])) |> length() == 2
     end
 
+    test "removes a trace's directory once it is empty and idle", %{store: store} do
+      traces = Path.join(store.root, "traces")
+      idle = Path.join(traces, "idle")
+      recent = Path.join(traces, "recent")
+      File.mkdir_p!(idle)
+      File.mkdir_p!(recent)
+      age!(idle, 3 * 60 * 60)
+      :ok = Trace.put(store, :kept, [{1, 1}], :value)
+      [kept] = Path.wildcard(Path.join(traces, "*")) -- [idle, recent]
+      age!(kept, 3 * 60 * 60)
+
+      Blob.gc(store)
+      refute File.exists?(idle)
+      assert File.dir?(recent)
+      assert [%{value: :value}] = Trace.fetch(store, :kept)
+    end
+
     test "removes what a dead process left behind a day ago", %{store: store} do
       left = Path.join([store.root, "scratch", "99999-1"])
       File.mkdir_p!(left)

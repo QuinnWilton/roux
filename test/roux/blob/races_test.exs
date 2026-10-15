@@ -91,6 +91,24 @@ defmodule Roux.Blob.RacesTest do
     end
   end
 
+  describe "a trace put" do
+    # A collection removes a trace's directory once it is empty and idle;
+    # one removed after the put made it, before it installs, is made again.
+    test "puts its trace when a collection removes the directory it just made",
+         %{tmp_dir: tmp} do
+      store = store!(tmp)
+      dir = Path.join([store.root, "traces", Blob.term_digest(:fresh)])
+
+      gate = %{name: :gc, ops: [:list_dir], path: dir, action: {File, :rmdir, [dir]}}
+
+      {put, %{gc: :ok}} =
+        gated(peer!(), [gate], {Trace, :put, [store, :fresh, [{1, 1}], {:value, 1}]})
+
+      assert put == :ok
+      assert [%{value: {:value, 1}}] = Trace.fetch(store, :fresh)
+    end
+  end
+
   describe "a trace lookup" do
     # A trace last used three hours ago (longer than the store's window:
     # a hit touches it, and a prune may take it), and its file.

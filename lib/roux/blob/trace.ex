@@ -114,6 +114,14 @@ defmodule Roux.Blob.Trace do
     group = Blob.term_digest(deps)
     data = :erlang.term_to_binary({name, deps, value}, [:deterministic, {:compressed, 1}])
     digest = Blob.digest(data)
+
+    install(store, dir, group, data, digest, keep, 2)
+  end
+
+  # A collection removes a trace's directory once it is empty and idle
+  # (`Roux.Blob.gc/2`): one removed between making it and installing the
+  # version into it is made again.
+  defp install(store, dir, group, data, digest, keep, attempts) do
     now = System.os_time(:microsecond)
 
     with :ok <- RawIO.mkdir_p(dir) do
@@ -130,15 +138,22 @@ defmodule Roux.Blob.Trace do
             if digest_of(newest) == digest, do: newest, else: version_name(group, now, digest)
         end
 
-      with :ok <- Blob.install(store, Path.join(dir, file), data) do
-        superseded = time(now - @superseded_grace)
+      case Blob.install(store, Path.join(dir, file), data) do
+        :ok ->
+          superseded = time(now - @superseded_grace)
 
-        for other <- before,
-            other != file,
-            written_at(other) < superseded,
-            do: Blob.discard(store, Path.join(dir, other))
+          for other <- before,
+              other != file,
+              written_at(other) < superseded,
+              do: Blob.discard(store, Path.join(dir, other))
 
-        prune(store, dir, group, keep)
+          prune(store, dir, group, keep)
+
+        {:error, :enoent} when attempts > 1 ->
+          install(store, dir, group, data, digest, keep, attempts - 1)
+
+        error ->
+          error
       end
     end
   end

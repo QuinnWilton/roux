@@ -1003,11 +1003,15 @@ defmodule Roux.Blob do
   # `{:ok, digests}`, or `:partial` when one could not be read — with the
   # sizes of those swept.
   defp pointers(%__MODULE__{root: root} = store, since) do
+    idle = System.os_time(:second) - window(store)
+
     for kind <- ["ac", "traces"],
         dir <- ls(Path.join(root, kind)),
         reduce: {{:ok, MapSet.new()}, []} do
       {marked, swept} ->
-        {dir_marked, dir_swept} = pointer_dir(store, Path.join([root, kind, dir]), since, 3)
+        path = Path.join([root, kind, dir])
+        {dir_marked, dir_swept} = pointer_dir(store, path, since, 3)
+        if kind == "traces", do: remove_idle_dir(path, idle)
 
         marked =
           case {marked, dir_marked} do
@@ -1017,6 +1021,18 @@ defmodule Roux.Blob do
 
         {marked, dir_swept ++ swept}
     end
+  end
+
+  # A trace's directory outlives its last version, and a store's names
+  # are many: one per module, query and argument it ever traced. One left
+  # empty and untouched for the store's window goes. rmdir/1 removes only
+  # an empty directory, so a version written meanwhile keeps it; a put
+  # that finds the directory gone between making it and installing makes
+  # it again (`Roux.Blob.Trace.put/5`). One emptied by this collection is
+  # touched by that, and goes with the next.
+  defp remove_idle_dir(dir, idle) do
+    if older_than?(dir, idle), do: RawIO.rmdir(dir)
+    :ok
   end
 
   # A directory of pointers. One gone before it could be read was
